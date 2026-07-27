@@ -5,10 +5,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import {
-  runMigrations,
-  runMigrationsThroughForCompatibilityTest,
-} from './index.js';
+import { runMigrations, runMigrationsThroughForCompatibilityTest } from './index.js';
 
 const cleanupPaths: string[] = [];
 

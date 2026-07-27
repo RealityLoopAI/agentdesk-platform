@@ -251,9 +251,10 @@ describe('Router cross-channel Conversation Lane', () => {
       }),
     );
 
-    const session = getDb()
-      .prepare('SELECT owner_user_id, conversation_lane_id FROM sessions')
-      .get() as { owner_user_id: string; conversation_lane_id: string | null };
+    const session = getDb().prepare('SELECT owner_user_id, conversation_lane_id FROM sessions').get() as {
+      owner_user_id: string;
+      conversation_lane_id: string | null;
+    };
     expect(session).toEqual({ owner_user_id: 'alice', conversation_lane_id: null });
     expect(getDb().prepare('SELECT root_session_id FROM conversation_lanes WHERE id = ?').get(aliceLane.id)).toEqual({
       root_session_id: null,

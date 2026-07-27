@@ -144,10 +144,7 @@ export function runMigrations(db: Database.Database): void {
  * and then call runMigrations() to exercise the normal upgrade path. It is not
  * a downgrade API and never reverses or deletes a migration.
  */
-export function runMigrationsThroughForCompatibilityTest(
-  db: Database.Database,
-  throughName: string,
-): void {
+export function runMigrationsThroughForCompatibilityTest(db: Database.Database, throughName: string): void {
   const endIndex = migrations.findIndex((migration) => migration.name === throughName);
   if (endIndex === -1) throw new Error(`Unknown migration boundary: ${throughName}`);
   runMigrationPlan(db, migrations.slice(0, endIndex + 1));

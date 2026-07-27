@@ -65,13 +65,7 @@ function boolValue(value: string | undefined, fallback = false): boolean {
   throw new Error(`Invalid boolean value: ${value}`);
 }
 
-function intValue(
-  name: string,
-  value: string | undefined,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
+function intValue(name: string, value: string | undefined, fallback: number, min: number, max: number): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
@@ -84,8 +78,8 @@ function strictUrl(name: string, raw: string, allowInsecureHttp: boolean, origin
   let url: URL;
   try {
     url = new URL(raw);
-  } catch {
-    throw new Error(`${name} must be an absolute URL`);
+  } catch (error) {
+    throw new Error(`${name} must be an absolute URL`, { cause: error });
   }
   if (url.username || url.password || url.hash) {
     throw new Error(`${name} must not contain credentials or a fragment`);
@@ -143,13 +137,7 @@ export function parseWebConfig(get: WebConfigReader): WebConfig | null {
   }
 
   const idleMinutes = intValue('WEB_SESSION_IDLE_TTL_MINUTES', get('WEB_SESSION_IDLE_TTL_MINUTES'), 60, 1, 43_200);
-  const absoluteHours = intValue(
-    'WEB_SESSION_ABSOLUTE_TTL_HOURS',
-    get('WEB_SESSION_ABSOLUTE_TTL_HOURS'),
-    24,
-    1,
-    8_760,
-  );
+  const absoluteHours = intValue('WEB_SESSION_ABSOLUTE_TTL_HOURS', get('WEB_SESSION_ABSOLUTE_TTL_HOURS'), 24, 1, 8_760);
   const idleTtlMs = idleMinutes * 60_000;
   const absoluteTtlMs = absoluteHours * 60 * 60_000;
   if (idleTtlMs > absoluteTtlMs) {
@@ -164,13 +152,7 @@ export function parseWebConfig(get: WebConfigReader): WebConfig | null {
     sessionSecret,
     sessionPolicy: { idleTtlMs, absoluteTtlMs },
     authTransactionTtlMs:
-      intValue(
-        'WEB_AUTH_TRANSACTION_TTL_MINUTES',
-        get('WEB_AUTH_TRANSACTION_TTL_MINUTES'),
-        10,
-        1,
-        30,
-      ) * 60_000,
+      intValue('WEB_AUTH_TRANSACTION_TTL_MINUTES', get('WEB_AUTH_TRANSACTION_TTL_MINUTES'), 10, 1, 30) * 60_000,
     maxBodyBytes: intValue('WEB_MAX_BODY_BYTES', get('WEB_MAX_BODY_BYTES'), 256 * 1024, 1_024, 10 * 1024 * 1024),
     requestTimeoutMs: intValue('WEB_REQUEST_TIMEOUT_MS', get('WEB_REQUEST_TIMEOUT_MS'), 15_000, 1_000, 120_000),
     cookieName,

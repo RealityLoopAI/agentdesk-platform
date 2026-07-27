@@ -25,10 +25,7 @@ export function parseOptInFeatureFlag(name: string, value: string | undefined): 
 
 export function parseHostFeatureFlags(get: FeatureFlagReader): HostFeatureFlags {
   return {
-    crossChannelLanesEnabled: parseOptInFeatureFlag(
-      'CROSS_CHANNEL_LANES_ENABLED',
-      get('CROSS_CHANNEL_LANES_ENABLED'),
-    ),
+    crossChannelLanesEnabled: parseOptInFeatureFlag('CROSS_CHANNEL_LANES_ENABLED', get('CROSS_CHANNEL_LANES_ENABLED')),
   };
 }
 

@@ -45,12 +45,7 @@ function normalizeKey(key: UserIdentityKey): UserIdentityKey {
     identifierType: key.identifierType.trim(),
     externalSubject: key.externalSubject.trim(),
   };
-  if (
-    !normalized.provider ||
-    !normalized.providerScope ||
-    !normalized.identifierType ||
-    !normalized.externalSubject
-  ) {
+  if (!normalized.provider || !normalized.providerScope || !normalized.identifierType || !normalized.externalSubject) {
     throw new Error('User identity provider, scope, identifier type and external subject are required');
   }
   return normalized;
@@ -64,12 +59,9 @@ export function getUserIdentity(key: UserIdentityKey): UserIdentity | undefined 
        WHERE provider = ? AND provider_scope = ?
          AND identifier_type = ? AND external_subject = ?`,
     )
-    .get(
-      normalized.provider,
-      normalized.providerScope,
-      normalized.identifierType,
-      normalized.externalSubject,
-    ) as UserIdentity | undefined;
+    .get(normalized.provider, normalized.providerScope, normalized.identifierType, normalized.externalSubject) as
+    | UserIdentity
+    | undefined;
 }
 
 export function getUserIdentityById(id: string): UserIdentity | undefined {

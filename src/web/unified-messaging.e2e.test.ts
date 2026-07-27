@@ -72,6 +72,7 @@ const CONFIG: WebConfig = {
 let server: Server;
 let baseUrl: string;
 let webAdapter: ChannelAdapter;
+let previousCrossChannelLanesFlag: string | undefined;
 
 function hostSetup(): ChannelSetup {
   return {
@@ -116,6 +117,8 @@ async function postJson(pathname: string, auth: { token: string; csrfToken: stri
 }
 
 beforeEach(async () => {
+  previousCrossChannelLanesFlag = process.env.CROSS_CHANNEL_LANES_ENABLED;
+  process.env.CROSS_CHANNEL_LANES_ENABLED = 'true';
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
   const db = initTestDb();
   runMigrations(db);
@@ -164,6 +167,11 @@ afterEach(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   closeDb();
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
+  if (previousCrossChannelLanesFlag === undefined) {
+    delete process.env.CROSS_CHANNEL_LANES_ENABLED;
+  } else {
+    process.env.CROSS_CHANNEL_LANES_ENABLED = previousCrossChannelLanesFlag;
+  }
 });
 
 describe('真实 Host + MockProvider 的 Web/飞书统一消息', () => {
