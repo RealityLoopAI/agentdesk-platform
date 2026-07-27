@@ -72,8 +72,10 @@ Both paths end with Bun running the same source file from `/app/src/index.ts`.
 6. `pnpm run web:typecheck`
 7. `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` (container typecheck)
 8. `pnpm run web:test && pnpm run web:build`
-9. `pnpm exec vitest run` (host tests；此时 `web/dist/` 已存在，可验证静态发布契约)
-10. `bun test` in `container/agent-runner/` (container tests)
+9. `pnpm --dir web exec playwright install --with-deps chromium`
+10. `pnpm run web:e2e`（Mock 飞书身份提供方、桌面/窄屏 Chromium 与视觉基线）
+11. `pnpm exec vitest run` (host tests；此时 `web/dist/` 已存在，可验证静态发布契约)
+12. `bun test` in `container/agent-runner/` (container tests)
 
 A parallel `image-smoke` job sets up Node+pnpm, then:
 

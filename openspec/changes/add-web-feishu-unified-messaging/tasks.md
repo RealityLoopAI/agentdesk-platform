@@ -58,8 +58,8 @@
 - [x] 5.18 实现禁止敏感信息持久化、精确 Origin 配置、CSP/安全响应头和 Vite 公开环境变量检查
 - [x] 5.19 配置开发代理和生产静态资源服务，将 `web/dist/` 与 Host 同版本发布，并验证 Hash Asset 长缓存、HTML 不长期缓存及 SPA Fallback
 - [x] 5.20 增加 Web API/Auth/Branding/Channel Contract 测试，并验证非法主题回退以及浏览器提供的 User/Agent Group/Session ID 不能覆盖服务端上下文
-- [ ] 5.21 增加前端组件、交互、无障碍和视觉回归测试，覆盖品牌资源缺失、登录、会话导航、消息归并、错误状态、SSE 重放、Markdown 净化、Logo 动效降级及桌面/窄屏布局
-- [ ] 5.22 使用 Playwright 和 Mock Feishu Provider 增加 SSO、消息往返、刷新恢复、断线重连、登录过期、品牌加载及窄屏流程 E2E
+- [x] 5.21 增加前端组件、交互、无障碍和视觉回归测试，覆盖品牌资源缺失、登录、会话导航、消息归并、错误状态、SSE 重放、Markdown 净化、Logo 动效降级及桌面/窄屏布局
+- [x] 5.22 使用 Playwright 和 Mock Feishu Provider 增加 SSO、消息往返、刷新恢复、断线重连、登录过期、品牌加载及窄屏流程 E2E
 
 ## 6. 跨端可见性与投递策略
 

@@ -142,3 +142,8 @@ Web Listener 默认关闭。启用时至少需要配置 `WEB_ENABLED=true`、精
 文件使用一小时缓存。`/login`、`/conversations` 和 `/conversations/:laneId` 支持 SPA 回退；
 `/api`、`/auth`、`/healthz` 与未知路径保持自己的 HTTP 语义，不会返回 HTML。Source Map 不进入
 生产构建，真实路径越过 `web/dist/` 的软链接会被拒绝。
+
+浏览器端回归使用 `pnpm web:e2e`。测试会启动仓库内的本地 Mock 飞书身份提供方，不连接真实飞书
+或读取真实用户；随后分别以桌面和手机尺寸验证 SSO 重定向、消息往返、刷新恢复、SSE 断线游标
+重连、Session 过期、低动态模式与视觉基线。首次准备本机环境需执行
+`pnpm --dir web exec playwright install chromium`。

@@ -177,3 +177,23 @@ Cursor，服务端 `session-revoked` 会关闭连接并返回登录页。消息�
 Markdown 测试验证 Script 被删除、`javascript:` 链接不会变为可点击链接、外链带
 `noopener noreferrer`，GFM 表格和带复制按钮的语法高亮代码块正常渲染。主题测试额外证明：
 即使颜色字符串是合法十六进制，只要与白字或页面背景不足 4.5:1，也会回退到推荐 Token。
+
+## Web 浏览器端到端与视觉回归
+
+验证日期：2026-07-27
+
+| 范围                       | 命令                                                     | 结果                                           |
+| -------------------------- | -------------------------------------------------------- | ---------------------------------------------- |
+| 品牌 Logo 缺失与无障碍回退 | `pnpm web:test`                                          | 通过，6 个测试文件、12 个测试                  |
+| 前端类型检查               | `pnpm web:typecheck`                                     | 通过                                           |
+| Mock 飞书 + Chromium E2E   | `pnpm --dir web exec playwright test`                    | 通过，桌面/手机共 7 个通过、1 个按设备条件跳过 |
+| 桌面与手机视觉基线         | `pnpm --dir web exec playwright test --update-snapshots` | 生成并人工检查 4 张基线图，无横向溢出          |
+
+E2E 使用只监听 `127.0.0.1` 的 Mock 飞书 Provider：浏览器从登录页跳转到授权页，再以 HttpOnly
+测试 Cookie 回到 Web 会话。消息提交后由 Mock Host 持久化用户消息、异步生成 Agent 回复并发出
+SSE Event；页面刷新后仍能恢复历史。主动断开 SSE 后，测试确认第二次连接携带最后 Cursor；服务端
+发送 `session-revoked` 后页面回到登录页。
+
+桌面和手机视觉基线都包含品牌 Logo、深青/暖白主题、会话导航、飞书来源标记和输入区域。手机测试
+额外验证从消息页返回列表；`prefers-reduced-motion: reduce` 下，Agent 处理状态的 Logo 动画
+计算值为 `none`。正式运营 Logo 的批准仍属于任务 5.9，不因测试资产通过而自动视为完成。

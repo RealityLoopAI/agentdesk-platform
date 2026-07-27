@@ -5,6 +5,8 @@ coverage/
 
 .DS_Store
 .playwright-mcp/
+web/playwright-report/
+web/test-results/
 
 .env
 .env.local
@@ -30,4 +32,3 @@ container/agent-runner/node_modules/
 
 # Agent working state (advisory, not authoritative — see CLAUDE.md §Session Continuation Guide)
 .sisyphus/
-
