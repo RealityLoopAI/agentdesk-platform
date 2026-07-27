@@ -93,7 +93,7 @@ const migrations: Migration[] = [
   migration043,
 ];
 
-export function runMigrations(db: Database.Database): void {
+function runMigrationPlan(db: Database.Database, plan: readonly Migration[]): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER PRIMARY KEY,
@@ -112,7 +112,7 @@ export function runMigrations(db: Database.Database): void {
   const applied = new Set<string>(
     (db.prepare('SELECT name FROM schema_version').all() as { name: string }[]).map((r) => r.name),
   );
-  const pending = migrations.filter((m) => !applied.has(m.name));
+  const pending = plan.filter((m) => !applied.has(m.name));
   if (pending.length === 0) return;
 
   log.info('Running migrations', { count: pending.length });
@@ -130,4 +130,25 @@ export function runMigrations(db: Database.Database): void {
     })();
     log.info('Migration applied', { name: m.name });
   }
+}
+
+export function runMigrations(db: Database.Database): void {
+  runMigrationPlan(db, migrations);
+}
+
+/**
+ * Apply the real ordered migration plan through one named migration.
+ *
+ * This exists for upgrade-compatibility rehearsals: a test can materialize the
+ * exact schema an older Host would have left behind, insert legacy workload,
+ * and then call runMigrations() to exercise the normal upgrade path. It is not
+ * a downgrade API and never reverses or deletes a migration.
+ */
+export function runMigrationsThroughForCompatibilityTest(
+  db: Database.Database,
+  throughName: string,
+): void {
+  const endIndex = migrations.findIndex((migration) => migration.name === throughName);
+  if (endIndex === -1) throw new Error(`Unknown migration boundary: ${throughName}`);
+  runMigrationPlan(db, migrations.slice(0, endIndex + 1));
 }
