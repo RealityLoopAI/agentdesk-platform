@@ -71,6 +71,16 @@ import { clearSessionSpanContext, getSessionSpanContext, endSessionRootSpan } fr
 import { setSpanContextWithActive, context } from './observability/trace-context.js';
 import { getConversationLane } from './db/conversation-lanes.js';
 import { appendWebEvent } from './db/web-events.js';
+import {
+  listActiveDeliverySubscriptions,
+  listDueCrossChannelDeliveries,
+  markCrossChannelDeliveryDelivered,
+  markCrossChannelDeliveryRetry,
+  reserveCrossChannelDelivery,
+  suppressCrossChannelDelivery,
+  validateCrossChannelDeliveryTarget,
+  type CrossChannelDelivery,
+} from './db/delivery-subscriptions.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -187,6 +197,142 @@ function publishLaneReplyAvailable(session: Session, message: OutboundMessage): 
   });
 }
 
+function eligibleWebReplyMirror(message: OutboundMessage): boolean {
+  if (message.channel_type !== 'web' || message.kind !== 'chat' || !message.content) return false;
+  try {
+    const content = JSON.parse(message.content) as Record<string, unknown>;
+    return (
+      typeof content.text === 'string' &&
+      content.text.trim().length > 0 &&
+      !content.operation &&
+      !content.type &&
+      (!Array.isArray(content.files) || content.files.length === 0)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reserve additional Feishu DM sends only after the primary Web reply has
+ * succeeded. A unique central row makes repeated Host drains converge on the
+ * same stable origin/delivery identifiers without copying message content.
+ */
+function reserveWebReplyMirrors(session: Session, message: OutboundMessage): void {
+  if (!session.conversation_lane_id || !eligibleWebReplyMirror(message)) return;
+  for (const subscription of listActiveDeliverySubscriptions(session.conversation_lane_id)) {
+    reserveCrossChannelDelivery({
+      subscription,
+      laneId: session.conversation_lane_id,
+      sessionId: session.id,
+      messageOutId: message.id,
+    });
+  }
+}
+
+function mirrorRetryAt(attempt: number): string {
+  const backoffSec =
+    DELIVERY_BACKOFF_SCHEDULE_SEC[Math.min(Math.max(0, attempt - 1), DELIVERY_BACKOFF_SCHEDULE_SEC.length - 1)]!;
+  return new Date(Date.now() + backoffSec * 1_000).toISOString();
+}
+
+async function deliverCrossChannelMirror(
+  session: Session,
+  inDb: Database.Database,
+  outboundById: Map<string, OutboundMessage>,
+  delivery: CrossChannelDelivery,
+): Promise<void> {
+  const sourceMessage = outboundById.get(delivery.message_out_id);
+  if (!sourceMessage) {
+    suppressCrossChannelDelivery({ id: delivery.id, reason: 'source_message_unavailable' });
+    return;
+  }
+
+  let trustedSource: OutboundMessage;
+  try {
+    trustedSource = routeLaneReplyFromInbound(session, inDb, sourceMessage);
+  } catch {
+    suppressCrossChannelDelivery({ id: delivery.id, reason: 'source_route_untrusted' });
+    return;
+  }
+  if (!eligibleWebReplyMirror(trustedSource)) {
+    suppressCrossChannelDelivery({ id: delivery.id, reason: 'source_not_eligible' });
+    return;
+  }
+  if (!validateCrossChannelDeliveryTarget(delivery)) {
+    suppressCrossChannelDelivery({ id: delivery.id, reason: 'subscription_unavailable' });
+    return;
+  }
+  if (!deliveryAdapter) {
+    const attempt = delivery.attempts + 1;
+    const permanent = attempt >= DELIVERY_MAX_ATTEMPTS;
+    markCrossChannelDeliveryRetry({
+      id: delivery.id,
+      nextRetryAt: permanent ? null : mirrorRetryAt(attempt),
+      permanent,
+      failureCode: 'adapter_unavailable',
+    });
+    return;
+  }
+
+  let outboundContent = trustedSource.content;
+  const parsed = JSON.parse(outboundContent) as Record<string, unknown>;
+  if (typeof parsed.text === 'string') {
+    outboundContent = JSON.stringify({ ...parsed, text: stripThinkTags(parsed.text) });
+  }
+  try {
+    const platformMessageId = await withDeliveryTimeout(
+      deliveryAdapter.deliver(
+        delivery.channel_type,
+        delivery.platform_id,
+        null,
+        trustedSource.kind,
+        outboundContent,
+        undefined,
+        {
+          messageId: delivery.id,
+          sessionId: session.id,
+          originId: delivery.origin_id,
+        },
+      ),
+      DELIVERY_TIMEOUT_MS,
+    );
+    markCrossChannelDeliveryDelivered(delivery.id, platformMessageId ?? null);
+    log.info('Cross-channel Agent reply mirrored', {
+      deliveryId: delivery.id,
+      originId: delivery.origin_id,
+      laneId: delivery.lane_id,
+      channelType: delivery.channel_type,
+    });
+  } catch (error) {
+    const attempt = delivery.attempts + 1;
+    const permanent = attempt >= DELIVERY_MAX_ATTEMPTS;
+    markCrossChannelDeliveryRetry({
+      id: delivery.id,
+      nextRetryAt: permanent ? null : mirrorRetryAt(attempt),
+      permanent,
+      failureCode: error instanceof DeliveryTimeoutError ? 'timeout' : 'delivery_error',
+    });
+    log.warn(permanent ? 'Cross-channel mirror failed permanently' : 'Cross-channel mirror retry scheduled', {
+      deliveryId: delivery.id,
+      laneId: delivery.lane_id,
+      attempt,
+      maxAttempts: DELIVERY_MAX_ATTEMPTS,
+      errorName: error instanceof Error ? error.name : 'unknown',
+    });
+  }
+}
+
+async function drainCrossChannelMirrors(
+  session: Session,
+  inDb: Database.Database,
+  outboundById: Map<string, OutboundMessage>,
+): Promise<void> {
+  for (const delivery of listDueCrossChannelDeliveries(session.id)) {
+    await deliverCrossChannelMirror(session, inDb, outboundById, delivery);
+  }
+}
+
 /**
  * Short-lived membership cache (ADR-0023 item 12). When ROSTER_VERIFY_MEMBERSHIP
  * is on, every roster send would otherwise hit the channel's group-member API;
@@ -237,7 +383,7 @@ export interface ChannelDeliveryAdapter {
     kind: string,
     content: string,
     files?: OutboundFile[],
-    source?: { messageId: string; sessionId: string },
+    source?: { messageId: string; sessionId: string; originId?: string },
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
   /**
@@ -384,21 +530,22 @@ async function drainSession(session: Session): Promise<void> {
     return; // DBs might not exist yet
   }
 
-  const allDue = getDueOutboundMessages(outDb);
-  if (allDue.length === 0) {
-    outDb.close();
-    inDb.close();
-    return;
-  }
-
   // Bring the delivered table up to schema BEFORE querying it — the
   // undeliverable filter reads the attempts / next_retry_at columns, which
   // pre-existing session DBs don't have yet.
   migrateDeliveredTable(inDb);
 
+  const allDue = getDueOutboundMessages(outDb);
+  const dueMirrors = listDueCrossChannelDeliveries(session.id);
+  if (allDue.length === 0 && dueMirrors.length === 0) {
+    outDb.close();
+    inDb.close();
+    return;
+  }
+
   const undeliverable = getUndeliverableIds(inDb, DELIVERY_MAX_ATTEMPTS);
   const undelivered = allDue.filter((m) => !undeliverable.has(m.id));
-  if (undelivered.length === 0) {
+  if (undelivered.length === 0 && dueMirrors.length === 0) {
     outDb.close();
     inDb.close();
     return;
@@ -407,6 +554,7 @@ async function drainSession(session: Session): Promise<void> {
   const drainFn = async () => {
     let handledOutbound = false;
     let lastDeliveredText: string | undefined;
+    const outboundById = new Map(allDue.map((message) => [message.id, message]));
 
     try {
       for (const msg of undelivered) {
@@ -430,6 +578,17 @@ async function drainSession(session: Session): Promise<void> {
             // The primary external delivery is already durable. Notification
             // bookkeeping must never turn it back into an at-least-once retry.
             log.error('Lane reply delivered but Web notification failed', {
+              messageId: msg.id,
+              sessionId: session.id,
+              err,
+            });
+          }
+          try {
+            reserveWebReplyMirrors(session, deliveryMessage);
+          } catch (err) {
+            // The primary reply is already durable. Subscription bookkeeping
+            // is an additional best-effort path and must not resend it.
+            log.error('Web reply delivered but mirror reservation failed', {
               messageId: msg.id,
               sessionId: session.id,
               err,
@@ -534,6 +693,7 @@ async function drainSession(session: Session): Promise<void> {
           break;
         }
       }
+      await drainCrossChannelMirrors(session, inDb, outboundById);
     } finally {
       outDb.close();
       inDb.close();

@@ -203,7 +203,7 @@ async function main(): Promise<void> {
       kind: string,
       content: string,
       files?: import('./channels/adapter.js').OutboundFile[],
-      source?: { messageId: string; sessionId: string },
+      source?: { messageId: string; sessionId: string; originId?: string },
     ): Promise<string | undefined> {
       const adapter = getChannelAdapter(channelType);
       if (!adapter) {

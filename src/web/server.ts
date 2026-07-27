@@ -14,7 +14,9 @@ import { readWebConfig, type WebConfig } from './config.js';
 import {
   createWebConversation,
   getWebConversationHistory,
+  getWebDeliverySubscription,
   listWebConversations,
+  setWebDeliverySubscription,
   submitWebConversationMessage,
   WebConversationError,
   type SubmitWebInbound,
@@ -398,6 +400,40 @@ export function createWebRequestHandler(
           const agentGroupId = typeof postBody?.agentGroupId === 'string' ? postBody.agentGroupId : '';
           json(res, 201, { conversation: createWebConversation(authenticated.session.user_id, agentGroupId) });
           return;
+        }
+
+        const deliverySubscriptionMatch = /^\/api\/conversations\/([^/]+)\/delivery-subscription$/.exec(url.pathname);
+        if (deliverySubscriptionMatch?.[1]) {
+          let laneId: string;
+          try {
+            laneId = decodeURIComponent(deliverySubscriptionMatch[1]);
+          } catch {
+            throw new WebRequestError(400, 'invalid_conversation_id');
+          }
+          if (method === 'GET') {
+            json(res, 200, {
+              subscription: getWebDeliverySubscription({
+                userId: authenticated.session.user_id,
+                laneId,
+                feishuProviderScope: config.feishu.appId,
+              }),
+            });
+            return;
+          }
+          if (method === 'POST') {
+            if (typeof postBody?.enabled !== 'boolean') {
+              throw new WebRequestError(400, 'invalid_subscription_state');
+            }
+            json(res, 200, {
+              subscription: setWebDeliverySubscription({
+                userId: authenticated.session.user_id,
+                laneId,
+                feishuProviderScope: config.feishu.appId,
+                enabled: postBody.enabled,
+              }),
+            });
+            return;
+          }
         }
 
         const messagesMatch = /^\/api\/conversations\/([^/]+)\/messages$/.exec(url.pathname);

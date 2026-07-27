@@ -47,7 +47,7 @@ vi.mock('../webhook-server.js', () => ({
 }));
 
 // In-memory central DB so markInboundSeen (real dedup) has a table to write.
-import { initTestDb, closeDb, runMigrations } from '../db/index.js';
+import { initTestDb, closeDb, getDb, runMigrations } from '../db/index.js';
 
 const ENCRYPT_KEY = 'unit_test_encrypt_key';
 const VERIFICATION_TOKEN = 'verif_token_xyz';
@@ -178,12 +178,23 @@ function makeSetup(): ChannelSetup & {
   };
 }
 
-function messageEvent(overrides: { messageId?: string; text?: string; chatId?: string; openId?: string } = {}) {
+function messageEvent(
+  overrides: {
+    messageId?: string;
+    text?: string;
+    chatId?: string;
+    openId?: string;
+    senderType?: string;
+  } = {},
+) {
   return {
     schema: '2.0',
     header: { event_type: 'im.message.receive_v1', token: VERIFICATION_TOKEN },
     event: {
-      sender: { sender_id: { open_id: overrides.openId ?? 'ou_sender_1' } },
+      sender: {
+        sender_type: overrides.senderType,
+        sender_id: { open_id: overrides.openId ?? 'ou_sender_1' },
+      },
       message: {
         message_id: overrides.messageId ?? 'om_msg_1',
         chat_id: overrides.chatId ?? 'oc_chat_1',
@@ -355,6 +366,41 @@ describe('③ webhook handler dispatch (real handleWebhook end-to-end)', () => {
     expect(setup.inbound).toHaveLength(1);
   });
 
+  it('suppresses app-authored messages before ingress and records a loop-prevention audit', async () => {
+    const { setup, handler } = await setupAdapter();
+    const inner = messageEvent({
+      messageId: 'om_bot_echo',
+      openId: 'ou_bot',
+      senderType: 'app',
+    });
+    const body = JSON.stringify({ encrypt: encryptEnvelope(ENCRYPT_KEY, inner) });
+
+    const res = fakeRes();
+    await handler(fakeReq({ body }) as never, res as never);
+    const duplicateRes = fakeRes();
+    await handler(fakeReq({ body }) as never, duplicateRes as never);
+
+    expect(res.statusCode).toBe(200);
+    expect(duplicateRes.statusCode).toBe(200);
+    expect(setup.inbound).toHaveLength(0);
+    const audits = getDb()
+      .prepare(
+        `SELECT event_type, actor, details
+           FROM enterprise_audit
+          WHERE event_type = 'cross_channel_loop_suppressed'`,
+      )
+      .all() as Array<{ event_type: string; actor: string; details: string }>;
+    expect(audits).toHaveLength(1);
+    const audit = audits[0]!;
+    expect(audit.event_type).toBe('cross_channel_loop_suppressed');
+    expect(audit.actor).toBe('ou_bot');
+    expect(JSON.parse(audit.details)).toMatchObject({
+      channelType: 'feishu',
+      providerScope: 'cli_app',
+      reason: 'sender_type_app',
+    });
+  });
+
   it('rejects an event whose verification token does not match with 403', async () => {
     const { setup, handler } = await setupAdapter();
     const inner = {
@@ -503,6 +549,30 @@ describe('⑤ deliver branches route to the right Feishu API path + body shape',
     expect(body.msg_type).toBe('text');
     expect(body.receive_id).toBe('ou_x');
     expect(JSON.parse(body.content as string)).toEqual({ text: 'plain hi' });
+  });
+
+  it('cross-channel mirror retries reuse a stable Feishu uuid no longer than 50 characters', async () => {
+    const { calls } = installCapturingFetch();
+    const adapter = await setupAdapter();
+    const mirroredMessage = {
+      kind: 'chat',
+      content: { text: 'mirrored reply' },
+      source: {
+        messageId: 'xcd-stable-delivery',
+        sessionId: 'session-1',
+        originId: 'xco-stable-origin',
+      },
+    };
+
+    await adapter.deliver('feishu:p2p:ou_x', null, mirroredMessage);
+    await adapter.deliver('feishu:p2p:ou_x', null, mirroredMessage);
+
+    const sends = calls.filter((call) => call.url.includes('/im/v1/messages'));
+    expect(sends).toHaveLength(2);
+    const uuids = sends.map((send) => new URL(send.url).searchParams.get('uuid'));
+    expect(uuids[0]).toBeTruthy();
+    expect(uuids[0]).toBe(uuids[1]);
+    expect(uuids[0]!.length).toBeLessThanOrEqual(50);
   });
 
   it('card (type=card) → POST /im/v1/messages with msg_type=interactive', async () => {

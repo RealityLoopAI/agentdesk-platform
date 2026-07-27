@@ -6,6 +6,7 @@ import { Link, useParams } from 'react-router-dom';
 import { submitMessage } from '@/api/client';
 import { ApiFailure } from '@/components/ApiFailure';
 import { Button } from '@/components/ui/Button';
+import { DeliverySubscriptionControl } from '@/conversations/DeliverySubscriptionControl';
 import { conversationKeys } from '@/conversations/queryKeys';
 import { useConversationList } from '@/conversations/useConversations';
 import { MessageComposer } from '@/messages/MessageComposer';
@@ -122,7 +123,9 @@ export function ConversationPage() {
       <ConversationHeader
         title={conversation?.agentGroup.name ?? 'Agent 会话'}
         subtitle={conversation?.status === 'archived' ? '已归档' : '与飞书共享上下文'}
-      />
+      >
+        {conversation?.status !== 'archived' ? <DeliverySubscriptionControl laneId={laneId} /> : null}
+      </ConversationHeader>
       <MessageTimeline
         messages={messages}
         optimistic={optimistic}
@@ -150,7 +153,15 @@ export function ConversationPage() {
   );
 }
 
-function ConversationHeader({ title, subtitle = 'Agent 会话' }: { title: string; subtitle?: string }) {
+function ConversationHeader({
+  title,
+  subtitle = 'Agent 会话',
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children?: React.ReactNode;
+}) {
   return (
     <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line bg-surface px-3 sm:px-5">
       <Button variant="ghost" size="icon" asChild className="lg:hidden">
@@ -162,6 +173,7 @@ function ConversationHeader({ title, subtitle = 'Agent 会话' }: { title: strin
         <span className="block truncate text-sm font-semibold text-ink">{title}</span>
         <span className="block text-xs text-muted">{subtitle}</span>
       </span>
+      {children}
     </header>
   );
 }

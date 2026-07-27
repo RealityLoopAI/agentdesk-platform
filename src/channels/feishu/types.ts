@@ -46,6 +46,8 @@ export interface FeishuReactionItem {
 
 export interface FeishuMessageEvent {
   sender: {
+    /** Feishu reports `app` for messages sent by a bot/application. */
+    sender_type?: string;
     sender_id: {
       open_id?: string;
       user_id?: string;

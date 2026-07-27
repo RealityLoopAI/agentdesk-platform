@@ -298,6 +298,51 @@ CREATE TABLE web_events (
 CREATE INDEX idx_web_events_user_sequence
   ON web_events(user_id, sequence);
 
+-- Explicit, user-controlled Feishu DM reply mirroring. A subscription is
+-- separate from a conversation binding: revoking extra delivery consent must
+-- not break inbound routing or shared history continuity.
+CREATE TABLE delivery_subscriptions (
+  id                   TEXT PRIMARY KEY,
+  lane_id              TEXT NOT NULL REFERENCES conversation_lanes(id),
+  channel_type         TEXT NOT NULL CHECK(channel_type = 'feishu'),
+  delivery_kind        TEXT NOT NULL CHECK(delivery_kind = 'agent-reply-mirror'),
+  platform_id          TEXT NOT NULL CHECK(platform_id GLOB 'feishu:p2p:ou_*'),
+  external_identity_id TEXT NOT NULL REFERENCES user_identities(id),
+  provider_scope       TEXT NOT NULL,
+  enabled_at           TEXT NOT NULL,
+  revoked_at           TEXT
+);
+CREATE INDEX idx_delivery_subscriptions_lane
+  ON delivery_subscriptions(lane_id, revoked_at);
+CREATE UNIQUE INDEX idx_delivery_subscription_active_lane_kind
+  ON delivery_subscriptions(lane_id, channel_type, delivery_kind)
+  WHERE revoked_at IS NULL;
+
+-- Reference-only durable retry/idempotency ledger for additional channel
+-- delivery. Message content remains in the owning Session's outbound.db.
+CREATE TABLE cross_channel_deliveries (
+  id                  TEXT PRIMARY KEY,
+  origin_id           TEXT NOT NULL,
+  subscription_id     TEXT NOT NULL REFERENCES delivery_subscriptions(id),
+  lane_id             TEXT NOT NULL REFERENCES conversation_lanes(id),
+  session_id          TEXT NOT NULL REFERENCES sessions(id),
+  message_out_id      TEXT NOT NULL,
+  channel_type        TEXT NOT NULL CHECK(channel_type = 'feishu'),
+  platform_id         TEXT NOT NULL CHECK(platform_id GLOB 'feishu:p2p:ou_*'),
+  status              TEXT NOT NULL
+                      CHECK(status IN ('pending', 'delivered', 'failed', 'suppressed')),
+  attempts            INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  next_retry_at       TEXT,
+  platform_message_id TEXT,
+  failure_code        TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  delivered_at        TEXT,
+  UNIQUE(subscription_id, session_id, message_out_id)
+);
+CREATE INDEX idx_cross_channel_deliveries_due
+  ON cross_channel_deliveries(session_id, status, next_retry_at, created_at);
+
 -- Pending interactive questions
 CREATE TABLE pending_questions (
   question_id    TEXT PRIMARY KEY,

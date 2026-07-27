@@ -38,6 +38,19 @@ test('通过 Mock 飞书 SSO 登录，完成消息往返并在刷新后恢复', 
   await expect(page.getByText('Agent 已收到：请总结今天的研究进度', { exact: true })).toBeVisible();
 });
 
+test('用户可以显式开启飞书回复提醒并在刷新后保留状态', async ({ page }) => {
+  await loginViaMockFeishu(page);
+  await openMainConversation(page);
+
+  const toggle = page.getByRole('switch', { name: '同步 Agent 回复到飞书' });
+  await expect(toggle).toHaveAttribute('aria-checked', 'false');
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-checked', 'true');
+
+  await page.reload();
+  await expect(page.getByRole('switch', { name: '同步 Agent 回复到飞书' })).toHaveAttribute('aria-checked', 'true');
+});
+
 test('SSE 断线后携带游标重连，Session 过期时返回登录页', async ({ page }) => {
   await loginViaMockFeishu(page);
   await openMainConversation(page);

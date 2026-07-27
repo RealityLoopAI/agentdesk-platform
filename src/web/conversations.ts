@@ -12,6 +12,12 @@ import {
   listConversationLanesForUser,
 } from '../db/conversation-lanes.js';
 import { getDb } from '../db/connection.js';
+import {
+  DeliverySubscriptionError,
+  disableFeishuDeliverySubscription,
+  enableFeishuDeliverySubscription,
+  getFeishuDeliverySubscriptionState,
+} from '../db/delivery-subscriptions.js';
 import { createMessagingGroup, createMessagingGroupAgent, getMessagingGroup } from '../db/messaging-groups.js';
 import { getSession } from '../db/sessions.js';
 import {
@@ -60,6 +66,13 @@ export interface WebHistoryMessage {
     threadId: string | null;
   };
   status: string;
+}
+
+export interface WebDeliverySubscriptionState {
+  channel: 'feishu';
+  deliveryKind: 'agent-reply-mirror';
+  enabled: boolean;
+  available: boolean;
 }
 
 interface HistoryKey {
@@ -176,6 +189,61 @@ export function createWebConversation(userId: string, agentGroupId: string): Web
     return created;
   })();
   return laneSummary(lane);
+}
+
+export function getWebDeliverySubscription(args: {
+  userId: string;
+  laneId: string;
+  feishuProviderScope: string;
+}): WebDeliverySubscriptionState {
+  assertAccessibleLane(args.userId, args.laneId, true);
+  try {
+    const state = getFeishuDeliverySubscriptionState({
+      userId: args.userId,
+      laneId: args.laneId,
+      providerScope: args.feishuProviderScope,
+    });
+    return {
+      channel: 'feishu',
+      deliveryKind: 'agent-reply-mirror',
+      enabled: state.enabled,
+      available: state.available,
+    };
+  } catch (error) {
+    if (error instanceof DeliverySubscriptionError) {
+      throw new WebConversationError(403, 'conversation_unavailable');
+    }
+    throw error;
+  }
+}
+
+export function setWebDeliverySubscription(args: {
+  userId: string;
+  laneId: string;
+  feishuProviderScope: string;
+  enabled: boolean;
+}): WebDeliverySubscriptionState {
+  assertAccessibleLane(args.userId, args.laneId, true);
+  try {
+    if (args.enabled) {
+      enableFeishuDeliverySubscription({
+        userId: args.userId,
+        laneId: args.laneId,
+        providerScope: args.feishuProviderScope,
+      });
+    } else {
+      disableFeishuDeliverySubscription({ userId: args.userId, laneId: args.laneId });
+    }
+    return getWebDeliverySubscription(args);
+  } catch (error) {
+    if (error instanceof DeliverySubscriptionError) {
+      if (error.reason === 'verified_feishu_open_id_required') {
+        throw new WebConversationError(409, 'verified_feishu_identity_required');
+      }
+      throw new WebConversationError(403, 'conversation_unavailable');
+    }
+    throw error;
+  }
 }
 
 function decodeCursor(raw: string | null): EncodedCursor | null {

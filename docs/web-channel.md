@@ -43,6 +43,8 @@ GET  /api/conversations
 POST /api/conversations
 GET  /api/conversations/:laneId/messages
 POST /api/conversations/:laneId/messages
+GET  /api/conversations/:laneId/delivery-subscription
+POST /api/conversations/:laneId/delivery-subscription
 GET  /api/events
 POST /api/logout
 ```
@@ -102,6 +104,21 @@ Web Agent 回复只有在 `messages_out` 已存在后才进入 Web Adapter；Hos
 Web History 仍按 Lane Owner 过滤 `messages_in.origin_user_id`，也拒绝把 `shared`、
 `agent-shared` 等多人 Session 自动关联到用户 Lane。因此“飞书回复在 Web 可见”只复用同一用户
 已经隔离的根 Session，不会把群内其他参与者或旧 Shared Session 的内容带入浏览器。
+
+### 用户显式开启飞书回复提醒
+
+Web 页面中的“飞书提醒”开关默认关闭。开启后，只有“由 Web 入站触发、已经成功进入 Web History
+的 Agent 纯文字回复”会额外发送到该用户自己的飞书私聊；Web 用户消息、卡片、操作消息和附件不会
+被镜像。关闭开关不会改变飞书入站回复飞书的默认规则，也不会断开 Lane 的共享历史。
+
+浏览器的 POST Body 只允许 `{ "enabled": true | false }`。服务器从 Web Session 取得规范用户，
+重新检查 Lane Owner 和 Agent Group/Organization 访问权，再从相同飞书 App Scope 下已验证的
+`user_identities.open_id` 推导私聊地址。浏览器即使附带 `userId`、`platformId` 或
+`externalIdentityId` 也不会影响收件人。
+
+额外投递使用中央引用账本持久化重试，但正文继续从 Session `outbound.db` 读取。每次发送前会再次
+核对活跃订阅、Lane 和身份；关闭订阅或身份失效会抑制待发送记录。稳定 Delivery ID 同时成为飞书
+请求幂等键的来源，避免 Host 重试产生重复私聊。
 
 ## 前端工程与品牌
 

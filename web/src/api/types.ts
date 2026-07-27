@@ -76,6 +76,13 @@ export interface SubmittedMessage {
   replayed: boolean;
 }
 
+export interface DeliverySubscriptionState {
+  channel: 'feishu';
+  deliveryKind: 'agent-reply-mirror';
+  enabled: boolean;
+  available: boolean;
+}
+
 export interface WebEventPayload {
   eventId: string;
   cursor: string;

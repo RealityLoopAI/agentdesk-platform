@@ -9,6 +9,7 @@ import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { appendWebEvent, encodeWebEventCursor } from '../db/web-events.js';
 import { authenticateWebSession, createWebAuthSession } from '../db/web-auth.js';
 import { runMigrations } from '../db/migrations/index.js';
+import { createUserIdentity } from '../db/user-identities.js';
 import type { WebConfig } from './config.js';
 import type { SubmitWebInbound } from './conversations.js';
 import { createWebRequestHandler } from './server.js';
@@ -277,13 +278,17 @@ describe('Web HTTP authentication boundary', () => {
     const now = new Date().toISOString();
     getDb().exec(`
       INSERT INTO users (id, kind, display_name, created_at)
-        VALUES ('alice', 'feishu', 'Alice', '${now}');
+        VALUES
+        ('alice', 'feishu', 'Alice', '${now}'),
+        ('bob', 'feishu', 'Bob', '${now}');
       INSERT INTO agent_groups (id, name, folder, agent_provider, created_at, organization_id)
         VALUES
         ('ag-allowed', 'Allowed Agent', 'allowed', NULL, '${now}', NULL),
         ('ag-denied', 'Denied Agent', 'denied', NULL, '${now}', NULL);
       INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
-        VALUES ('alice', 'ag-allowed', NULL, '${now}');
+        VALUES
+        ('alice', 'ag-allowed', NULL, '${now}'),
+        ('bob', 'ag-allowed', NULL, '${now}');
     `);
     const session = createWebAuthSession({
       userId: 'alice',
@@ -323,6 +328,76 @@ describe('Web HTTP authentication boundary', () => {
     expect(created.status).toBe(201);
     const createdPayload = (await created.json()) as { conversation: { id: string } };
     const laneId = createdPayload.conversation.id;
+
+    const subscriptionBeforeIdentity = await fetch(`${base}/api/conversations/${laneId}/delivery-subscription`, {
+      headers: { cookie: headers.cookie },
+    });
+    expect(await subscriptionBeforeIdentity.json()).toEqual({
+      subscription: {
+        channel: 'feishu',
+        deliveryKind: 'agent-reply-mirror',
+        enabled: false,
+        available: false,
+      },
+    });
+    const unavailableEnable = await fetch(`${base}/api/conversations/${laneId}/delivery-subscription`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(unavailableEnable.status).toBe(409);
+    expect(await unavailableEnable.json()).toEqual({ error: 'verified_feishu_identity_required' });
+
+    const aliceIdentity = createUserIdentity({
+      userId: 'alice',
+      provider: 'feishu',
+      providerScope: config.feishu.appId,
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
+    const enabledSubscription = await fetch(`${base}/api/conversations/${laneId}/delivery-subscription`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        enabled: true,
+        userId: 'bob',
+        platformId: 'feishu:p2p:ou_bob',
+        externalIdentityId: 'forged',
+      }),
+    });
+    expect(enabledSubscription.status).toBe(200);
+    expect(await enabledSubscription.json()).toMatchObject({
+      subscription: { enabled: true, available: true },
+    });
+    expect(
+      getDb()
+        .prepare(
+          `SELECT platform_id, external_identity_id
+           FROM delivery_subscriptions
+           WHERE lane_id = ? AND revoked_at IS NULL`,
+        )
+        .get(laneId),
+    ).toEqual({
+      platform_id: 'feishu:p2p:ou_alice',
+      external_identity_id: aliceIdentity.id,
+    });
+
+    const bobSession = createWebAuthSession({
+      userId: 'bob',
+      secret: SECRET,
+      policy: config.sessionPolicy,
+    });
+    const crossUser = await fetch(`${base}/api/conversations/${laneId}/delivery-subscription`, {
+      method: 'POST',
+      headers: {
+        cookie: `${config.cookieName}=${bobSession.token}`,
+        origin: config.publicOrigin,
+        'x-csrf-token': bobSession.csrfToken,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(crossUser.status).toBe(403);
 
     const submitBody = JSON.stringify({
       clientMessageId: 'client-1',

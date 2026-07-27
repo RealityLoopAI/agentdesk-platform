@@ -2,6 +2,7 @@ import type {
   ConversationHistoryResponse,
   ConversationListResponse,
   ConversationSummary,
+  DeliverySubscriptionState,
   MeResponse,
   PublicBranding,
   SubmittedMessage,
@@ -122,6 +123,27 @@ export async function submitMessage(args: {
     },
   );
   return response.message;
+}
+
+export async function getDeliverySubscription(laneId: string): Promise<DeliverySubscriptionState> {
+  const response = await apiFetch<{ subscription: DeliverySubscriptionState }>(
+    `/api/conversations/${encodeURIComponent(laneId)}/delivery-subscription`,
+  );
+  return response.subscription;
+}
+
+export async function setDeliverySubscription(args: {
+  laneId: string;
+  enabled: boolean;
+}): Promise<DeliverySubscriptionState> {
+  const response = await apiFetch<{ subscription: DeliverySubscriptionState }>(
+    `/api/conversations/${encodeURIComponent(args.laneId)}/delivery-subscription`,
+    {
+      method: 'POST',
+      json: { enabled: args.enabled },
+    },
+  );
+  return response.subscription;
 }
 
 export async function logout(): Promise<void> {

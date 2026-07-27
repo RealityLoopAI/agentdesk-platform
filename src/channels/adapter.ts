@@ -139,6 +139,8 @@ export interface OutboundMessage {
   source?: {
     messageId: string;
     sessionId: string;
+    /** Stable original outbound identity for a cross-channel mirror. */
+    originId?: string;
   };
 }
 

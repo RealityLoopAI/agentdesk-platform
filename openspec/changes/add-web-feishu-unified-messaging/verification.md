@@ -217,3 +217,31 @@ Container 提供的地址都不能覆盖当前 Turn 的可信来源。
 隐私回归同时覆盖两个边界：Alice/Bob 即使位于同一个飞书群也解析到不同的用户 Lane；测试向
 Alice 根 Session 注入带 Bob `origin_user_id` 的异常行后，Alice 的 Web History 仍会 Fail
 Closed 地过滤该行。`shared`、`agent-shared` 等多人 Session 也不会自动关联到用户 Lane。
+
+## 用户显式飞书回复订阅与持久化镜像投递
+
+验证日期：2026-07-27
+
+| 范围                                                      | 命令                                                                                                             | 结果                                    |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| Host 类型检查                                             | `pnpm typecheck`                                                                                                 | 通过                                    |
+| 订阅迁移、身份绑定、镜像投递、飞书幂等和 Bot Self Filter  | `pnpm vitest run src/channels/feishu-webhook.test.ts src/delivery.test.ts src/db/delivery-subscriptions.test.ts` | 通过，3 个测试文件、42 个测试           |
+| Web 订阅 API、Owner/Organization 门和浏览器伪造收件人拒绝 | `pnpm vitest run src/web/server.test.ts src/web/conversations.test.ts src/db/delivery-subscriptions.test.ts`     | 通过，3 个测试文件、13 个测试           |
+| Web 组件、显式开关与前端生产构建                          | `pnpm web:test && pnpm web:build`                                                                                | 通过，6 个测试文件、13 个测试；构建成功 |
+| Host 全量回归                                             | `pnpm test`                                                                                                      | 通过，95 个测试文件、933 个测试         |
+| Mock 飞书 SSO + Chromium 桌面/手机端                      | `pnpm web:e2e`                                                                                                   | 9 个通过、1 个按设备条件跳过            |
+
+订阅默认关闭，且只有当前 Lane Owner 能开关。API 只接受布尔值，服务端从相同飞书 App Scope
+下已经验证的 `open_id` 推导私聊地址；测试证明浏览器附带 Bob、伪造 `platformId` 或伪造
+`externalIdentityId` 都不能改变 Alice 的收件人，Bob 也不能关闭 Alice 的订阅。
+
+Delivery 测试覆盖飞书来源仍回复原飞书并进入 Web History、Web 来源默认只回复 Web、显式开启后
+额外发送 Alice 飞书私聊、重复 Drain 不产生第二条镜像，以及关闭后立即停止新镜像。中央账本只保存
+Session/出站行引用和状态，不保存正文。
+
+飞书 Adapter 测试证明相同稳定 Delivery ID 的重试会生成相同且不超过 50 字符的 `uuid`。飞书
+`sender_type=app` 事件在进入 Router 前被过滤，并记录 `cross_channel_loop_suppressed` 审计；
+重复 Callback 仍由现有入站去重表收敛。
+
+受限沙箱内首次运行 Host 全量回归时，项目已知的 `scripts/q.test.ts` 子进程 IPC 限制导致 7 个
+失败，另有 2 个 Worker 被系统终止；在允许本地 IPC 的同一环境中复跑后 933/933 全部通过。

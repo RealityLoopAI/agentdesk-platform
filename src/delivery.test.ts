@@ -38,6 +38,8 @@ import {
   createMessagingGroupAgent,
 } from './db/index.js';
 import { createConversationBinding, createConversationLane } from './db/conversation-lanes.js';
+import { disableFeishuDeliverySubscription, enableFeishuDeliverySubscription } from './db/delivery-subscriptions.js';
+import { createUserIdentity } from './db/user-identities.js';
 import { migrateDeliveredTable } from './db/session-db.js';
 import { resolveSession, inboundDbPath, outboundDbPath, writeSessionMessage } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter, drainInflightDeliveries } from './delivery.js';
@@ -349,10 +351,14 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     // with the triggering Web row before calling the adapter.
     insertOutbound('ag-1', session.id, 'out-web', 'feishu', 'feishu:oc_private', undefined, 'in-web');
 
-    const calls: Array<{ channelType: string; platformId: string }> = [];
+    const calls: Array<{
+      channelType: string;
+      platformId: string;
+      source?: { messageId: string; sessionId: string; originId?: string };
+    }> = [];
     setDeliveryAdapter({
-      async deliver(channelType, platformId) {
-        calls.push({ channelType, platformId });
+      async deliver(channelType, platformId, _threadId, _kind, _content, _files, source) {
+        calls.push({ channelType, platformId, source });
         return `platform-${calls.length}`;
       },
     });
@@ -373,12 +379,100 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     await deliverSessionMessages(session);
 
     expect(calls).toEqual([
-      { channelType: 'web', platformId: 'web:lane-alice' },
-      { channelType: 'feishu', platformId: 'feishu:oc_private' },
+      {
+        channelType: 'web',
+        platformId: 'web:lane-alice',
+        source: { messageId: 'out-web', sessionId: session.id },
+      },
+      {
+        channelType: 'feishu',
+        platformId: 'feishu:oc_private',
+        source: { messageId: 'out-feishu', sessionId: session.id },
+      },
     ]);
     expect(
       getDb().prepare('SELECT resource_id FROM web_events WHERE lane_id = ? ORDER BY sequence').all(lane.id),
     ).toEqual([{ resource_id: 'out-web' }, { resource_id: 'out-feishu' }]);
+
+    createUserIdentity({
+      userId: 'alice',
+      provider: 'feishu',
+      providerScope: 'app-a',
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
+    enableFeishuDeliverySubscription({
+      userId: 'alice',
+      laneId: lane.id,
+      providerScope: 'app-a',
+    });
+    writeSessionMessage('ag-1', session.id, {
+      id: 'in-web-subscribed',
+      kind: 'chat',
+      timestamp: createdAt,
+      platformId: 'web:lane-alice',
+      channelType: 'web',
+      threadId: null,
+      content: JSON.stringify({ text: 'send the reply to my Feishu DM too' }),
+      originUserId: 'alice',
+    });
+    insertOutbound('ag-1', session.id, 'out-web-subscribed', 'web', 'web:lane-alice', undefined, 'in-web-subscribed');
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+
+    expect(calls.slice(2)).toEqual([
+      {
+        channelType: 'web',
+        platformId: 'web:lane-alice',
+        source: { messageId: 'out-web-subscribed', sessionId: session.id },
+      },
+      {
+        channelType: 'feishu',
+        platformId: 'feishu:p2p:ou_alice',
+        source: {
+          messageId: expect.stringMatching(/^xcd-/),
+          sessionId: session.id,
+          originId: expect.stringMatching(/^xco-/),
+        },
+      },
+    ]);
+    expect(
+      getDb()
+        .prepare(
+          `SELECT status, attempts, platform_message_id
+           FROM cross_channel_deliveries
+           WHERE message_out_id = ?`,
+        )
+        .get('out-web-subscribed'),
+    ).toEqual({ status: 'delivered', attempts: 1, platform_message_id: 'platform-4' });
+
+    disableFeishuDeliverySubscription({ userId: 'alice', laneId: lane.id });
+    writeSessionMessage('ag-1', session.id, {
+      id: 'in-web-after-disable',
+      kind: 'chat',
+      timestamp: createdAt,
+      platformId: 'web:lane-alice',
+      channelType: 'web',
+      threadId: null,
+      content: JSON.stringify({ text: 'private again' }),
+      originUserId: 'alice',
+    });
+    insertOutbound(
+      'ag-1',
+      session.id,
+      'out-web-after-disable',
+      'web',
+      'web:lane-alice',
+      undefined,
+      'in-web-after-disable',
+    );
+    await deliverSessionMessages(session);
+    expect(calls.at(-1)).toEqual({
+      channelType: 'web',
+      platformId: 'web:lane-alice',
+      source: { messageId: 'out-web-after-disable', sessionId: session.id },
+    });
+    expect(calls).toHaveLength(5);
 
     writeSessionMessage('ag-1', session.id, {
       id: 'in-other-user',
@@ -393,7 +487,7 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     insertOutbound('ag-1', session.id, 'out-other-user', 'feishu', 'feishu:oc_private', undefined, 'in-other-user');
     await deliverSessionMessages(session);
 
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(5);
     expect(
       getDb().prepare('SELECT resource_id FROM web_events WHERE resource_id = ?').get('out-other-user'),
     ).toBeUndefined();

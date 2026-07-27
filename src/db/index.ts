@@ -69,6 +69,24 @@ export {
   type ResolveUserIdentityInput,
   type UserIdentityKey,
 } from './user-identities.js';
+export {
+  disableFeishuDeliverySubscription,
+  enableFeishuDeliverySubscription,
+  getActiveDeliverySubscription,
+  getCrossChannelDelivery,
+  getFeishuDeliverySubscriptionState,
+  listActiveDeliverySubscriptions,
+  listDueCrossChannelDeliveries,
+  markCrossChannelDeliveryDelivered,
+  markCrossChannelDeliveryRetry,
+  reserveCrossChannelDelivery,
+  suppressCrossChannelDelivery,
+  validateCrossChannelDeliveryTarget,
+  DeliverySubscriptionError,
+  type CrossChannelDelivery,
+  type CrossChannelDeliveryStatus,
+  type DeliverySubscription,
+} from './delivery-subscriptions.js';
 export { listSessions, traceRequest, type SessionFilter, type RequestTrace } from './operator-queries.js';
 export {
   createAgentGroup,

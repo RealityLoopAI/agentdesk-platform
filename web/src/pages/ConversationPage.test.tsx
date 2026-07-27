@@ -44,6 +44,16 @@ beforeEach(async () => {
       HttpResponse.json({ conversations: [conversation], availableAgentGroups: [conversation.agentGroup] }),
     ),
     http.get('/api/conversations/lane-1/messages', () => HttpResponse.json({ messages: [], nextCursor: null })),
+    http.get('/api/conversations/lane-1/delivery-subscription', () =>
+      HttpResponse.json({
+        subscription: {
+          channel: 'feishu',
+          deliveryKind: 'agent-reply-mirror',
+          enabled: false,
+          available: true,
+        },
+      }),
+    ),
   );
   await getMe();
 });
@@ -121,5 +131,32 @@ describe('ConversationPage', () => {
 
     expect(await screen.findByRole('heading', { name: '你无权访问这段会话' })).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('权限可能已经被管理员调整');
+  });
+
+  it('lets the user explicitly enable Feishu reply mirroring without sending a target identity', async () => {
+    let submitted: Record<string, unknown> = {};
+    server.use(
+      http.post('/api/conversations/lane-1/delivery-subscription', async ({ request }) => {
+        submitted = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({
+          subscription: {
+            channel: 'feishu',
+            deliveryKind: 'agent-reply-mirror',
+            enabled: true,
+            available: true,
+          },
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+
+    const toggle = await screen.findByRole('switch', { name: '同步 Agent 回复到飞书' });
+    expect(toggle).toHaveAttribute('aria-checked', 'false');
+    await user.click(toggle);
+
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+    expect(submitted).toEqual({ enabled: true });
+    expect(toggle).toHaveAttribute('title', expect.stringContaining('你在 Web 端发送的消息不会被重复发送'));
   });
 });

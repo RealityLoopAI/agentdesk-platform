@@ -82,6 +82,7 @@ function createSession() {
     clients: new Set(),
     eventRequests: [],
     idempotency: new Map(),
+    deliverySubscriptionEnabled: false,
     messages: [
       {
         id: 'message-feishu-1',
@@ -251,6 +252,40 @@ async function handle(req, res) {
 
   if (method === 'GET' && url.pathname === '/api/conversations/lane-main/messages') {
     json(res, 200, { messages: session.messages, nextCursor: null });
+    return;
+  }
+
+  if (method === 'GET' && url.pathname === '/api/conversations/lane-main/delivery-subscription') {
+    json(res, 200, {
+      subscription: {
+        channel: 'feishu',
+        deliveryKind: 'agent-reply-mirror',
+        enabled: session.deliverySubscriptionEnabled,
+        available: true,
+      },
+    });
+    return;
+  }
+
+  if (method === 'POST' && url.pathname === '/api/conversations/lane-main/delivery-subscription') {
+    if (req.headers['x-csrf-token'] !== session.csrfToken) {
+      json(res, 403, { error: 'request_forbidden' });
+      return;
+    }
+    const body = await readJson(req);
+    if (typeof body.enabled !== 'boolean') {
+      json(res, 400, { error: 'invalid_subscription_state' });
+      return;
+    }
+    session.deliverySubscriptionEnabled = body.enabled;
+    json(res, 200, {
+      subscription: {
+        channel: 'feishu',
+        deliveryKind: 'agent-reply-mirror',
+        enabled: session.deliverySubscriptionEnabled,
+        available: true,
+      },
+    });
     return;
   }
 

@@ -74,6 +74,11 @@ Lane 根 Session 后写事件，它不能把该引用作为用户身份或业务
 - 新增 Lane/Binding 表、Partial Unique Index 和 `sessions.conversation_lane_id`。
 - 新增不含正文的 Web 消息回执表，使并发重试返回同一个服务端消息。
 - 新增不含正文的 Web Event 表，支持 Last-Event-ID 重放和投递事件去重。
+- 飞书私聊额外投递使用独立的 `delivery_subscriptions`，不复用 Binding：关闭额外投递同意不能
+  破坏入站地址到 Lane 的连续映射。
+- 新增不含正文的 `cross_channel_deliveries` 引用账本；稳定 Origin/Delivery ID 用于 Host
+  持久化去重和飞书 `uuid` 请求幂等，每次重试前重新验证 Lane、Subscription 与外部身份。
+- 飞书入站在 Router 前过滤 `sender_type=app` 和配置的 Bot OpenID，并审计回环抑制。
 - Web Adapter 必须先认证并由服务端解析用户/Lane，浏览器字段不能覆盖上下文。
 - 回复路由从触发入站行读取来源，不再把 `sessions.messaging_group_id` 当作唯一地址。
 - SSE 只通知已持久化事件，支持授权后 Cursor 重放、连接上限和 Backpressure。

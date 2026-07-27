@@ -11,8 +11,10 @@
  * importing from `./feishu` as before.
  */
 import { EventDispatcher, LoggerLevel, WSClient } from '@larksuiteoapi/node-sdk';
+import { createHash } from 'node:crypto';
 
 import { PLATFORM_PROTOCOL_NAMESPACE } from '../branding.js';
+import { recordEnterpriseAudit } from '../db/enterprise-audit.js';
 import { markInboundSeen } from '../db/inbound-dedup.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -131,6 +133,17 @@ export function resolveAskQuestionExpectedUserId(
   const explicit = typeof explicitExpectedUserId === 'string' ? explicitExpectedUserId.trim() : '';
   if (explicit.startsWith('ou_')) return explicit;
   return target.receiveIdType === 'open_id' ? target.receiveId : undefined;
+}
+
+/**
+ * Build Feishu's request-level idempotency key for a mirrored text chunk.
+ *
+ * The Host supplies a stable, persisted cross-channel delivery id. Hashing it
+ * with the chunk index makes retries reuse the same key without exposing any
+ * user or message content, while staying below Feishu's 50-character limit.
+ */
+function feishuMirrorRequestUuid(deliveryId: string, chunkIndex: number): string {
+  return `m-${createHash('sha256').update(`${deliveryId}\0${chunkIndex}`).digest('base64url')}`;
 }
 
 function readEnvConfig(): FeishuConfig | null {
@@ -338,6 +351,7 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
     msgType: 'text' | 'interactive' | 'image' | 'file',
     content: string,
     threadId: string | null,
+    idempotencyKey?: string,
   ): Promise<string | undefined> {
     if (threadId) {
       const reply = await callApi<FeishuApiResponse & { data?: { message_id?: string } }>(
@@ -357,17 +371,18 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
       }
     }
 
-    const created = await callApi<FeishuApiResponse & { data?: { message_id?: string } }>(
-      `/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(target.receiveIdType)}`,
-      {
-        method: 'POST',
-        body: {
-          receive_id: target.receiveId,
-          msg_type: msgType,
-          content,
-        },
+    const created = await callApi<FeishuApiResponse & { data?: { message_id?: string } }>('/open-apis/im/v1/messages', {
+      method: 'POST',
+      query: {
+        receive_id_type: target.receiveIdType,
+        uuid: idempotencyKey,
       },
-    );
+      body: {
+        receive_id: target.receiveId,
+        msg_type: msgType,
+        content,
+      },
+    });
     if (created.code !== 0) {
       throw new Error(`Feishu send failed: ${created.msg || `code ${created.code}`}`);
     }
@@ -468,11 +483,13 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
     if (!setupConfig) return;
 
     const senderIdentity =
-      ([
-        ['open_id', readString(event.sender.sender_id.open_id)],
-        ['user_id', readString(event.sender.sender_id.user_id)],
-        ['union_id', readString(event.sender.sender_id.union_id)],
-      ] as const)
+      (
+        [
+          ['open_id', readString(event.sender.sender_id.open_id)],
+          ['user_id', readString(event.sender.sender_id.user_id)],
+          ['union_id', readString(event.sender.sender_id.union_id)],
+        ] as const
+      )
         .filter((entry): entry is readonly ['open_id' | 'user_id' | 'union_id', string] => Boolean(entry[1]))
         .map(([identifierType, externalSubject]) => ({
           provider: 'feishu',
@@ -498,7 +515,39 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
 
     return runInDetachedRoot(() =>
       withSpan('channel.feishu.receive', chainAttrs(spanAttributes), async () => {
-        if (config.botOpenId && senderId === config.botOpenId) return;
+        const loopSuppressionReason =
+          event.sender.sender_type === 'app'
+            ? 'sender_type_app'
+            : config.botOpenId && senderId === config.botOpenId
+              ? 'configured_bot_open_id'
+              : null;
+        if (loopSuppressionReason) {
+          if (!markInboundSeen('feishu', `msg:${event.message.message_id}`)) {
+            inboundTotal.labels('feishu', 'deduped').inc();
+            return;
+          }
+          // Defense in depth: Feishu normally avoids echoing a bot's own
+          // messages, but a provider event must never turn a mirrored reply
+          // back into fresh user input.
+          try {
+            recordEnterpriseAudit({
+              eventType: 'cross_channel_loop_suppressed',
+              actor: senderId ?? null,
+              details: {
+                channelType: 'feishu',
+                providerScope: config.appId,
+                reason: loopSuppressionReason,
+              },
+            });
+          } catch (err) {
+            // The safety decision must not depend on audit storage health.
+            log.error('Feishu self-message suppressed but audit write failed', {
+              reason: loopSuppressionReason,
+              err,
+            });
+          }
+          return;
+        }
 
         const platformId = normalizeFeishuPlatformId({
           chatId: event.message.chat_id,
@@ -1078,12 +1127,14 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
       if (!text.trim()) return firstId;
 
       const chunks = splitForLimit(text, DEFAULT_FEISHU_TEXT_LIMIT);
+      const mirrorDeliveryId = message.source?.originId ? message.source.messageId : undefined;
       for (let index = 0; index < chunks.length; index += 1) {
         const messageId = await createMessage(
           target,
           'text',
           JSON.stringify({ text: chunks[index] }),
           firstId ? null : index === 0 ? threadId : null,
+          mirrorDeliveryId ? feishuMirrorRequestUuid(mirrorDeliveryId, index) : undefined,
         );
         if (!firstId) firstId = messageId;
       }
