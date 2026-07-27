@@ -166,6 +166,11 @@ Fail Closed。
 Alice 和 Bob 即使在同一个飞书群也分别拥有 Lane 和根 Session；Alice 的 Web 消息只能复用
 Alice 的根 Session。共享模式的旧历史不能自动关联，因为其中可能已经含有其他用户内容。
 
+同一根 Session 内每个 Turn 仍保留自己的来源地址。出站回复通过 `in_reply_to` 回查 Host 写入的
+入站行，不使用 Session 最初绑定的 Messaging Group 作为当前地址；来源行的
+`origin_user_id` 还必须与 Lane Owner 一致。这一逐轮校验同时阻止 Web 私聊泄露到旧飞书群，以及
+其他群成员的行进入当前用户的 Web History。
+
 ## Entity Model
 
 ```

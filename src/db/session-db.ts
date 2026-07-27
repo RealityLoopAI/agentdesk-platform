@@ -403,6 +403,38 @@ export interface OutboundMessage {
   origin_user_id?: string | null;
 }
 
+export interface InboundReplyRoute {
+  message_id: string;
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+  origin_user_id: string | null;
+}
+
+/**
+ * Resolve the trusted address of the inbound row that triggered an outbound
+ * reply. Cross-channel Lane delivery uses this Host-written row instead of
+ * treating sessions.messaging_group_id or container-written routing fields as
+ * the current Turn's destination.
+ */
+export function getInboundReplyRoute(
+  db: Database.Database,
+  inReplyTo: string | null | undefined,
+): InboundReplyRoute | undefined {
+  if (!inReplyTo) return undefined;
+  return db
+    .prepare(
+      `SELECT id AS message_id, channel_type, platform_id, thread_id, origin_user_id
+       FROM messages_in
+       WHERE id = ?
+         AND kind IN ('chat', 'chat-sdk')
+         AND channel_type IS NOT NULL
+         AND platform_id IS NOT NULL
+       LIMIT 1`,
+    )
+    .get(inReplyTo) as InboundReplyRoute | undefined;
+}
+
 export function getDueOutboundMessages(db: Database.Database): OutboundMessage[] {
   return db
     .prepare(

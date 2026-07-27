@@ -63,12 +63,12 @@
 
 ## 6. 跨端可见性与投递策略
 
-- [ ] 6.1 调整 Delivery Routing，使 Agent 回复默认使用触发 Inbound Row 的来源地址，而不是假定 Session 只有一个 Messaging Group
-- [ ] 6.2 实现“飞书来源回复飞书并进入 Web History；Web 来源默认只回复 Web”的默认策略
+- [x] 6.1 调整 Delivery Routing，使 Agent 回复默认使用触发 Inbound Row 的来源地址，而不是假定 Session 只有一个 Messaging Group
+- [x] 6.2 实现“飞书来源回复飞书并进入 Web History；Web 来源默认只回复 Web”的默认策略
 - [ ] 6.3 实现用户显式授权的飞书私聊 Delivery Subscription，复用已验证外部身份且默认关闭
 - [ ] 6.4 为镜像投递增加稳定 Origin/Delivery ID、Bot Self Filter、持久化去重和回环抑制审计
 - [ ] 6.5 增加飞书到 Web、Web 默认不发飞书、已授权私聊镜像、重复 Callback 和跨用户订阅拒绝测试
-- [ ] 6.6 增加群聊隐私测试，证明 Web History 不会暴露其他参与者或 Shared Session 内容
+- [x] 6.6 增加群聊隐私测试，证明 Web History 不会暴露其他参与者或 Shared Session 内容
 
 ## 7. 多维表格 Gateway Operation 契约
 

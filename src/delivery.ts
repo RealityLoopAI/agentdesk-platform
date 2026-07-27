@@ -18,9 +18,11 @@ import {
   getDueOutboundMessages,
   getUndeliverableIds,
   getDeliveryAttempts,
+  getInboundReplyRoute,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
+  type OutboundMessage,
 } from './db/session-db.js';
 import {
   DELIVERY_BACKOFF_SCHEDULE_SEC,
@@ -67,6 +69,8 @@ import { withSpan } from './observability/with-span.js';
 import { getActiveSpan } from './observability/tracer.js';
 import { clearSessionSpanContext, getSessionSpanContext, endSessionRootSpan } from './observability/context-bridge.js';
 import { setSpanContextWithActive, context } from './observability/trace-context.js';
+import { getConversationLane } from './db/conversation-lanes.js';
+import { appendWebEvent } from './db/web-events.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -115,6 +119,73 @@ function withDeliveryTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * second caller skips will be picked up on the next poll tick (~1s).
  */
 const inflightDeliveries = new Set<string>();
+
+/**
+ * A Lane can receive alternating Web and Feishu turns while retaining one
+ * root Session. For user-facing replies, the Host-written inbound row named
+ * by in_reply_to is the authority for this Turn's destination. This prevents
+ * a stale sessions.messaging_group_id (or container-supplied address) from
+ * sending a private Web turn into a Feishu group.
+ */
+function routeLaneReplyFromInbound(
+  session: Session,
+  inDb: Database.Database,
+  message: OutboundMessage,
+): OutboundMessage {
+  if (
+    !session.conversation_lane_id ||
+    message.kind === 'system' ||
+    message.kind === 'roster' ||
+    message.channel_type === 'agent'
+  ) {
+    return message;
+  }
+  const source = getInboundReplyRoute(inDb, message.in_reply_to);
+  if (!source) {
+    throw new Error('conversation Lane reply is missing a trusted inbound source');
+  }
+  if (!session.owner_user_id || source.origin_user_id !== session.owner_user_id) {
+    throw new Error('conversation Lane reply source owner mismatch');
+  }
+  return {
+    ...message,
+    channel_type: source.channel_type,
+    platform_id: source.platform_id,
+    thread_id: source.thread_id,
+  };
+}
+
+/**
+ * Make every successfully delivered Lane reply visible to the browser. The
+ * event stores only a durable outbound-row reference; message text remains in
+ * the per-Session DB pair. Web Adapter delivery may have already appended the
+ * same event, and the unique resource key makes that path idempotent.
+ */
+function publishLaneReplyAvailable(session: Session, message: OutboundMessage): void {
+  if (
+    !session.conversation_lane_id ||
+    message.kind === 'system' ||
+    message.kind === 'roster' ||
+    message.channel_type === 'agent'
+  ) {
+    return;
+  }
+  const lane = getConversationLane(session.conversation_lane_id);
+  if (
+    !lane ||
+    lane.status !== 'active' ||
+    lane.root_session_id !== session.id ||
+    lane.owner_user_id !== session.owner_user_id
+  ) {
+    throw new Error('conversation Lane is unavailable for Web history notification');
+  }
+  appendWebEvent({
+    userId: lane.owner_user_id,
+    laneId: lane.id,
+    eventType: 'conversation.message.available',
+    resourceId: message.id,
+  });
+}
 
 /**
  * Short-lived membership cache (ADR-0023 item 12). When ROSTER_VERIFY_MEMBERSHIP
@@ -339,6 +410,8 @@ async function drainSession(session: Session): Promise<void> {
 
     try {
       for (const msg of undelivered) {
+        let deliveryMessage = msg;
+        let failureNoticeRouteTrusted = !session.conversation_lane_id;
         try {
           if (msg.kind === 'llm-usage') {
             const drainSpan = getActiveSpan();
@@ -347,8 +420,21 @@ async function drainSession(session: Session): Promise<void> {
             handledOutbound = true;
             continue;
           }
-          const platformMsgId = await deliverMessage(msg, session, inDb);
+          deliveryMessage = routeLaneReplyFromInbound(session, inDb, msg);
+          failureNoticeRouteTrusted = true;
+          const platformMsgId = await deliverMessage(deliveryMessage, session, inDb);
           markDelivered(inDb, msg.id, platformMsgId ?? null);
+          try {
+            publishLaneReplyAvailable(session, deliveryMessage);
+          } catch (err) {
+            // The primary external delivery is already durable. Notification
+            // bookkeeping must never turn it back into an at-least-once retry.
+            log.error('Lane reply delivered but Web notification failed', {
+              messageId: msg.id,
+              sessionId: session.id,
+              err,
+            });
+          }
           // Delete outbox attachment files only AFTER the delivered row is
           // durably recorded. The old order (clear inside deliverMessage,
           // before this markDelivered) meant a crash in between re-delivered
@@ -401,12 +487,17 @@ async function drainSession(session: Session): Promise<void> {
               // adapter that just failed. If the channel is fully down this also
               // fails — but for message-specific failures (too long / bad format)
               // a short text note still gets through. Never throws. (roadmap 6.1)
-              if (deliveryAdapter && msg.channel_type && msg.platform_id) {
+              if (
+                failureNoticeRouteTrusted &&
+                deliveryAdapter &&
+                deliveryMessage.channel_type &&
+                deliveryMessage.platform_id
+              ) {
                 try {
                   await deliveryAdapter.deliver(
-                    msg.channel_type,
-                    msg.platform_id,
-                    msg.thread_id,
+                    deliveryMessage.channel_type,
+                    deliveryMessage.platform_id,
+                    deliveryMessage.thread_id,
                     'chat',
                     JSON.stringify({
                       text: "⚠️ I couldn't deliver my last reply — it kept failing, so I stopped retrying. Please ask again.",

@@ -197,3 +197,23 @@ SSE Event；页面刷新后仍能恢复历史。主动断开 SSE 后，测试确
 桌面和手机视觉基线都包含品牌 Logo、深青/暖白主题、会话导航、飞书来源标记和输入区域。手机测试
 额外验证从消息页返回列表；`prefers-reduced-motion: reduce` 下，Agent 处理状态的 Logo 动画
 计算值为 `none`。正式运营 Logo 的批准仍属于任务 5.9，不因测试资产通过而自动视为完成。
+
+## 跨端逐轮回复路由与群聊隐私
+
+验证日期：2026-07-27
+
+| 范围                                               | 命令                                                                                                                         | 结果                                                 |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Delivery 逐轮来源路由、持久化事件、基础 Session DB | `pnpm exec vitest run src/delivery.test.ts src/db/session-db.test.ts src/web/conversations.test.ts src/channels/web.test.ts` | 通过，4 个测试文件、29 个测试                        |
+| Host 类型检查                                      | `pnpm typecheck`                                                                                                             | 通过                                                 |
+| 新增代码 Lint                                      | `pnpm exec eslint src/db/session-db.ts src/delivery.ts src/delivery.test.ts`                                                 | 通过，无错误；12 条为这些旧文件已有的 catch-all 警告 |
+| Host 全量回归                                      | `pnpm test`                                                                                                                  | 通过，93 个测试文件、927 个测试                      |
+
+Delivery 测试在同一个 Alice Lane 中依次写入 Web 和飞书入站行，并故意让对应出站行携带相反的
+旧地址。Host 最终仍根据 `in_reply_to` 指向的 Host 单写入站行，分别只投递到 Web 和原飞书
+会话；两条回复都产生幂等 Web History 可用事件。该结果证明 Session 初始 Messaging Group 和
+Container 提供的地址都不能覆盖当前 Turn 的可信来源。
+
+隐私回归同时覆盖两个边界：Alice/Bob 即使位于同一个飞书群也解析到不同的用户 Lane；测试向
+Alice 根 Session 注入带 Bob `origin_user_id` 的异常行后，Alice 的 Web History 仍会 Fail
+Closed 地过滤该行。`shared`、`agent-shared` 等多人 Session 也不会自动关联到用户 Lane。

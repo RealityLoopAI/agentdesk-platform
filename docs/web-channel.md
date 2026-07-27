@@ -82,6 +82,27 @@ Web Agent 回复只有在 `messages_out` 已存在后才进入 Web Adapter；Hos
 `messageId/sessionId` 投递引用，Adapter 用它校验 Lane 根 Session 并写入
 `conversation.message.available` 事件。重复投递由事件唯一键收敛，不会产生多条通知。
 
+## 跨端回复的默认投递
+
+同一个 Lane 可以连续收到飞书和 Web 消息，但它只对应一个根 Session。因此
+`sessions.messaging_group_id` 只表示创建 Session 时的入口，不能代表当前这一轮应回复到哪里。
+对于普通用户可见回复，Delivery 会读取出站行的 `in_reply_to`，再从 Host 单写的
+`messages_in` 行取得本轮的 `channel_type`、`platform_id` 和 `thread_id`。Container 写入的出站
+地址即使过期或错误，也会被这个可信来源地址覆盖。
+
+默认投递规则如下：
+
+- 飞书入站触发的回复投递到原飞书会话，同时写入只含消息引用的 Web Event，浏览器重新读取
+  History 后可以看到回复；
+- Web 入站触发的回复只投递到该用户自己的 Web Binding，不会因为 Session 最初来自飞书而发送到
+  飞书；
+- 来源行的 `origin_user_id` 如果与 Lane Owner 不一致，投递会 Fail Closed；
+- Web Event 写入失败不会把已经成功发送到外部渠道的消息重新投递，避免制造重复消息。
+
+Web History 仍按 Lane Owner 过滤 `messages_in.origin_user_id`，也拒绝把 `shared`、
+`agent-shared` 等多人 Session 自动关联到用户 Lane。因此“飞书回复在 Web 可见”只复用同一用户
+已经隔离的根 Session，不会把群内其他参与者或旧 Shared Session 的内容带入浏览器。
+
 ## 前端工程与品牌
 
 `web/` 是 React + Vite + TypeScript 单页应用。React Router 让当前 Lane 体现在

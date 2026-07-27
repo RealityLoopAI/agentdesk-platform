@@ -146,6 +146,12 @@ Feishu chat and Feishu SSO resolve to the same opaque `users.id`.
    Host Envelope 元数据交给 Web Adapter。它们不能从浏览器 JSON 或 Agent 可见正文复制。Web
    消息随后复用通用 Router 的 Persist-before-route 路径；详见 [web-channel.md](web-channel.md)。
 
+6. **Lane 的逐轮回复地址。** 一个 Lane 的根 Session 可以交替接收飞书和 Web 消息，因此创建
+   Session 时保存的 Messaging Group 不是永久回复地址。对于用户可见出站消息，Host 根据
+   `in_reply_to` 读取自己写入的 `messages_in` 行，并以该行的 Channel、Platform 和 Thread
+   覆盖 Container 提供的地址。飞书来源的回复另外发布 Web History 可用事件；Web 来源默认只
+   回复 Web。来源用户与 Lane Owner 不一致时拒绝投递。
+
 ## Channel Adapters
 
 Channel adapters are responsible for:

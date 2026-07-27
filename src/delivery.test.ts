@@ -28,9 +28,18 @@ vi.mock('./config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
+import {
+  initTestDb,
+  closeDb,
+  getDb,
+  runMigrations,
+  createAgentGroup,
+  createMessagingGroup,
+  createMessagingGroupAgent,
+} from './db/index.js';
+import { createConversationBinding, createConversationLane } from './db/conversation-lanes.js';
 import { migrateDeliveredTable } from './db/session-db.js';
-import { resolveSession, inboundDbPath, outboundDbPath } from './session-manager.js';
+import { resolveSession, inboundDbPath, outboundDbPath, writeSessionMessage } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter, drainInflightDeliveries } from './delivery.js';
 import { maybeStartProgressStatus } from './modules/progress-status/index.js';
 import { consumeSessionSpanContext, storeSessionSpanContext } from './observability/context-bridge.js';
@@ -85,12 +94,13 @@ function insertOutbound(
   channelType = 'telegram',
   platformId = 'telegram:123',
   timestamp?: string,
+  inReplyTo?: string,
 ): void {
   const db = new Database(outboundDbPath(agentGroupId, sessionId));
   db.prepare(
-    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
-     VALUES (?, COALESCE(?, datetime('now')), 'chat', ?, ?, ?)`,
-  ).run(msgId, timestamp ?? null, platformId, channelType, JSON.stringify({ text: 'hello' }));
+    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content, in_reply_to)
+     VALUES (?, COALESCE(?, datetime('now')), 'chat', ?, ?, ?, ?)`,
+  ).run(msgId, timestamp ?? null, platformId, channelType, JSON.stringify({ text: 'hello' }), inReplyTo ?? null);
   db.close();
 }
 
@@ -263,6 +273,130 @@ describe('deliverSessionMessages — concurrent invocations', () => {
         emoji: 'THINKING',
       }),
     ]);
+  });
+
+  it('routes each Lane reply from its triggering inbound row and publishes both channels to Web history', async () => {
+    const createdAt = now();
+    createAgentGroup({
+      id: 'ag-1',
+      name: 'Test Agent',
+      folder: 'test-agent',
+      agent_provider: null,
+      created_at: createdAt,
+    });
+    getDb()
+      .prepare('INSERT INTO users (id, kind, display_name, created_at) VALUES (?, ?, ?, ?)')
+      .run('alice', 'person', 'Alice', createdAt);
+    for (const group of [
+      { id: 'mg-feishu', channel_type: 'feishu', platform_id: 'feishu:oc_private' },
+      { id: 'mg-web', channel_type: 'web', platform_id: 'web:lane-alice' },
+    ]) {
+      createMessagingGroup({
+        ...group,
+        name: group.id,
+        is_group: group.channel_type === 'feishu' ? 1 : 0,
+        unknown_sender_policy: 'strict',
+        created_at: createdAt,
+      });
+      createMessagingGroupAgent({
+        id: `mga-${group.id}`,
+        messaging_group_id: group.id,
+        agent_group_id: 'ag-1',
+        engage_mode: 'pattern',
+        engage_pattern: '.',
+        sender_scope: 'known',
+        ignored_message_policy: 'drop',
+        session_mode: 'per-user',
+        priority: 0,
+        created_at: createdAt,
+      });
+    }
+    const lane = createConversationLane({
+      id: 'lane-alice',
+      agentGroupId: 'ag-1',
+      ownerUserId: 'alice',
+      createdAt,
+    });
+    createConversationBinding({
+      laneId: lane.id,
+      channelType: 'feishu',
+      messagingGroupId: 'mg-feishu',
+      platformId: 'feishu:oc_private',
+      deliveryMode: 'source-reply',
+      verifiedAt: createdAt,
+    });
+    createConversationBinding({
+      laneId: lane.id,
+      channelType: 'web',
+      messagingGroupId: 'mg-web',
+      platformId: 'web:lane-alice',
+      deliveryMode: 'source-reply',
+      verifiedAt: createdAt,
+    });
+    const { session } = resolveSession('ag-1', 'mg-feishu', null, 'per-user', 'alice', null, null, lane.id);
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'in-web',
+      kind: 'chat',
+      timestamp: createdAt,
+      platformId: 'web:lane-alice',
+      channelType: 'web',
+      threadId: null,
+      content: JSON.stringify({ text: 'private browser question' }),
+      originUserId: 'alice',
+    });
+    // Deliberately stamp the stale Feishu address. The Host must replace it
+    // with the triggering Web row before calling the adapter.
+    insertOutbound('ag-1', session.id, 'out-web', 'feishu', 'feishu:oc_private', undefined, 'in-web');
+
+    const calls: Array<{ channelType: string; platformId: string }> = [];
+    setDeliveryAdapter({
+      async deliver(channelType, platformId) {
+        calls.push({ channelType, platformId });
+        return `platform-${calls.length}`;
+      },
+    });
+    await deliverSessionMessages(session);
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'in-feishu',
+      kind: 'chat',
+      timestamp: createdAt,
+      platformId: 'feishu:oc_private',
+      channelType: 'feishu',
+      threadId: 'thread-feishu',
+      content: JSON.stringify({ text: 'Feishu follow-up' }),
+      originUserId: 'alice',
+    });
+    // Reverse the stale address to prove the source row controls both ways.
+    insertOutbound('ag-1', session.id, 'out-feishu', 'web', 'web:lane-alice', undefined, 'in-feishu');
+    await deliverSessionMessages(session);
+
+    expect(calls).toEqual([
+      { channelType: 'web', platformId: 'web:lane-alice' },
+      { channelType: 'feishu', platformId: 'feishu:oc_private' },
+    ]);
+    expect(
+      getDb().prepare('SELECT resource_id FROM web_events WHERE lane_id = ? ORDER BY sequence').all(lane.id),
+    ).toEqual([{ resource_id: 'out-web' }, { resource_id: 'out-feishu' }]);
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'in-other-user',
+      kind: 'chat',
+      timestamp: createdAt,
+      platformId: 'feishu:oc_private',
+      channelType: 'feishu',
+      threadId: null,
+      content: JSON.stringify({ text: 'must not escape this user boundary' }),
+      originUserId: 'bob',
+    });
+    insertOutbound('ag-1', session.id, 'out-other-user', 'feishu', 'feishu:oc_private', undefined, 'in-other-user');
+    await deliverSessionMessages(session);
+
+    expect(calls).toHaveLength(2);
+    expect(
+      getDb().prepare('SELECT resource_id FROM web_events WHERE resource_id = ?').get('out-other-user'),
+    ).toBeUndefined();
   });
 });
 
