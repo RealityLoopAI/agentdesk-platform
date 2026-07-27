@@ -22,7 +22,7 @@
  */
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
-import { Resource } from '@opentelemetry/resources';
+import { resourceFromAttributes } from '@opentelemetry/resources';
 import {
   ATTR_SERVICE_NAME,
   ATTR_SERVICE_VERSION,
@@ -70,11 +70,17 @@ export function initRunnerObservability(env: NodeJS.ProcessEnv = process.env): b
   }
 
   try {
+    // OTEL 0.221 enables metrics/log exporters from environment defaults.
+    // The runner exports traces only; keep the other pipelines disabled unless
+    // an operator explicitly configures them.
+    process.env.OTEL_METRICS_EXPORTER ??= 'none';
+    process.env.OTEL_LOGS_EXPORTER ??= 'none';
+
     const traceExporter = new OTLPTraceExporter({
       url: env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT || DEFAULT_TRACES_ENDPOINT,
     });
 
-    const resource = new Resource({
+    const resource = resourceFromAttributes({
       [ATTR_SERVICE_NAME]: env.OTEL_SERVICE_NAME || DEFAULT_SERVICE_NAME,
       [ATTR_SERVICE_VERSION]: DEFAULT_SERVICE_VERSION,
       [ATTR_DEPLOYMENT_ENVIRONMENT_NAME]: env.NODE_ENV || 'production',

@@ -43,8 +43,9 @@ let contextManager: AsyncHooksContextManager;
 
 beforeEach(() => {
   exporter = new InMemorySpanExporter();
-  provider = new BasicTracerProvider();
-  provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
+  provider = new BasicTracerProvider({
+    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  });
   // Register as the global provider so getTracer() returns recording spans.
   trace.setGlobalTracerProvider(provider);
   // Production's NodeSDK registers the W3C propagator from OTEL_PROPAGATORS
@@ -167,10 +168,10 @@ describe('span tree on the host trace', () => {
     // agent.turn joins the host trace.
     expect(turn?.spanContext().traceId).toBe(HOST_TRACE_ID);
     // agent.turn's parent is the host root span.
-    expect(turn?.parentSpanId).toBe(HOST_SPAN_ID);
+    expect(turn?.parentSpanContext?.spanId).toBe(HOST_SPAN_ID);
     // provider.request is a child of agent.turn, same trace.
     expect(llm?.spanContext().traceId).toBe(HOST_TRACE_ID);
-    expect(llm?.parentSpanId).toBe(turn?.spanContext().spanId);
+    expect(llm?.parentSpanContext?.spanId).toBe(turn?.spanContext().spanId);
     expect(turn?.attributes['openinference.span.kind']).toBe('AGENT');
     expect(llm?.attributes['openinference.span.kind']).toBe('LLM');
   });

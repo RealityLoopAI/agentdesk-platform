@@ -108,16 +108,21 @@ when the dependency tree changes:
 
 | GHSA | Package | Why not applicable |
 |---|---|---|
-| `GHSA-w5hq-g745-h8pq` | `uuid@9` (transitive, via `gaxios` ← OTEL GCP resource detector) | "Missing buffer bounds check in v3/v5/v6 when a buffer is supplied." Only `uuid.v4()` (no buffer argument) is reached on this path, so the vulnerable functions are never invoked. The fix is a major bump (uuid 9 → 11) under `gaxios`, in a GCP-detector path this platform (bare Node / Docker, not GCP) does not exercise. |
+| `GHSA-qwww-vcr4-c8h2` | `react-router@7.18.1` (via the Web SPA's `react-router-dom`) | The advisory applies only to React Server Components mode and server-side Action execution. This repository ships a static Vite SPA: it has no React Router framework/RSC server, server routes, loaders, or Actions; the Host serves immutable assets and implements API endpoints independently. The advisory's stated patched release (`8.3.0`) is not published in the configured npm registry as of 2026-07-27, so there is no installable patched release. Re-evaluate this suppression when an upstream release becomes available or if the Web application adopts SSR/RSC. |
 
 `GHSA-q7rr-3cgh-j5r3` (`@opentelemetry/exporter-prometheus`) was previously
 suppressed here; it is now **resolved** by the host OTEL upgrade to the
-0.219 train (`@opentelemetry/exporter-prometheus@0.219.0` carries the fix that
+0.221 train (`@opentelemetry/exporter-prometheus@0.221.0` carries the fix that
 landed in ≥0.217). The suppression has been removed from
 `package.json` → `pnpm.auditConfig.ignoreGhsas`.
 
+`GHSA-w5hq-g745-h8pq` (`uuid@9`) was previously suppressed here. It is now
+absent from the production dependency tree after overriding the OTEL GCP
+resource detector's `gaxios` dependency to `7.3.0`; the suppression has been
+removed.
+
 Reachable advisories are remediated via `pnpm.overrides` (currently
-`axios`, `ws`, `qs`, `protobufjs`, `form-data`, `brace-expansion`,
+`axios`, `gaxios`, `ws`, `qs`, `protobufjs`, `form-data`, and
 `@opentelemetry/propagator-jaeger` pinned to patched in-major versions).
 Notable pins:
 
@@ -125,21 +130,25 @@ Notable pins:
 |---|---|---|
 | `form-data@^4.0.6` | `GHSA-hmw2-7cc7-3qxx` | CRLF injection via unescaped multipart field/filenames on `@larksuiteoapi/node-sdk → axios → form-data` — same-major patch bump. |
 | `axios@^1.18.0` | `GHSA-gcfj-64vw-6mp9` | Node HTTP adapter can use an inherited proxy config; reached through the Feishu SDK's own axios dependency. |
-| `brace-expansion@^2.1.4` | `GHSA-3jxr-9vmj-r5cp`, `GHSA-mh99-v99m-4gvg`, `GHSA-rgw5-rvv9-x895` | Three DoS advisories (exponential-time / unbounded expansion) on the `@opentelemetry/auto-instrumentations-node → … → minimatch → brace-expansion` path. One pin clears all three. |
+| `gaxios@^7.3.0` | `GHSA-w5hq-g745-h8pq` | Removes the affected `uuid@9` path pulled in by the OTEL GCP resource detector. |
 | `@opentelemetry/propagator-jaeger@^2.9.0` | `GHSA-45rx-2jwx-cxfr` | OTEL propagator DoS, pulled in transitively by `@opentelemetry/sdk-node`. |
 
-These four were fresh transitive advisories that turned the CI audit gate red
+These pins address reachable or production-tree advisories that turned the CI audit gate red
 without any dependency change on our side — a reminder that a green local test
 run does not imply green CI. Reproduce the gate locally with `pnpm run audit`
 before assuming a push is clean.
 
 ### Known-deferred (container)
 
-Two container advisories are deferred rather than fixed, because the only fix is
+One container advisory is deferred rather than fixed, because the only fix is
 a major dependency bump that is not safe to apply blind:
 
-- **`GHSA-q7rr-3cgh-j5r3` — `@opentelemetry/sdk-node`** (high). Same Prometheus-exporter-crash advisory as the host; the container's OTEL starts only OTLP trace export and never instantiates the Prometheus exporter, so it is not reachable. Fix needs the OTEL 0.55 → 0.217 jump.
 - **`GHSA-p7fg-763f-g4gf` — `@anthropic-ai/sdk`** (moderate). "Insecure default file permissions in the Local Filesystem Memory Tool." `@anthropic-ai/claude-agent-sdk@0.2.116` pins `@anthropic-ai/sdk@^0.81.0`, and the fix (`>=0.91.1`) is outside that range — clearing it requires bumping `claude-agent-sdk` (0.2 → 0.3), which changes the core Claude execution path (including the `SDKResultMessage` shape the ADR-0026 usage span depends on) and needs real-API verification. Low in-context impact: containers are single-session-isolated and this platform uses gateway-mode memory, not the local filesystem memory tool. Tracked for a deliberate, separately-verified SDK upgrade.
+
+The runner's former OpenTelemetry 0.55 deferral was resolved on 2026-07-27 by
+upgrading its trace-only SDK/exporter/resources stack to the 0.221/2.10 train.
+This removes the Prometheus-exporter and Jaeger-propagator high advisories; the
+runner still disables OTEL metrics and logs by default and exports only traces.
 
 ## Operator Hardening
 

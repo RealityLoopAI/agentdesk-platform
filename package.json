@@ -53,10 +53,10 @@
     "@larksuiteoapi/node-sdk": "1.73.0",
     "@onecli-sh/sdk": "^2.4.0",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/auto-instrumentations-node": "^0.77.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.79.0",
     "@opentelemetry/exporter-trace-otlp-proto": "0.221.0",
-    "@opentelemetry/resources": "^2.8.0",
-    "@opentelemetry/sdk-node": "^0.219.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
     "better-sqlite3": "^13.0.3",
     "chat": "^4.38.0",
@@ -82,6 +82,7 @@
   "pnpm": {
     "overrides": {
       "axios": "^1.18.0",
+      "gaxios": "^7.3.0",
       "ws": "^8.20.1",
       "qs": "^6.15.2",
       "protobufjs": "^7.5.8",
@@ -90,7 +91,7 @@
     },
     "auditConfig": {
       "ignoreGhsas": [
-        "GHSA-w5hq-g745-h8pq"
+        "GHSA-qwww-vcr4-c8h2"
       ]
     }
   }
