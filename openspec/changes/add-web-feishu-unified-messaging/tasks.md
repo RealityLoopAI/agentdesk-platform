@@ -27,14 +27,14 @@
 
 ## 4. Conversation Lane 与跨渠道 Session
 
-- [ ] 4.1 新增中央数据库 Migration，创建 `conversation_lanes`、`conversation_bindings` 并为 `sessions` 增加 `conversation_lane_id`
-- [ ] 4.2 实现 Lane/Binding DB 模块，包括 SQLite NULL 语义安全的 Partial Unique Index 和撤销逻辑
-- [ ] 4.3 扩展 Session Resolver，使 Web 和已验证飞书 Binding 可按 Lane 解析到同一用户级根 Session
-- [ ] 4.4 拒绝把 `shared`、`per-thread` 或 `agent-shared` Session 自动关联到用户级 Lane
-- [ ] 4.5 实现旧飞书 `per-user`/`per-user-per-thread` Session 的确定性显式关联，禁止跨用户历史合并
-- [ ] 4.6 保证每条 Inbound Row 保留 Channel、Platform、Thread、External Message ID 和规范用户来源
-- [ ] 4.7 增加 Alice/Bob 同群隔离、飞书/Web 同用户连续性、旧 Session 兼容和非法共享 Session 关联测试
-- [ ] 4.8 增加 A2A 回归测试，证明跨渠道 Turn 的 `origin_user_id` 经 Host 校验后正确传播到多层 Worker
+- [x] 4.1 新增中央数据库 Migration，创建 `conversation_lanes`、`conversation_bindings` 并为 `sessions` 增加 `conversation_lane_id`
+- [x] 4.2 实现 Lane/Binding DB 模块，包括 SQLite NULL 语义安全的 Partial Unique Index 和撤销逻辑
+- [x] 4.3 扩展 Session Resolver，使 Web 和已验证飞书 Binding 可按 Lane 解析到同一用户级根 Session
+- [x] 4.4 拒绝把 `shared`、`per-thread` 或 `agent-shared` Session 自动关联到用户级 Lane
+- [x] 4.5 实现旧飞书 `per-user`/`per-user-per-thread` Session 的确定性显式关联，禁止跨用户历史合并
+- [x] 4.6 保证每条 Inbound Row 保留 Channel、Platform、Thread、External Message ID 和规范用户来源
+- [x] 4.7 增加 Alice/Bob 同群隔离、飞书/Web 同用户连续性、旧 Session 兼容和非法共享 Session 关联测试
+- [x] 4.8 增加 A2A 回归测试，证明跨渠道 Turn 的 `origin_user_id` 经 Host 校验后正确传播到多层 Worker
 
 ## 5. Web Channel、API 与前端
 

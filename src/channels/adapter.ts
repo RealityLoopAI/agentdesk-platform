@@ -60,6 +60,13 @@ export interface InboundEvent {
   channelType: string;
   platformId: string;
   threadId: string | null;
+  /**
+   * Host-verified structural conversation key (ADR-0055).
+   *
+   * Only an authenticated server-side adapter may set this field. Browser
+   * payloads and chat message content must never be copied into it.
+   */
+  conversationLaneId?: string;
   message: {
     id: string;
     kind: 'chat' | 'chat-sdk';

@@ -201,7 +201,10 @@ Populated lazily by `ensureUserDm()` in `src/modules/permissions/user-dm.ts`.
 
 ### 1.8 `sessions`
 
-Session registry. One row per `(agent group, messaging group, thread, owner_user_id)` tuple subject to `session_mode`. `owner_user_id` is null for legacy/shared sessions and populated only for user-scoped modes. Stores lifecycle metadata only — no messages.
+Session registry. 未关联跨渠道 Lane 时，一行通常对应受 `session_mode` 约束的
+`(agent group, messaging group, thread, owner_user_id)`。关联 Lane 后，来自不同渠道的同一用户
+可以通过 `conversation_lane_id` 解析到同一个根 Session。`owner_user_id` 在旧版/共享 Session
+中为空，只在用户级模式中保存。该表只保存生命周期和结构元数据，不保存消息正文。
 
 ```sql
 CREATE TABLE sessions (
@@ -210,19 +213,69 @@ CREATE TABLE sessions (
   messaging_group_id TEXT REFERENCES messaging_groups(id),
   thread_id          TEXT,
   owner_user_id      TEXT,
+  root_session_id    TEXT,
+  conversation_thread_id TEXT,
+  conversation_lane_id TEXT REFERENCES conversation_lanes(id),
   agent_provider     TEXT,
   status             TEXT DEFAULT 'active',
   container_status   TEXT DEFAULT 'stopped',
   last_active        TEXT,
+  archived_at        TEXT,
+  spawn_depth        INTEGER NOT NULL DEFAULT 0,
   created_at         TEXT NOT NULL
 );
 CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup     ON sessions(messaging_group_id, thread_id);
 CREATE INDEX idx_sessions_lookup_owner ON sessions(agent_group_id, messaging_group_id, owner_user_id, thread_id);
+CREATE INDEX idx_sessions_conversation_lane ON sessions(conversation_lane_id);
 ```
 
 - **Resolved by:** `resolveSession()` in `src/session-manager.ts`.
+- `conversation_lane_id` 是跨渠道结构查询键；`conversation_thread_id` 只用于观测关联，严禁用于
+  Lane 路由或授权（ADR-0039、ADR-0055）。
 - Creating a session also provisions the session folder and both session DBs via `initSessionFolder()` — see [db-session.md](db-session.md).
+
+### 1.8a `conversation_lanes` 与 `conversation_bindings`（ADR-0055）
+
+`conversation_lanes` 表示“一个规范用户在一个 Agent Group 中的一条逻辑会话”，并指向该会话的
+根 Session。`conversation_bindings` 把经过验证的飞书/Web 地址映射到 Lane。Organization 不在
+这两张表重复保存，而是始终从不可变的 `agent_group_id` 推导并由 Host 访问门检查。
+
+```sql
+CREATE TABLE conversation_lanes (
+  id              TEXT PRIMARY KEY,
+  agent_group_id  TEXT NOT NULL REFERENCES agent_groups(id),
+  owner_user_id   TEXT NOT NULL REFERENCES users(id),
+  root_session_id TEXT REFERENCES sessions(id),
+  status          TEXT NOT NULL CHECK(status IN ('active', 'archived')),
+  created_at      TEXT NOT NULL,
+  archived_at     TEXT
+);
+
+CREATE TABLE conversation_bindings (
+  id                   TEXT PRIMARY KEY,
+  lane_id              TEXT NOT NULL REFERENCES conversation_lanes(id),
+  channel_type         TEXT NOT NULL,
+  messaging_group_id   TEXT REFERENCES messaging_groups(id),
+  platform_id          TEXT NOT NULL,
+  thread_id            TEXT,
+  external_identity_id TEXT REFERENCES user_identities(id),
+  delivery_mode        TEXT NOT NULL
+                        CHECK(delivery_mode IN ('history-only', 'source-reply', 'mirror-dm')),
+  verified_at          TEXT NOT NULL,
+  revoked_at           TEXT
+);
+```
+
+- 活跃 Binding 的唯一性由四个 Partial Unique Index 分别覆盖 Thread/Identity 的 NULL 与非 NULL
+  组合；这是为了避免 SQLite 把多个 NULL 当作互不相等而放过重复地址。
+- Binding 被撤销时设置 `revoked_at`，保留审计历史；同一地址随后可以重新绑定。
+- 只有 `per-user` / `per-user-per-thread` Session 能关联 Lane。`shared`、`per-thread` 和
+  `agent-shared` 会被拒绝，避免把多人的历史静默合并。
+- 旧飞书 Session 只能通过“精确 Session ID + 已验证外部身份”的确定性操作关联，不扫描或合并
+  其他用户的历史。
+- **访问层：** `src/db/conversation-lanes.ts`；**结构迁移：**
+  `src/db/migrations/038-conversation-lanes.ts`。
 
 ### 1.9 `pending_questions`
 
@@ -444,6 +497,9 @@ Migrations live in `src/db/migrations/`, one file per migration. Runner: `runMig
 | 007 | `007-pending-approvals-title-options.ts` | `ALTER TABLE pending_approvals` add `title`, `options_json` (retrofits DBs created between 003 and 007) |
 | 008 | `008-dropped-messages.ts` | `unregistered_senders` |
 | 009 | `009-drop-pending-credentials.ts` | Drop the defunct `pending_credentials` table |
+| 036 | `036-user-identities.ts` | 规范用户与 Provider Scope 感知的外部身份映射 |
+| 037 | `037-web-auth.ts` | Hash 化 Web Session 与一次性 SSO 登录事务 |
+| 038 | `038-conversation-lanes.ts` | 跨渠道 Lane、Binding 和 `sessions.conversation_lane_id` |
 
 Numbers 005 and 006 are intentionally absent — migrations were renumbered during early development.
 

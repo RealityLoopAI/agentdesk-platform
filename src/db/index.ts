@@ -2,6 +2,25 @@ export { initDb, initTestDb, getDb, closeDb } from './connection.js';
 export { runMigrations } from './migrations/index.js';
 export { markInboundSeen, pruneInboundDedup } from './inbound-dedup.js';
 export {
+  archiveConversationLane,
+  createConversationBinding,
+  createConversationLane,
+  createConversationLaneRootSession,
+  findActiveConversationBinding,
+  getConversationBinding,
+  getConversationLane,
+  linkLegacyFeishuSession,
+  linkSessionToConversationLane,
+  listConversationBindings,
+  listConversationLanesForUser,
+  revokeConversationBinding,
+  sessionForConversationLane,
+  ConversationBindingConflictError,
+  ConversationLaneConflictError,
+  type AnySessionMode,
+  type UserScopedSessionMode,
+} from './conversation-lanes.js';
+export {
   authenticateWebSession,
   consumeWebAuthTransaction,
   createWebAuthSession,
@@ -61,6 +80,7 @@ export {
   findSession,
   findSessionForAgentOwner,
   findSessionForAgentRoot,
+  findActiveSessionForConversationLane,
   findSessionByAgentGroup,
   getSessionsByAgentGroup,
   getActiveSessions,

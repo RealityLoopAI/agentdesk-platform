@@ -6,8 +6,8 @@ import { getDb, hasTable } from './connection.js';
 export function createSession(session: Session): void {
   getDb()
     .prepare(
-      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, owner_user_id, root_session_id, agent_provider, status, container_status, last_active, archived_at, spawn_depth, conversation_thread_id, created_at)
-       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @owner_user_id, @root_session_id, @agent_provider, @status, @container_status, @last_active, @archived_at, @spawn_depth, @conversation_thread_id, @created_at)`,
+      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, owner_user_id, root_session_id, conversation_lane_id, agent_provider, status, container_status, last_active, archived_at, spawn_depth, conversation_thread_id, created_at)
+       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @owner_user_id, @root_session_id, @conversation_lane_id, @agent_provider, @status, @container_status, @last_active, @archived_at, @spawn_depth, @conversation_thread_id, @created_at)`,
     )
     .run({
       ...session,
@@ -15,6 +15,7 @@ export function createSession(session: Session): void {
       archived_at: session.archived_at ?? null,
       spawn_depth: session.spawn_depth ?? 0,
       conversation_thread_id: session.conversation_thread_id ?? null,
+      conversation_lane_id: session.conversation_lane_id ?? null,
     });
 }
 
@@ -138,6 +139,16 @@ export function findSessionForAgentRoot(agentGroupId: string, rootSessionId: str
       "SELECT * FROM sessions WHERE agent_group_id = ? AND root_session_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
     )
     .get(agentGroupId, rootSessionId) as Session | undefined;
+}
+
+export function findActiveSessionForConversationLane(laneId: string): Session | undefined {
+  return getDb()
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE conversation_lane_id = ? AND id = root_session_id AND status = 'active'
+       LIMIT 1`,
+    )
+    .get(laneId) as Session | undefined;
 }
 
 export function getSessionsByAgentGroup(agentGroupId: string): Session[] {

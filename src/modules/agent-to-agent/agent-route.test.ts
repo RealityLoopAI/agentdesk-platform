@@ -7,6 +7,7 @@ import { isSafeAttachmentName, routeAgentMessage } from './agent-route.js';
 import { createDestination } from './db/agent-destinations.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { getDb } from '../../db/connection.js';
+import { createConversationLane, linkSessionToConversationLane } from '../../db/conversation-lanes.js';
 import { createSession, getSession, getSessionsByAgentGroup, updateSession } from '../../db/sessions.js';
 import { a2aOriginRejectedTotal } from '../../metrics.js';
 import { initSessionFolder, inboundDbPath, sessionDir, writeSessionMessage } from '../../session-manager.js';
@@ -826,6 +827,68 @@ describe('routeAgentMessage return-path', () => {
     const a2aRow = aRows.find((r) => r.channel_type === 'agent');
     expect(a2aRow).toBeDefined();
     expect(a2aRow!.origin_user_id).toBe('feishu:ou_employee');
+  });
+
+  it('preserves a Host-verified Web Lane user across two A2A hops', async () => {
+    getDb()
+      .prepare(
+        `INSERT INTO users (id, kind, display_name, created_at)
+         VALUES (?, 'person', 'Alice', ?)`,
+      )
+      .run('usr-alice', now());
+    getDb().prepare('UPDATE sessions SET owner_user_id = ? WHERE id = ?').run('usr-alice', S1.id);
+    S1 = { ...S1, owner_user_id: 'usr-alice' };
+    const lane = createConversationLane({
+      agentGroupId: A,
+      ownerUserId: 'usr-alice',
+    });
+    linkSessionToConversationLane({
+      laneId: lane.id,
+      sessionId: S1.id,
+      sourceSessionMode: 'per-user',
+    });
+
+    // This row models Web ingress after the Web server authenticated Alice.
+    // The Agent-visible senderId is deliberately forged; the Host-written
+    // origin_user_id remains the only identity source for delegation.
+    writeSessionMessage(A, S1.id, {
+      id: 'web-turn-alice',
+      kind: 'chat',
+      timestamp: now(),
+      platformId: `web:${lane.id}`,
+      channelType: 'web',
+      threadId: null,
+      content: JSON.stringify({ senderId: 'usr-victim', text: 'delegate safely' }),
+      originUserId: 'usr-alice',
+    });
+
+    await routeAgentMessage(
+      {
+        id: 'lane-a-to-b',
+        platform_id: B,
+        content: JSON.stringify({ text: 'worker step' }),
+        in_reply_to: null,
+        origin_user_id: 'usr-alice',
+      },
+      S1,
+    );
+    const bRows = readInbound(B, SB.id);
+    expect(bRows).toHaveLength(1);
+    expect(bRows[0].origin_user_id).toBe('usr-alice');
+
+    await routeAgentMessage(
+      {
+        id: 'lane-b-to-a',
+        platform_id: A,
+        content: JSON.stringify({ text: 'second worker step' }),
+        in_reply_to: bRows[0].id,
+        origin_user_id: 'usr-alice',
+      },
+      SB,
+    );
+    const returned = readInbound(A, S1.id).find((row) => row.channel_type === 'agent');
+    expect(returned?.origin_user_id).toBe('usr-alice');
+    expect(returned?.origin_user_id).not.toBe('usr-victim');
   });
 
   it('propagates conversation_thread_id to the target inbound row AND the target session (ADR-0039)', async () => {

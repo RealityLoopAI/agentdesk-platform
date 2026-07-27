@@ -141,6 +141,31 @@ Recommended defaults:
 - shared group/channel: `per-user` or `per-user-per-thread`
 - webhook + ops-room pair: `agent-shared`
 
+### 跨渠道 Conversation Lane
+
+普通 `per-user` 查询仍包含 Messaging Group，所以同一用户从飞书和 Web 进入时会得到两个
+Session。需要两端连续上下文时，Host 使用 `conversation_lanes` 增加一层用户拥有的结构映射：
+
+```text
+规范用户 + Agent Group
+        ↓
+Conversation Lane ──→ 一个根 Session（同一对 inbound.db/outbound.db）
+        ↑
+经过验证的飞书/Web Binding
+```
+
+Router 只接受两种 Lane 来源：
+
+- Web Server 已认证 Session、重新执行 Agent Group/Organization 访问门后写入的 Lane ID；
+- 原生 Channel 的可信 `senderIdentity` 与活跃 Binding 的精确匹配。
+
+浏览器 JSON、消息正文中的 `senderId` 和 `conversation_thread_id` 都不能成为 Lane 查询键。最终
+还要同时校验 Lane 的 `owner_user_id`、`agent_group_id` 和用户级 Session Mode。任一不一致都会
+Fail Closed。
+
+Alice 和 Bob 即使在同一个飞书群也分别拥有 Lane 和根 Session；Alice 的 Web 消息只能复用
+Alice 的根 Session。共享模式的旧历史不能自动关联，因为其中可能已经含有其他用户内容。
+
 ## Entity Model
 
 ```
@@ -181,3 +206,5 @@ sessions / messaging_groups / audit carry **no** org column — they derive org 
 JOIN through their immutable `agent_group_id`, so there is no second copy to
 drift, and org never enters the backend-gateway business-authz path (invariant:
 the gateway is the only authorization path; org isolation is host gating only).
+`conversation_lanes` 同样不保存 Organization 列；它从自己的 `agent_group_id` 走相同的 Host
+访问门，不能把 Organization 传入 Backend Gateway 业务授权。

@@ -106,6 +106,31 @@ export interface WebAuthTransaction {
   authorization_code_hash: string | null;
 }
 
+export interface ConversationLane {
+  id: string;
+  agent_group_id: string;
+  owner_user_id: string;
+  root_session_id: string | null;
+  status: 'active' | 'archived';
+  created_at: string;
+  archived_at: string | null;
+}
+
+export type ConversationDeliveryMode = 'history-only' | 'source-reply' | 'mirror-dm';
+
+export interface ConversationBinding {
+  id: string;
+  lane_id: string;
+  channel_type: string;
+  messaging_group_id: string | null;
+  platform_id: string;
+  thread_id: string | null;
+  external_identity_id: string | null;
+  delivery_mode: ConversationDeliveryMode;
+  verified_at: string;
+  revoked_at: string | null;
+}
+
 export type UserRoleKind = 'owner' | 'admin' | 'org-admin' | 'operator' | 'viewer';
 
 /**
@@ -234,6 +259,12 @@ export interface Session {
    * input. NULL on pre-migration sessions and before a thread is minted.
    */
   conversation_thread_id?: string | null;
+  /**
+   * Structural cross-channel owner lane (ADR-0055). Unlike
+   * conversation_thread_id, this field is allowed in routing lookups after
+   * lane ownership and Agent Group access are checked.
+   */
+  conversation_lane_id?: string | null;
   agent_provider: string | null;
   /**
    * Lifecycle state for the session:

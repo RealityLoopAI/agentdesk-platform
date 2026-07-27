@@ -59,3 +59,22 @@ Code、Access Token、原始 Web Session Token 或原始 CSRF Token。
 HTTP 集成测试通过本机回环随机端口驱动真实重定向和 Cookie。受限沙箱禁止监听回环端口，
 因此该组测试与全量回归在允许本地 IPC/回环端口的执行环境中运行。Web Listener 使用独立
 端口，不与 Webhook 或 Metrics Listener 共用路由；未配置 `WEB_ENABLED=true` 时保持关闭。
+
+## Conversation Lane 与跨渠道 Session
+
+验证日期：2026-07-27
+
+| 范围 | 命令 | 结果 |
+|---|---|---|
+| Host 类型检查 | `pnpm typecheck` | 通过 |
+| Lane Migration、DB 模块、Session Resolver、Router 跨端复用、A2A 身份连续性 | `pnpm exec vitest run src/modules/agent-to-agent/agent-route.test.ts src/router.conversation-lane.test.ts src/session-manager.conversation-lane.test.ts src/db/conversation-lanes.test.ts src/db/migrations/038-conversation-lanes.test.ts` | 通过，5 个测试文件、41 个测试 |
+| Host 全量回归 | `pnpm test` | 通过，86 个测试文件、904 个测试 |
+
+测试证明 Alice/Bob 即使在同一个飞书群也分别进入自己的 Lane 与根 Session；Alice 的 Web
+Turn 使用服务端授权的 Lane 后复用飞书根 Session。每条入站行仍保存自己的 Channel、
+Platform、Thread、外部消息 ID 和 Host 写入的规范 `origin_user_id`。
+
+旧飞书 Session 的关联要求精确 Session ID 和属于同一规范用户的已验证飞书身份，不扫描或
+合并历史。`shared`、`per-thread`、`agent-shared`、Owner 不一致和 Agent Group 不一致均
+Fail Closed。额外的两跳 A2A 回归证明 Agent 可见正文中的伪造 `senderId` 不能替换 Host
+交叉验证后的规范用户。

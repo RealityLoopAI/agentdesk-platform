@@ -101,6 +101,8 @@ These rules are enforced by convention in `src/session-manager.ts` and `containe
 | `messaging_group_agents` | central | `src/db/messaging-groups.ts` | router |
 | `users` | central | `src/modules/permissions/db/users.ts`, auth flows | permission checks |
 | `user_identities` | central | `src/db/user-identities.ts`、可信 Channel/SSO 流程 | Sender Resolver、Web Auth |
+| `conversation_lanes` | central | `src/db/conversation-lanes.ts`、Web 会话 API | Router、Session Resolver、Web History |
+| `conversation_bindings` | central | `src/db/conversation-lanes.ts`、受审计绑定流程 | Router、跨端投递策略 |
 | `user_roles` | central | `src/modules/permissions/db/user-roles.ts` | `src/modules/permissions/access.ts` + `operability.ts`, all permission gates |
 | `organizations` | central | `src/modules/permissions/db/organizations.ts`, `scripts/org.ts` | access gate (ADR-0052 multi-tenant) |
 | `organization_members` | central | `src/modules/permissions/db/organizations.ts` | access gate org prerequisite (reachability, not privilege) |

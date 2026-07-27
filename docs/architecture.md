@@ -58,10 +58,11 @@ agent group's filesystem but different session DBs.
 
 ```
 Platform event
-  → Channel adapter (trigger check, ID extraction)
-  → Returns: InboundEvent { channelType, platformId, threadId, message }
+  → Channel adapter / authenticated Web server (trigger check, ID extraction)
+  → Returns: InboundEvent { channelType, platformId, threadId, message, trusted identity/lane metadata }
   → Router maps channelType + platformId → messaging group → agent groups
-  → For each engaged agent: host resolves session, writes to inbound.db,
+  → For each engaged agent: host resolves an optional user-owned Conversation Lane,
+    then resolves the session, writes to inbound.db,
     calls wakeContainer(session)
   → Container spins up (or is already running)
   → Agent-runner polls inbound.db, finds new messages, publishes a
@@ -132,6 +133,13 @@ Before `origin_user_id` is stamped, provider identities are normalized through
 outside `message.content`: the Agent sees content, but only trusted adapter or
 authentication code may establish identity metadata. The unique mapping lets
 Feishu chat and Feishu SSO resolve to the same opaque `users.id`.
+
+4. **Conversation Lane（ADR-0055）。** `conversation_lanes` 是跨渠道结构键，将一个规范用户和
+   一个 Agent Group 连接到同一个根 Session；`conversation_bindings` 保存经过验证的飞书/Web
+   入口。Router 可用 Web Server 已授权的 Lane，或用可信外部身份精确查找 Binding。解析过程
+   同时校验 Owner、Agent Group 和用户级 Session Mode。`conversation_thread_id` 仍只用于
+   Trace，不能参与 Lane 查询。来自 Lane 的消息写入 Host 拥有的 `origin_user_id`，因此后续
+   A2A 多跳继续使用既有交叉验证信任链。
 
 ## Channel Adapters
 

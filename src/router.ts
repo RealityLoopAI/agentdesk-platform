@@ -25,6 +25,7 @@ import { storeSessionSpanContext, storeSessionRootSpan, failSessionRootSpan } fr
 import { gateCommand } from './command-gate.js';
 import { getTracer } from './observability/tracer.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { ConversationLaneConflictError, findActiveConversationBinding } from './db/conversation-lanes.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import { recordEnterpriseAudit } from './db/enterprise-audit.js';
 import { insertIngress, deleteIngress, markIngressFailed } from './db/inbound-ingress.js';
@@ -34,6 +35,7 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionByAgentGroup, findSessionForAgent, findSessionForAgentOwner, getSession } from './db/sessions.js';
+import { getUserIdentity } from './db/user-identities.js';
 import { maybeAutowireEnterpriseFrontdesk } from './enterprise-autowire.js';
 import { readEnvFile } from './env.js';
 import {
@@ -531,6 +533,45 @@ function resolveEffectiveSessionMode(
 }
 
 /**
+ * Resolve a Host-verified cross-channel Lane for one inbound turn.
+ *
+ * Web requests may carry a Lane already authorized by the Web server. Native
+ * channels instead match the exact adapter-verified external identity and
+ * channel address against an active binding. Message content is never an
+ * input, and a canonical-user mismatch fails closed.
+ */
+export function resolveConversationLaneIdForInbound(
+  event: InboundEvent,
+  userId: string | null,
+  agentGroupId: string,
+): string | null {
+  if (event.conversationLaneId) return event.conversationLaneId;
+  if (!userId || !event.senderIdentity) return null;
+
+  const identity = getUserIdentity({
+    provider: event.senderIdentity.provider,
+    providerScope: event.senderIdentity.providerScope,
+    identifierType: event.senderIdentity.identifierType,
+    externalSubject: event.senderIdentity.externalSubject,
+  });
+  if (!identity) return null;
+  if (identity.user_id !== userId) {
+    throw new ConversationLaneConflictError('sender_identity_mismatch');
+  }
+
+  return (
+    findActiveConversationBinding({
+      channelType: event.channelType,
+      platformId: event.platformId,
+      threadId: event.threadId,
+      externalIdentityId: identity.id,
+      ownerUserId: userId,
+      agentGroupId,
+    })?.lane.id ?? null
+  );
+}
+
+/**
  * Decide whether a given wired agent should engage on this message.
  *
  *   'pattern'        — regex test on text; '.' = always
@@ -642,12 +683,16 @@ async function deliverToAgent(
             throw new Error(`userId is required for session_mode=${effectiveSessionMode}`);
           }
 
+          const conversationLaneId = resolveConversationLaneIdForInbound(event, userId, agent.agent_group_id);
           const { session, created } = resolveSession(
             agent.agent_group_id,
             mg.id,
             event.threadId,
             effectiveSessionMode,
             userId,
+            null,
+            null,
+            conversationLaneId,
           );
 
           rootSpan.setAttribute('session.id', session.id);
