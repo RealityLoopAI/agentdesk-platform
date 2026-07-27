@@ -1,0 +1,207 @@
+import http, { type Server } from 'node:http';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { closeDb, getDb, initTestDb } from '../db/connection.js';
+import { authenticateWebSession, createWebAuthSession } from '../db/web-auth.js';
+import { runMigrations } from '../db/migrations/index.js';
+import type { WebConfig } from './config.js';
+import { createWebRequestHandler } from './server.js';
+
+const SECRET = '82a60d53458239ca70aa1294ef743477cd8772d778d32962362674e3237a20d2';
+const CONFIG: WebConfig = {
+  enabled: true,
+  port: 3100,
+  publicOrigin: 'https://agent.example.com',
+  redirectUri: 'https://agent.example.com/auth/feishu/callback',
+  sessionSecret: SECRET,
+  sessionPolicy: { idleTtlMs: 60 * 60_000, absoluteTtlMs: 24 * 60 * 60_000 },
+  authTransactionTtlMs: 10 * 60_000,
+  maxBodyBytes: 32,
+  requestTimeoutMs: 5_000,
+  cookieName: 'agentdesk_web_session',
+  secureCookies: true,
+  loginRateLimit: 20,
+  apiRateLimit: 600,
+  rateWindowMs: 60_000,
+  sseMaxConnectionsPerUser: 5,
+  feishu: {
+    appId: 'cli_web_test',
+    appSecret: 'provider-secret',
+    authorizeUrl: 'https://accounts.feishu.example/open-apis/authen/v1/authorize',
+    tokenUrl: 'https://open.feishu.example/open-apis/authen/v2/oauth/token',
+    userInfoUrl: 'https://open.feishu.example/open-apis/authen/v1/user_info',
+    scope: 'auth:user.id:read',
+    pkce: false,
+  },
+};
+
+const servers: Server[] = [];
+
+async function serve(config: WebConfig, fetchImpl?: typeof fetch): Promise<string> {
+  const server = http.createServer(createWebRequestHandler(config, { fetchImpl }));
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('test server did not bind TCP');
+  return `http://127.0.0.1:${address.port}`;
+}
+
+function cookieValue(setCookie: string, name: string): string {
+  const match = new RegExp(`(?:^|, )${name}=([A-Za-z0-9_-]+)`).exec(setCookie);
+  if (!match?.[1]) throw new Error(`missing cookie ${name}: ${setCookie}`);
+  return match[1];
+}
+
+function providerFetch() {
+  return vi.fn<typeof fetch>(async (input) => {
+    if (String(input) === CONFIG.feishu.tokenUrl) {
+      return new Response(JSON.stringify({ code: 0, access_token: 'provider-access-token' }));
+    }
+    if (String(input) === CONFIG.feishu.userInfoUrl) {
+      return new Response(JSON.stringify({ code: 0, data: { open_id: 'ou_web', name: 'Web User' } }));
+    }
+    throw new Error('unexpected provider endpoint');
+  });
+}
+
+async function login(base: string): Promise<{ sessionCookie: string; csrfToken: string }> {
+  const start = await fetch(`${base}/auth/feishu/start`, { redirect: 'manual' });
+  expect(start.status).toBe(303);
+  const oauthCookie = start.headers.get('set-cookie')!;
+  expect(oauthCookie).toContain('HttpOnly');
+  expect(oauthCookie).toContain('SameSite=Lax');
+  expect(oauthCookie).toContain('Secure');
+  const authorize = new URL(start.headers.get('location')!);
+
+  const callback = await fetch(
+    `${base}/auth/feishu/callback?state=${encodeURIComponent(authorize.searchParams.get('state')!)}&code=valid-code`,
+    {
+      redirect: 'manual',
+      headers: {
+        cookie: `${CONFIG.cookieName}_oauth=${cookieValue(oauthCookie, `${CONFIG.cookieName}_oauth`)}`,
+      },
+    },
+  );
+  expect(callback.status).toBe(303);
+  expect(callback.headers.get('location')).toBe('/conversations');
+  const sessionSetCookie = callback.headers.get('set-cookie')!;
+  const sessionToken = cookieValue(sessionSetCookie, CONFIG.cookieName);
+  const sessionCookie = `${CONFIG.cookieName}=${sessionToken}`;
+
+  const me = await fetch(`${base}/api/me`, { headers: { cookie: sessionCookie } });
+  expect(me.status).toBe(200);
+  expect(me.headers.get('content-security-policy')).toContain("default-src 'self'");
+  expect(me.headers.get('strict-transport-security')).toContain('max-age=');
+  const payload = (await me.json()) as { csrfToken: string };
+  return { sessionCookie, csrfToken: payload.csrfToken };
+}
+
+beforeEach(() => {
+  const db = initTestDb();
+  runMigrations(db);
+});
+
+afterEach(async () => {
+  await Promise.all(
+    servers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        }),
+    ),
+  );
+  closeDb();
+});
+
+describe('Web HTTP authentication boundary', () => {
+  it('sets hardened cookies, exposes /api/me and revokes the server session on logout', async () => {
+    const base = await serve(CONFIG, providerFetch());
+    const { sessionCookie, csrfToken } = await login(base);
+
+    const wrongOrigin = await fetch(`${base}/api/logout`, {
+      method: 'POST',
+      headers: {
+        cookie: sessionCookie,
+        origin: 'https://attacker.example',
+        'x-csrf-token': csrfToken,
+      },
+    });
+    expect(wrongOrigin.status).toBe(403);
+
+    const wrongCsrf = await fetch(`${base}/api/logout`, {
+      method: 'POST',
+      headers: {
+        cookie: sessionCookie,
+        origin: CONFIG.publicOrigin,
+        'x-csrf-token': 'forged',
+      },
+    });
+    expect(wrongCsrf.status).toBe(403);
+
+    const logout = await fetch(`${base}/api/logout`, {
+      method: 'POST',
+      headers: {
+        cookie: sessionCookie,
+        origin: CONFIG.publicOrigin,
+        'x-csrf-token': csrfToken,
+      },
+    });
+    expect(logout.status).toBe(204);
+    expect(logout.headers.get('set-cookie')).toContain('Max-Age=0');
+
+    const afterLogout = await fetch(`${base}/api/me`, { headers: { cookie: sessionCookie } });
+    expect(afterLogout.status).toBe(401);
+  });
+
+  it('enforces the configured request-body limit before a write handler runs', async () => {
+    const config = { ...CONFIG, maxBodyBytes: 8 };
+    getDb()
+      .prepare('INSERT INTO users (id, kind, display_name, created_at) VALUES (?, ?, NULL, ?)')
+      .run('user-limit', 'feishu', new Date().toISOString());
+    const session = createWebAuthSession({
+      userId: 'user-limit',
+      secret: SECRET,
+      policy: config.sessionPolicy,
+    });
+    const base = await serve(config);
+    const response = await fetch(`${base}/api/logout`, {
+      method: 'POST',
+      headers: {
+        cookie: `${config.cookieName}=${session.token}`,
+        origin: config.publicOrigin,
+        'x-csrf-token': session.csrfToken,
+        'content-type': 'text/plain',
+      },
+      body: '123456789',
+    });
+    expect(response.status).toBe(413);
+    expect(authenticateAfterRequest(session.token, config)).toBe(true);
+  });
+
+  it('rate-limits login starts by socket address without trusting forwarded headers', async () => {
+    const config = { ...CONFIG, loginRateLimit: 1 };
+    const base = await serve(config);
+    const first = await fetch(`${base}/auth/feishu/start`, {
+      redirect: 'manual',
+      headers: { 'x-forwarded-for': '203.0.113.1' },
+    });
+    const second = await fetch(`${base}/auth/feishu/start`, {
+      redirect: 'manual',
+      headers: { 'x-forwarded-for': '203.0.113.2' },
+    });
+    expect(first.status).toBe(303);
+    expect(second.status).toBe(429);
+    expect(second.headers.get('retry-after')).toBeTruthy();
+  });
+});
+
+function authenticateAfterRequest(token: string, config: WebConfig): boolean {
+  return Boolean(
+    authenticateWebSession({
+      token,
+      secret: config.sessionSecret,
+      policy: config.sessionPolicy,
+    }),
+  );
+}

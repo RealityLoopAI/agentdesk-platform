@@ -21,9 +21,9 @@
 - [x] 3.2 新增中央数据库 Migration 和 DB 模块，保存 Hash 化、可过期、可撤销的 `web_auth_sessions`
 - [x] 3.3 实现飞书 SSO Start/Callback，包括 State、一次性登录事务、严格 Redirect URI 和支持时的 PKCE
 - [x] 3.4 实现 SSO 身份到 `user_identities` 的解析、首次创建、冲突 Fail Closed 和 Enterprise Audit
-- [ ] 3.5 实现 Secure/HttpOnly/SameSite Cookie、Session 轮换、Idle/Absolute Expiry、Logout 和运营撤销
-- [ ] 3.6 实现 CSRF、Origin 校验、请求体上限、登录/API 限流和敏感字段日志/Trace 脱敏
-- [ ] 3.7 增加合法登录、State 伪造、Code 重放、Cookie 过期、Logout、冲突关联和撤权即时生效测试
+- [x] 3.5 实现 Secure/HttpOnly/SameSite Cookie、Session 轮换、Idle/Absolute Expiry、Logout 和运营撤销
+- [x] 3.6 实现 CSRF、Origin 校验、请求体上限、登录/API 限流和敏感字段日志/Trace 脱敏
+- [x] 3.7 增加合法登录、State 伪造、Code 重放、Cookie 过期、Logout、冲突关联和撤权即时生效测试
 
 ## 4. Conversation Lane 与跨渠道 Session
 

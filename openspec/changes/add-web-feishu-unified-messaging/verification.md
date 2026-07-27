@@ -43,3 +43,19 @@
 SSO 测试覆盖合法登录、浏览器绑定的 State、S256 PKCE、Code 重放拒绝和已登录用户身份冲突
 Fail Closed。持久化快照断言数据库与 Enterprise Audit 中均没有飞书 App Secret、Authorization
 Code、Access Token、原始 Web Session Token 或原始 CSRF Token。
+
+## Web 登录 HTTP 安全边界
+
+验证日期：2026-07-27
+
+| 范围 | 命令 | 结果 |
+|---|---|---|
+| Web Listener、Cookie、`/api/me`、Logout、CSRF、Origin、Body Limit、Rate Limit | `pnpm exec vitest run src/web/server.test.ts src/web/feishu-sso.test.ts src/db/web-auth.test.ts src/config-validate.test.ts` | 通过，4 个测试文件、50 个测试 |
+| 新增文件格式 | `pnpm exec prettier --check src/web/server.ts src/web/server.test.ts src/index.ts` | 通过 |
+| 新增 Web Listener Lint | `pnpm exec eslint src/web/server.ts src/web/server.test.ts` | 通过 |
+| Host 类型检查 | `pnpm typecheck` | 通过 |
+| Host 全量回归 | `pnpm test` | 通过，82 个测试文件、894 个测试 |
+
+HTTP 集成测试通过本机回环随机端口驱动真实重定向和 Cookie。受限沙箱禁止监听回环端口，
+因此该组测试与全量回归在允许本地 IPC/回环端口的执行环境中运行。Web Listener 使用独立
+端口，不与 Webhook 或 Metrics Listener 共用路由；未配置 `WEB_ENABLED=true` 时保持关闭。

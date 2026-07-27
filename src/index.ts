@@ -32,6 +32,7 @@ import { routeInbound } from './router.js';
 import { log } from './log.js';
 import { unhandledRejectionsTotal } from './metrics.js';
 import { ensureMetricsServer, stopWebhookServer } from './webhook-server.js';
+import { startWebServer, stopWebServer } from './web/server.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
@@ -236,6 +237,11 @@ async function main(): Promise<void> {
   //    (e.g. Feishu long-connection mode, CLI-only setups).
   ensureMetricsServer();
 
+  // 8. Optional browser surface. This is a dedicated listener with its own
+  // cookie/Origin/CSRF threat boundary; it never shares the webhook or metrics
+  // listener. WEB_ENABLED defaults off.
+  await startWebServer();
+
   log.info(`${PLATFORM_NAME} running`);
 }
 
@@ -248,10 +254,15 @@ async function runShutdownSteps(): Promise<void> {
       log.error('Shutdown callback threw', { err });
     }
   }
-  // Order matters: stop accepting first (close the listener), THEN stop the
+  // Order matters: stop accepting first (close the listeners), THEN stop the
   // poll loops, THEN drain. If we drained before closing the listener, a fresh
   // webhook could enqueue outbound work mid-drain and the wait would never
   // settle cleanly. Stopping ingress first bounds the in-flight set.
+  try {
+    await stopWebServer();
+  } catch (err) {
+    log.error('Web server stop threw', { err });
+  }
   try {
     await stopWebhookServer();
   } catch (err) {
