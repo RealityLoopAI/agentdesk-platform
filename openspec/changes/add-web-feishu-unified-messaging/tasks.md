@@ -72,9 +72,9 @@
 
 ## 7. 多维表格 Gateway Operation 契约
 
-- [ ] 7.1 定义并文档化 `feishu.bitable.*` Operation 名称、输入/输出 Schema、错误类型和 Discovery 元数据
-- [ ] 7.2 扩展 Gateway Contract/Conformance Fixtures，覆盖 App/Table/Field 发现和 Record List/Get/Create/Update/Delete
-- [ ] 7.3 为 Batch Create/Update/Delete 定义记录数量上限、Atomic/Best-effort 行为和索引对齐结果
+- [x] 7.1 定义并文档化 `feishu.bitable.*` Operation 名称、输入/输出 Schema、错误类型和 Discovery 元数据
+- [x] 7.2 扩展 Gateway Contract/Conformance Fixtures，覆盖 App/Table/Field 发现和 Record List/Get/Create/Update/Delete
+- [x] 7.3 为 Batch Create/Update/Delete 定义记录数量上限、Atomic/Best-effort 行为和索引对齐结果
 - [ ] 7.4 实现可复用的参考 Gateway 多维表格 Adapter，使用应用凭证并将 Token 完全限制在 Gateway 进程
 - [ ] 7.5 实现逻辑资源别名到 `app_token`/`table_id` 的运营者白名单，拒绝 Agent 任意原始资源标识
 - [ ] 7.6 实现 Field Schema 获取/TTL 缓存、字段名/类型/必填/可写校验和有界分页

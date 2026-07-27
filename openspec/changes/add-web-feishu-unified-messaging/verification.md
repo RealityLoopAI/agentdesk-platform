@@ -245,3 +245,27 @@ Session/出站行引用和状态，不保存正文。
 
 受限沙箱内首次运行 Host 全量回归时，项目已知的 `scripts/q.test.ts` 子进程 IPC 限制导致 7 个
 失败，另有 2 个 Worker 被系统终止；在允许本地 IPC 的同一环境中复跑后 933/933 全部通过。
+
+## 飞书多维表格 Gateway 机器契约
+
+验证日期：2026-07-27
+
+| 范围                                             | 命令                                                                                                       | 结果                            |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Runner 类型检查                                  | `pnpm typecheck`（`container/agent-runner`）                                                               | 通过                            |
+| Operation、输入/输出、批量语义和封闭错误针对测试 | `pnpm test src/mcp-tools/feishu-bitable-contract.test.ts src/mcp-tools/gateway-contract.test.ts`（Runner） | 通过，2 个测试文件、22 个测试   |
+| Runner 全量回归                                  | `pnpm test`（`container/agent-runner`）                                                                    | 通过，29 个测试文件、328 个测试 |
+| 契约与文档格式                                   | `pnpm exec prettier --write ...`                                                                           | 通过                            |
+
+新增机器契约覆盖 11 个 `feishu.bitable.*` Operation，并为每个 Operation 提供可执行 Zod 输入/输出
+Schema、`/describe` 元数据和安全 Conformance Fixture。输入只允许逻辑 `resource` 别名，不存在
+`app_token`/`table_id` 字段；严格对象 Schema 会在进入真实 Gateway Adapter 前拒绝这类额外参数。
+
+Agent 读取页默认 20 条、最大 100 条；单个批次最大 100 条。Batch 必须显式声明 `atomic` 或
+`best-effort`，输出 Schema 会拒绝错位索引、虚假的 `ok`/`partial` 和原子批次的部分提交声明。
+Gateway 封闭错误新增资源白名单、确认、上游认证、Not Found、Conflict 和 Rate Limit 分类，其中
+Conflict/Rate Limit 默认可重试。
+
+Conformance Runner 新增 `GATEWAY_REQUIRE_FEISHU_BITABLE=true` 开关；开启后会检查 `/describe`
+是否发布完整多维表格 Operation Catalog。该开关默认关闭，因此不影响未启用多维表格的通用
+Gateway。此阶段只证明契约可校验，真实飞书 API Adapter 和 Token 隔离属于后续任务 7.4–7.11。

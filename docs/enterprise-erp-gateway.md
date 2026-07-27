@@ -360,17 +360,25 @@ agent so it can decide whether to retry. Two ways your backend can drive this:
 | ----------- | ---------------------- | ------------------- |
 | 401, 403    | `BACKEND_UNAUTHORIZED` | no                  |
 | 404         | `OPERATION_NOT_FOUND`  | no                  |
+| 409         | `CONFLICT`             | yes                 |
+| 429         | `RATE_LIMITED`         | yes                 |
 | 400, 422    | `VALIDATION_FAILED`    | no                  |
 | 5xx         | `BACKEND_UNAVAILABLE`  | yes                 |
 | other       | `UNKNOWN`              | no                  |
 
-Additional codes the platform itself can emit (not from your HTTP status):
+Additional closed codes (usually supplied in a structured error body):
 
-| code                        | when                                                                       |
-| --------------------------- | -------------------------------------------------------------------------- |
-| `TIMEOUT`                   | request exceeded `backendGateway.timeoutMs` (retryable)                    |
-| `GATEWAY_NOT_CONFIGURED`    | the agent group has no `baseUrl`                                           |
-| `CONTRACT_VERSION_MISMATCH` | backend echoed a different `contractVersion` (warn-only, not a hard error) |
+| code                             | when                                                                                      |
+| -------------------------------- | ----------------------------------------------------------------------------------------- |
+| `TIMEOUT`                        | request exceeded `backendGateway.timeoutMs` (retryable)                                   |
+| `GATEWAY_NOT_CONFIGURED`         | the agent group has no `baseUrl`                                                          |
+| `CONTRACT_VERSION_MISMATCH`      | backend echoed a different `contractVersion` (warn-only, not a hard error)                |
+| `RESOURCE_NOT_ALLOWED`           | the logical resource alias is not on the operator whitelist                               |
+| `CONFIRMATION_REQUIRED`          | a destructive or high-impact write lacks a valid bound confirmation                       |
+| `UPSTREAM_AUTHENTICATION_FAILED` | the Gateway could not authenticate to its upstream system                                 |
+| `NOT_FOUND`                      | the requested upstream business object or record does not exist                           |
+| `CONFLICT`                       | the upstream rejected a concurrent or revision-conflicting write (retryable by default)   |
+| `RATE_LIMITED`                   | the upstream rate-limited the call (retryable by default; include bounded `retryAfterMs`) |
 
 The code is also folded into the `gateway_audit` row (see below) as an
 `[CODE]`-prefixed `error_msg`, and as a dedicated `errorCode` field in the
@@ -389,6 +397,169 @@ container-emitted audit message.
   prefer `ok: false` in a **2xx** result with a structured business reason the
   agent can relay, rather than a transport error code. The closed enum is for
   _transport/retry_ classification, not for business outcomes.
+
+## 飞书多维表格 Operation（ADR-0063）
+
+这一节是 `feishu.bitable.*` 的人类可读契约；机器可校验的唯一事实来源位于
+`container/agent-runner/src/mcp-tools/feishu-bitable-contract.ts`。
+
+### 为什么仍然走通用 Gateway
+
+飞书聊天 Adapter 只负责接收和发送消息，不是业务数据库客户端。Web 或飞书产生的 Turn 都由
+Agent 调用相同的 `gateway_describe`、`gateway_authorize` 和 `gateway_execute`。只有运营者控制的
+Gateway 进程保存 `app_id`、`app_secret`、`tenant_access_token`、`app_token` 和 `table_id`。
+Host、Web、Channel、Agent 容器和 Prompt 都不得持有这些值，也不得直连多维表格。
+
+`requester.userId` 是每次调用的规范用户授权主体。Gateway 必须逐调用检查用户、Operation、逻辑资源
+和目标 Record Scope；`requesterSource='agent-asserted'` 的写操作默认拒绝。Host 的 Organization
+访问门不进入这一业务授权输入，也不能替代 Gateway 授权。
+
+### Operation Catalog
+
+| Operation                            | 用途                                  | 写操作 | 确认规则                       |
+| ------------------------------------ | ------------------------------------- | -----: | ------------------------------ |
+| `feishu.bitable.app.get`             | 读取逻辑应用元数据                    |     否 | 无                             |
+| `feishu.bitable.table.list`          | 列出该逻辑应用中批准暴露的数据表      |     否 | 无                             |
+| `feishu.bitable.field.list`          | 获取字段名、类型、必填、可写等 Schema |     否 | 无                             |
+| `feishu.bitable.record.list`         | 有界分页读取 Record                   |     否 | 无                             |
+| `feishu.bitable.record.get`          | 读取单条 Record                       |     否 | 无                             |
+| `feishu.bitable.record.create`       | 创建单条 Record                       |     是 | 按业务策略                     |
+| `feishu.bitable.record.update`       | 更新单条 Record                       |     是 | 命中高影响字段时确认           |
+| `feishu.bitable.record.delete`       | 删除单条 Record                       |     是 | 始终确认                       |
+| `feishu.bitable.record.batch_create` | 批量创建                              |     是 | 按业务策略                     |
+| `feishu.bitable.record.batch_update` | 批量更新                              |     是 | 任一项命中高影响字段时整批确认 |
+| `feishu.bitable.record.batch_delete` | 批量删除                              |     是 | 始终确认                       |
+
+Gateway 只在 `/describe` 中发布当前真正启用的 Operation。Agent 必须先发现再调用；没有声明就要明确
+报告能力不可用，不能根据 Prompt 猜测“应该支持”。
+
+### 公共输入规则
+
+- `resource` 是稳定的逻辑别名，例如 `sales.pipeline`。Gateway 在运营者白名单中把它映射到
+  `app_token`/`table_id`；未知别名返回 `RESOURCE_NOT_ALLOWED`。
+- 输入 Schema 不接受 `app_token` 或 `table_id`。即使 Agent 猜到真实标识，也不能绕过别名白名单。
+- `recordId` 只能在已经通过资源和用户授权后使用。
+- List 的 `viewAlias`、`filterAlias`、`sortAlias` 仍是运营者配置的查询别名，不是任意飞书表达式。
+- `cursor` 是 Gateway 包装并校验的不透明 Cursor，不直接暴露飞书 `page_token`。
+- 默认 `pageSize=20`，单页最大 `100`。飞书 Record API 当前允许最大 500，但平台主动收紧到 100，
+  防止一次读取撑大 Agent 上下文；运营者可以进一步收紧，不能放宽机器契约。
+
+典型读取：
+
+```jsonc
+{
+  "operation": "feishu.bitable.record.list",
+  "input": {
+    "resource": "sales.pipeline",
+    "pageSize": 20,
+    "filterAlias": "active",
+    "sortAlias": "recently-updated",
+    "cursor": "<opaque-cursor-from-previous-result>",
+  },
+}
+```
+
+返回：
+
+```jsonc
+{
+  "ok": true,
+  "result": {
+    "items": [{ "recordId": "rec...", "fields": { "客户": "示例公司", "阶段": "跟进中" } }],
+    "hasMore": true,
+    "nextCursor": "<opaque-cursor>",
+  },
+  "auditId": "...",
+}
+```
+
+### 字段发现与写入校验
+
+写入前，Gateway 必须从飞书获取或读取有界 TTL 缓存的 Field Schema，并检查：
+
+- 字段名存在；
+- 字段可写（公式、自动编号、创建/修改人时间等计算字段不能写）；
+- 值类型与飞书字段类型相符；
+- Create 提供所有必填字段；
+- 单选/多选值、是否多值等约束满足当前 Schema。
+
+校验失败不得产生部分写入。若飞书返回疑似 Schema 漂移错误，Gateway 清除该 Table 的 Schema
+缓存、重新发现并最多重新校验一次；已经可能提交成功的写不能无幂等保护地重发。
+
+单条创建输入：
+
+```jsonc
+{
+  "operation": "feishu.bitable.record.create",
+  "input": {
+    "resource": "sales.pipeline",
+    "fields": { "客户": "示例公司", "阶段": "新建" },
+  },
+  "idempotencyKey": "stable-key",
+}
+```
+
+Create、Update、Delete 和三个 Batch Operation 的提交调用都必须携带非空幂等键。Gateway 持久化
+“幂等键 + 规范用户 + Operation + 逻辑资源 + 输入 Hash”及首次提交结果；相同请求重放时返回第一次
+的结果，不再次写飞书。同一幂等键绑定到不同输入时返回 `CONFLICT`。
+
+### 删除与高影响更新确认
+
+Delete 始终要求显式确认；资源配置中的 `highImpactFields` 命中时，Update 也要求确认。确认凭据必须
+由 Gateway 或其可信业务确认服务签发，且至少绑定：
+
+- `requester.userId`；
+- Operation；
+- `resource`；
+- 排序并去重后的 Record ID 集合；
+- 高影响字段集合（适用时）；
+- 到期时间与一次性标识。
+
+缺失、过期、被重放或绑定不一致都返回不可重试的 `CONFIRMATION_REQUIRED`，并且在调用飞书前拒绝。
+
+### 批量语义
+
+三个 Batch Operation 都要求显式 `mode: "atomic" | "best-effort"`，单批最多 100 条：
+
+- `atomic`：Gateway 只有在能够保证全成或全败时才接受；做不到就整批拒绝，不能伪装成原子。
+- `best-effort`：每项独立校验/执行；返回与输入索引一一对齐的 `results`。部分成功时
+  `ok=false, partial=true`，不得报告“全部成功”。
+
+示例部分成功结果：
+
+```jsonc
+{
+  "mode": "best-effort",
+  "ok": false,
+  "partial": true,
+  "results": [
+    { "index": 0, "ok": true, "record": { "recordId": "rec1", "fields": {} } },
+    {
+      "index": 1,
+      "ok": false,
+      "error": { "code": "VALIDATION_FAILED", "message": "unknown field: 不存在" },
+    },
+  ],
+}
+```
+
+### 飞书错误转换与审计
+
+参考映射如下；结构化 `code` 优先于 HTTP 状态：
+
+| 飞书结果                              | Gateway code                     |                  默认重试 |
+| ------------------------------------- | -------------------------------- | ------------------------: |
+| 应用凭证/tenant token 无效            | `UPSTREAM_AUTHENTICATION_FAILED` |                        否 |
+| 应用无文档或高级权限                  | `BACKEND_UNAUTHORIZED`           |                        否 |
+| 参数或字段校验失败                    | `VALIDATION_FAILED`              |                        否 |
+| App/Table/Field/Record 不存在         | `NOT_FOUND`                      |                        否 |
+| 同表并发写冲突（如飞书 `1254291`）    | `CONFLICT`                       |                是，带退避 |
+| 限流（如飞书 `1254290`/HTTP 429）     | `RATE_LIMITED`                   | 是，带有界 `retryAfterMs` |
+| 请求超时（如飞书 `1255040`/HTTP 504） | `TIMEOUT`                        |                        是 |
+| 飞书内部错误                          | `BACKEND_UNAVAILABLE`            |                        是 |
+
+Gateway 自身还必须留下后端审计：规范用户、Operation、逻辑资源别名、结果、耗时、写幂等键和安全
+Input Hash。不能记录 Access Token、`app_secret`、真实资源映射，或不受限的单元格明文。
 
 ## Transactions, partial failure & compensation
 
@@ -569,6 +740,9 @@ Optional environment:
 - `GATEWAY_HEADERS` — extra headers as JSON, e.g. `'{"x-tenant":"tenant-a"}'`.
 - `GATEWAY_STRICT_RESPONSES=true` — fail on a response-schema mismatch.
 - `GATEWAY_TEST_USER_ID` — the sample `requester.userId`.
+- `GATEWAY_REQUIRE_FEISHU_BITABLE=true` — require `/describe` to advertise the
+  complete `feishu.bitable.*` catalog; useful in the Bitable-enabled deployment
+  stage, off by default for generic Gateways.
 
 The runner sends dummy payloads with `requesterSource='agent-asserted'` and sets
 `dryRun=true` on `/execute` — point it at a staging backend, not one that would

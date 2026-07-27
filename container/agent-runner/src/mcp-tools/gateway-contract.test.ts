@@ -3,6 +3,8 @@ import { describe, expect, it } from 'bun:test';
 import {
   bulkExecuteRequestSchema,
   bulkExecuteResponseSchema,
+  classifyHttpError,
+  defaultRetryable,
   executeRequestSchema,
   memorySearchResponseSchema,
   memorySearchResultSchema,
@@ -11,6 +13,27 @@ import {
   taskStatusRequestSchema,
   taskStatusResponseSchema,
 } from './gateway-contract.js';
+
+describe('extended closed Gateway errors', () => {
+  it('classifies conflict and rate limiting and marks them retryable', () => {
+    expect(classifyHttpError(409, '')).toBe('CONFLICT');
+    expect(classifyHttpError(429, '')).toBe('RATE_LIMITED');
+    expect(defaultRetryable('CONFLICT')).toBe(true);
+    expect(defaultRetryable('RATE_LIMITED')).toBe(true);
+  });
+
+  it('prefers a structured resource or confirmation failure over HTTP fallback', () => {
+    expect(
+      classifyHttpError(
+        403,
+        JSON.stringify({ code: 'RESOURCE_NOT_ALLOWED', message: 'logical resource is not configured' }),
+      ),
+    ).toBe('RESOURCE_NOT_ALLOWED');
+    expect(
+      classifyHttpError(400, JSON.stringify({ code: 'CONFIRMATION_REQUIRED', message: 'confirmation is required' })),
+    ).toBe('CONFIRMATION_REQUIRED');
+  });
+});
 
 // /bulk_execute contract (ADR-0036, roadmap 3.1).
 describe('bulkExecuteRequestSchema', () => {

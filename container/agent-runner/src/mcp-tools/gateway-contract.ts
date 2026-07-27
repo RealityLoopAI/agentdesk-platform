@@ -48,6 +48,12 @@ export const GATEWAY_ERROR_CODES = [
   'BACKEND_UNAUTHORIZED',
   'OPERATION_NOT_FOUND',
   'VALIDATION_FAILED',
+  'RESOURCE_NOT_ALLOWED',
+  'CONFIRMATION_REQUIRED',
+  'UPSTREAM_AUTHENTICATION_FAILED',
+  'NOT_FOUND',
+  'CONFLICT',
+  'RATE_LIMITED',
   'BACKEND_UNAVAILABLE',
   'TIMEOUT',
   'GATEWAY_NOT_CONFIGURED',
@@ -331,6 +337,12 @@ export const operationDescriptorSchema = z
     // Left as an open object — the platform surfaces it to the agent but does
     // not deeply validate it (the recommended field-descriptor shape is documented).
     schema: z.object({}).passthrough().optional(),
+    // Optional output shape and machine-readable execution metadata. These are
+    // descriptive only; the Gateway remains responsible for enforcement.
+    resultSchema: z.object({}).passthrough().optional(),
+    pagination: z.object({}).passthrough().optional(),
+    idempotency: z.object({}).passthrough().optional(),
+    batch: z.object({}).passthrough().optional(),
   })
   .passthrough();
 
@@ -518,8 +530,9 @@ export const RESPONSE_SCHEMAS = {
  *
  * If the body parses as a structured `GatewayError`, that code wins — the
  * backend's own classification is the most precise. Otherwise the HTTP status
- * decides: 401/403 → unauthorized, 404 → operation-not-found, 400/422 →
- * validation, 5xx → backend-unavailable, everything else → unknown.
+ * decides: 401/403 → unauthorized, 404 → operation-not-found, 409 → conflict,
+ * 429 → rate-limited, 400/422 → validation, 5xx → backend-unavailable,
+ * everything else → unknown.
  */
 export function classifyHttpError(status: number, bodyText: string): GatewayErrorCode {
   const structured = parseGatewayError(bodyText);
@@ -527,6 +540,8 @@ export function classifyHttpError(status: number, bodyText: string): GatewayErro
 
   if (status === 401 || status === 403) return 'BACKEND_UNAUTHORIZED';
   if (status === 404) return 'OPERATION_NOT_FOUND';
+  if (status === 409) return 'CONFLICT';
+  if (status === 429) return 'RATE_LIMITED';
   if (status === 400 || status === 422) return 'VALIDATION_FAILED';
   if (status >= 500 && status <= 599) return 'BACKEND_UNAVAILABLE';
   return 'UNKNOWN';
@@ -559,6 +574,8 @@ export function defaultRetryable(code: GatewayErrorCode): boolean {
   switch (code) {
     case 'BACKEND_UNAVAILABLE':
     case 'TIMEOUT':
+    case 'CONFLICT':
+    case 'RATE_LIMITED':
       return true;
     default:
       return false;
