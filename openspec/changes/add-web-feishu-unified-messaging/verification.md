@@ -78,3 +78,22 @@ Platform、Thread、外部消息 ID 和 Host 写入的规范 `origin_user_id`。
 合并历史。`shared`、`per-thread`、`agent-shared`、Owner 不一致和 Agent Group 不一致均
 Fail Closed。额外的两跳 A2A 回归证明 Agent 可见正文中的伪造 `senderId` 不能替换 Host
 交叉验证后的规范用户。
+
+## Web Channel、Conversation API 与幂等消息接入
+
+验证日期：2026-07-27
+
+| 范围 | 命令 | 结果 |
+|---|---|---|
+| Host 类型检查 | `pnpm typecheck` | 通过 |
+| Web Adapter Contract、会话服务、历史分页、Migration | `pnpm exec vitest run src/channels/web.test.ts src/channels/channel-contract.test.ts src/web/conversations.test.ts src/db/migrations/039-web-message-receipts.test.ts` | 通过，4 个测试文件、15 个测试 |
+| 真实 HTTP API、Cookie/CSRF/Origin 和消息去重 | `pnpm exec vitest run src/web/server.test.ts src/web/conversations.test.ts src/db/migrations/039-web-message-receipts.test.ts` | 通过，3 个测试文件、8 个测试 |
+| Host 全量回归 | `pnpm test` | 通过，89 个测试文件、910 个测试 |
+
+HTTP 测试证明服务器忽略浏览器伪造的 User、Agent Group、Session 和 Lane 字段，只使用 Hash 化
+Web Session、重新授权后的 Lane 与数据库 Binding。相同 `clientMessageId` 重试只调用一次 Web
+Adapter，并返回同一个服务端消息 ID。
+
+History 从根 Session 的 `inbound.db` / `outbound.db` 合并，使用确定性不透明 Cursor；测试额外
+注入了 Bob 的底层入站行，Alice 的 Web History 不会返回该内容。撤销 Alice 的 Agent Group
+Membership 后，下一次 List 与 History 请求立即隐藏/拒绝该 Lane。

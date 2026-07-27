@@ -264,6 +264,25 @@ CREATE UNIQUE INDEX idx_conversation_binding_active_thread_identity
   ON conversation_bindings(channel_type, platform_id, thread_id, external_identity_id)
   WHERE thread_id IS NOT NULL AND external_identity_id IS NOT NULL AND revoked_at IS NULL;
 
+-- Stable browser retry keys. This is only an idempotency ledger; message
+-- content continues to live exclusively in the per-Session DB pair.
+CREATE TABLE web_message_receipts (
+  id                TEXT PRIMARY KEY,
+  user_id           TEXT NOT NULL REFERENCES users(id),
+  lane_id           TEXT NOT NULL REFERENCES conversation_lanes(id),
+  client_message_id TEXT NOT NULL,
+  server_message_id TEXT NOT NULL,
+  status            TEXT NOT NULL
+                    CHECK(status IN ('routing', 'accepted', 'failed')),
+  created_at        TEXT NOT NULL,
+  completed_at      TEXT,
+  failure_code      TEXT,
+  UNIQUE(user_id, lane_id, client_message_id),
+  UNIQUE(server_message_id)
+);
+CREATE INDEX idx_web_message_receipts_lane
+  ON web_message_receipts(user_id, lane_id, created_at);
+
 -- Pending interactive questions
 CREATE TABLE pending_questions (
   question_id    TEXT PRIMARY KEY,

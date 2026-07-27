@@ -124,23 +124,26 @@ describe('registry conformance — in-tree adapters satisfy the contract', () =>
     }
   });
 
-  it('cli and feishu are both registered', async () => {
+  it('cli, feishu and web are registered', async () => {
     await import('./cli.js');
     await import('./feishu.js');
+    await import('./web.js');
     const { getRegisteredChannelNames } = await import('./channel-registry.js');
     const names = getRegisteredChannelNames();
     expect(names).toContain('cli');
     expect(names).toContain('feishu');
+    expect(names).toContain('web');
   });
 
-  it('every registered adapter (cli + feishu) satisfies the ChannelAdapter contract', async () => {
+  it('every configured in-tree adapter satisfies the ChannelAdapter contract', async () => {
     await import('./cli.js');
     await import('./feishu.js');
+    await import('./web.js');
     const { getRegisteredChannelNames, __getRegisteredFactoryForTests } = await import('./channel-registry.js');
 
     const names = getRegisteredChannelNames();
-    // Guard: the two in-tree adapters must be present in the registered set.
-    expect(names).toEqual(expect.arrayContaining(['cli', 'feishu']));
+    // Guard: all built-in adapters must be present in the registered set.
+    expect(names).toEqual(expect.arrayContaining(['cli', 'feishu', 'web']));
 
     let sawCli = false;
     let sawFeishu = false;

@@ -67,6 +67,14 @@ export interface InboundEvent {
    * payloads and chat message content must never be copied into it.
    */
   conversationLaneId?: string;
+  /**
+   * Canonical user established by an authenticated Host-side surface.
+   *
+   * Web SSO uses this instead of copying a user id from browser JSON into
+   * Agent-visible message content. Native chat adapters should use
+   * `senderIdentity` so the Host can resolve their provider subject.
+   */
+  authenticatedUserId?: string;
   message: {
     id: string;
     kind: 'chat' | 'chat-sdk';

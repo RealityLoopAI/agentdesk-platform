@@ -10,6 +10,14 @@ import {
 import { recordEnterpriseAudit } from '../db/enterprise-audit.js';
 import { log } from '../log.js';
 import { readWebConfig, type WebConfig } from './config.js';
+import {
+  createWebConversation,
+  getWebConversationHistory,
+  listWebConversations,
+  submitWebConversationMessage,
+  WebConversationError,
+  type SubmitWebInbound,
+} from './conversations.js';
 import { completeFeishuSso, startFeishuSso } from './feishu-sso.js';
 
 const OAUTH_BROWSER_COOKIE_SUFFIX = '_oauth';
@@ -187,15 +195,32 @@ function exactOriginAllowed(req: IncomingMessage, config: WebConfig): boolean {
   return typeof origin === 'string' && origin === config.publicOrigin;
 }
 
-async function consumeRequestBody(req: IncomingMessage, maxBytes: number): Promise<void> {
+async function readJsonRequestBody(req: IncomingMessage, maxBytes: number): Promise<Record<string, unknown>> {
   const declared = Number(req.headers['content-length'] ?? 0);
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new WebRequestError(413, 'request_too_large');
   }
   let bytes = 0;
+  const chunks: Buffer[] = [];
   for await (const chunk of req) {
-    bytes += Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(String(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    bytes += buffer.length;
     if (bytes > maxBytes) throw new WebRequestError(413, 'request_too_large');
+    chunks.push(buffer);
+  }
+  if (bytes === 0) return {};
+  const contentType = req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase();
+  if (contentType !== 'application/json') {
+    throw new WebRequestError(415, 'unsupported_media_type');
+  }
+  try {
+    const value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('body is not an object');
+    }
+    return value as Record<string, unknown>;
+  } catch {
+    throw new WebRequestError(400, 'invalid_json');
   }
 }
 
@@ -227,7 +252,7 @@ function enforceRateLimit(limiter: FixedWindowLimiter, key: string, res: ServerR
 
 export function createWebRequestHandler(
   config: WebConfig,
-  options: { fetchImpl?: typeof fetch } = {},
+  options: { fetchImpl?: typeof fetch; submitInbound?: SubmitWebInbound } = {},
 ): RequestListener {
   const loginLimiter = createFixedWindowLimiter(config.loginRateLimit, config.rateWindowMs);
   const apiLimiter = createFixedWindowLimiter(config.apiRateLimit, config.rateWindowMs);
@@ -304,6 +329,12 @@ export function createWebRequestHandler(
           return;
         }
 
+        if (method === 'GET' && url.pathname === '/api/conversations') {
+          json(res, 200, listWebConversations(authenticated.session.user_id));
+          return;
+        }
+
+        let postBody: Record<string, unknown> | null = null;
         if (method === 'POST') {
           if (!exactOriginAllowed(req, config)) throw new WebRequestError(403, 'request_forbidden');
           if (
@@ -315,7 +346,7 @@ export function createWebRequestHandler(
           ) {
             throw new WebRequestError(403, 'request_forbidden');
           }
-          await consumeRequestBody(req, config.maxBodyBytes);
+          postBody = await readJsonRequestBody(req, config.maxBodyBytes);
         }
 
         if (method === 'POST' && url.pathname === '/api/logout') {
@@ -332,6 +363,53 @@ export function createWebRequestHandler(
           return;
         }
 
+        if (method === 'POST' && url.pathname === '/api/conversations') {
+          const agentGroupId = typeof postBody?.agentGroupId === 'string' ? postBody.agentGroupId : '';
+          json(res, 201, { conversation: createWebConversation(authenticated.session.user_id, agentGroupId) });
+          return;
+        }
+
+        const messagesMatch = /^\/api\/conversations\/([^/]+)\/messages$/.exec(url.pathname);
+        if (messagesMatch?.[1]) {
+          let laneId: string;
+          try {
+            laneId = decodeURIComponent(messagesMatch[1]);
+          } catch {
+            throw new WebRequestError(400, 'invalid_conversation_id');
+          }
+          if (method === 'GET') {
+            const limitRaw = url.searchParams.get('limit');
+            const limit = limitRaw === null ? undefined : Number(limitRaw);
+            if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)) {
+              throw new WebRequestError(400, 'invalid_limit');
+            }
+            json(
+              res,
+              200,
+              getWebConversationHistory({
+                userId: authenticated.session.user_id,
+                laneId,
+                cursor: url.searchParams.get('cursor'),
+                limit,
+              }),
+            );
+            return;
+          }
+          if (method === 'POST') {
+            const clientMessageId = typeof postBody?.clientMessageId === 'string' ? postBody.clientMessageId : '';
+            const text = typeof postBody?.text === 'string' ? postBody.text : '';
+            const result = await submitWebConversationMessage({
+              userId: authenticated.session.user_id,
+              laneId,
+              clientMessageId,
+              text,
+              submitInbound: options.submitInbound,
+            });
+            json(res, result.replayed ? 200 : 202, { message: result });
+            return;
+          }
+        }
+
         throw new WebRequestError(404, 'not_found');
       }
 
@@ -346,6 +424,8 @@ export function createWebRequestHandler(
     } catch (error) {
       if (res.writableEnded) return;
       if (error instanceof WebRequestError) {
+        json(res, error.status, { error: error.code });
+      } else if (error instanceof WebConversationError) {
         json(res, error.status, { error: error.code });
       } else {
         log.error('Web request failed', {

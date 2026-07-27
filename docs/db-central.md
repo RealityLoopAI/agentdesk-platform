@@ -277,6 +277,31 @@ CREATE TABLE conversation_bindings (
 - **访问层：** `src/db/conversation-lanes.ts`；**结构迁移：**
   `src/db/migrations/038-conversation-lanes.ts`。
 
+### 1.8b `web_message_receipts`
+
+浏览器发送重试的持久化幂等回执。唯一键是规范用户、Lane 和浏览器生成的稳定
+`client_message_id`；`server_message_id` 是 Host 生成并进入通用 Router 的消息标识。
+
+```sql
+CREATE TABLE web_message_receipts (
+  id                TEXT PRIMARY KEY,
+  user_id           TEXT NOT NULL REFERENCES users(id),
+  lane_id           TEXT NOT NULL REFERENCES conversation_lanes(id),
+  client_message_id TEXT NOT NULL,
+  server_message_id TEXT NOT NULL,
+  status            TEXT NOT NULL CHECK(status IN ('routing', 'accepted', 'failed')),
+  created_at        TEXT NOT NULL,
+  completed_at      TEXT,
+  failure_code      TEXT,
+  UNIQUE(user_id, lane_id, client_message_id),
+  UNIQUE(server_message_id)
+);
+```
+
+这张表不保存消息正文、附件路径、Cookie 或 Token。消息真相源仍是 Lane 根 Session 的
+`inbound.db` / `outbound.db`。**访问层：** `src/db/web-message-receipts.ts`；
+**结构迁移：** `src/db/migrations/039-web-message-receipts.ts`。
+
 ### 1.9 `pending_questions`
 
 The `ask_user_question` MCP tool parks an interactive question here, and the container matches incoming `system` messages back to it by `questionId`.
@@ -500,6 +525,7 @@ Migrations live in `src/db/migrations/`, one file per migration. Runner: `runMig
 | 036 | `036-user-identities.ts` | 规范用户与 Provider Scope 感知的外部身份映射 |
 | 037 | `037-web-auth.ts` | Hash 化 Web Session 与一次性 SSO 登录事务 |
 | 038 | `038-conversation-lanes.ts` | 跨渠道 Lane、Binding 和 `sessions.conversation_lane_id` |
+| 039 | `039-web-message-receipts.ts` | 不含正文的 Web 客户端消息幂等回执 |
 
 Numbers 005 and 006 are intentionally absent — migrations were renumbered during early development.
 

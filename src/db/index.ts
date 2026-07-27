@@ -37,6 +37,14 @@ export {
   type WebAuthStateErrorReason,
 } from './web-auth.js';
 export {
+  completeWebMessageReceipt,
+  getWebMessageReceipt,
+  messageBaseIdFromReceipt,
+  reserveWebMessageReceipt,
+  type WebMessageReceipt,
+  type WebMessageReceiptStatus,
+} from './web-message-receipts.js';
+export {
   backfillLegacyFeishuOpenIds,
   createUserIdentity,
   getUserIdentitiesForUser,

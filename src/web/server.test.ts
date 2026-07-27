@@ -6,6 +6,7 @@ import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { authenticateWebSession, createWebAuthSession } from '../db/web-auth.js';
 import { runMigrations } from '../db/migrations/index.js';
 import type { WebConfig } from './config.js';
+import type { SubmitWebInbound } from './conversations.js';
 import { createWebRequestHandler } from './server.js';
 
 const SECRET = '82a60d53458239ca70aa1294ef743477cd8772d778d32962362674e3237a20d2';
@@ -38,8 +39,8 @@ const CONFIG: WebConfig = {
 
 const servers: Server[] = [];
 
-async function serve(config: WebConfig, fetchImpl?: typeof fetch): Promise<string> {
-  const server = http.createServer(createWebRequestHandler(config, { fetchImpl }));
+async function serve(config: WebConfig, fetchImpl?: typeof fetch, submitInbound?: SubmitWebInbound): Promise<string> {
+  const server = http.createServer(createWebRequestHandler(config, { fetchImpl, submitInbound }));
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -193,6 +194,109 @@ describe('Web HTTP authentication boundary', () => {
     expect(first.status).toBe(303);
     expect(second.status).toBe(429);
     expect(second.headers.get('retry-after')).toBeTruthy();
+  });
+
+  it('creates only authorized conversations and deduplicates authenticated Web messages', async () => {
+    const config = { ...CONFIG, maxBodyBytes: 4_096 };
+    const now = new Date().toISOString();
+    getDb().exec(`
+      INSERT INTO users (id, kind, display_name, created_at)
+        VALUES ('alice', 'feishu', 'Alice', '${now}');
+      INSERT INTO agent_groups (id, name, folder, agent_provider, created_at, organization_id)
+        VALUES
+        ('ag-allowed', 'Allowed Agent', 'allowed', NULL, '${now}', NULL),
+        ('ag-denied', 'Denied Agent', 'denied', NULL, '${now}', NULL);
+      INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+        VALUES ('alice', 'ag-allowed', NULL, '${now}');
+    `);
+    const session = createWebAuthSession({
+      userId: 'alice',
+      secret: SECRET,
+      policy: config.sessionPolicy,
+    });
+    const submitted: Parameters<SubmitWebInbound>[0][] = [];
+    const base = await serve(config, undefined, async (event) => {
+      submitted.push(event);
+    });
+    const headers = {
+      cookie: `${config.cookieName}=${session.token}`,
+      origin: config.publicOrigin,
+      'x-csrf-token': session.csrfToken,
+      'content-type': 'application/json',
+    };
+
+    const list = await fetch(`${base}/api/conversations`, { headers: { cookie: headers.cookie } });
+    expect(list.status).toBe(200);
+    expect(await list.json()).toMatchObject({
+      conversations: [],
+      availableAgentGroups: [{ id: 'ag-allowed', name: 'Allowed Agent' }],
+    });
+
+    const denied = await fetch(`${base}/api/conversations`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ agentGroupId: 'ag-denied' }),
+    });
+    expect(denied.status).toBe(403);
+
+    const created = await fetch(`${base}/api/conversations`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ agentGroupId: 'ag-allowed', userId: 'bob', sessionId: 'forged' }),
+    });
+    expect(created.status).toBe(201);
+    const createdPayload = (await created.json()) as { conversation: { id: string } };
+    const laneId = createdPayload.conversation.id;
+
+    const submitBody = JSON.stringify({
+      clientMessageId: 'client-1',
+      text: '来自浏览器的消息',
+      userId: 'bob',
+      agentGroupId: 'ag-denied',
+      sessionId: 'forged',
+      conversationLaneId: 'lane-forged',
+    });
+    const first = await fetch(`${base}/api/conversations/${laneId}/messages`, {
+      method: 'POST',
+      headers,
+      body: submitBody,
+    });
+    expect(first.status).toBe(202);
+    const firstPayload = (await first.json()) as { message: { messageId: string; replayed: boolean } };
+    expect(firstPayload.message.replayed).toBe(false);
+
+    const duplicate = await fetch(`${base}/api/conversations/${laneId}/messages`, {
+      method: 'POST',
+      headers,
+      body: submitBody,
+    });
+    expect(duplicate.status).toBe(200);
+    expect(await duplicate.json()).toMatchObject({
+      message: { messageId: firstPayload.message.messageId, status: 'accepted', replayed: true },
+    });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toMatchObject({
+      authenticatedUserId: 'alice',
+      conversationLaneId: laneId,
+      platformId: `web:${laneId}`,
+      threadId: null,
+      message: { isMention: true, isGroup: false },
+    });
+    expect(JSON.parse(submitted[0]!.message.content)).toEqual({
+      text: '来自浏览器的消息',
+      sender: 'Alice',
+    });
+
+    getDb()
+      .prepare('DELETE FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
+      .run('alice', 'ag-allowed');
+    const afterRevoke = await fetch(`${base}/api/conversations`, { headers: { cookie: headers.cookie } });
+    expect(await afterRevoke.json()).toMatchObject({ conversations: [], availableAgentGroups: [] });
+    const hidden = await fetch(`${base}/api/conversations/${laneId}/messages`, {
+      headers: { cookie: headers.cookie },
+    });
+    expect(hidden.status).toBe(403);
+    expect(await hidden.json()).toEqual({ error: 'conversation_unavailable' });
   });
 });
 

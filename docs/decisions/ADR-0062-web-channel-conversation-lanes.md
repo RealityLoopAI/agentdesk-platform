@@ -46,6 +46,11 @@ Lane 继续复用现有 `inbound.db` 与 `outbound.db` 作为消息真相源，�
 Web Server 在单一 Host 进程中使用独立 `WEB_PORT`，与 Webhook/Metrics Listener 隔离。写入用
 认证 POST；只有持久化完成后的事件才能进入 SSE；Cursor 重放读取权威持久化数据。
 
+浏览器重试使用中央 `web_message_receipts` 做幂等收敛，唯一键为规范用户、Lane 和
+`client_message_id`。该表只记录服务器消息 ID 和处理状态，不保存正文；Transcript 仍只存在于
+Lane 根 Session 的 DB Pair。Web SSO 得到的规范用户通过 Host-only
+`InboundEvent.authenticatedUserId` 传给 Router，不从 Agent 可见的浏览器 JSON 推导。
+
 ## Consequences
 
 - **Positive**: 同一用户可在飞书与 Web 继续一个 Agent 上下文，同时保持 Alice/Bob、群聊和
@@ -58,6 +63,7 @@ Web Server 在单一 Host 进程中使用独立 `WEB_PORT`，与 Webhook/Metrics
 ## Implementation Notes
 
 - 新增 Lane/Binding 表、Partial Unique Index 和 `sessions.conversation_lane_id`。
+- 新增不含正文的 Web 消息回执表，使并发重试返回同一个服务端消息。
 - Web Adapter 必须先认证并由服务端解析用户/Lane，浏览器字段不能覆盖上下文。
 - 回复路由从触发入站行读取来源，不再把 `sessions.messaging_group_id` 当作唯一地址。
 - SSE 只通知已持久化事件，支持授权后 Cursor 重放、连接上限和 Backpressure。

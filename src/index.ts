@@ -159,12 +159,13 @@ async function main(): Promise<void> {
         });
       },
       onInboundEvent(event) {
-        routeInbound(event).catch((err) => {
+        return routeInbound(event).catch((err) => {
           log.error('Failed to route inbound event', {
             sourceAdapter: adapter.channelType,
             targetChannelType: event.channelType,
             err,
           });
+          throw err;
         });
       },
       onMetadata(platformId, name, isGroup) {

@@ -141,6 +141,11 @@ Feishu chat and Feishu SSO resolve to the same opaque `users.id`.
    Trace，不能参与 Lane 查询。来自 Lane 的消息写入 Host 拥有的 `origin_user_id`，因此后续
    A2A 多跳继续使用既有交叉验证信任链。
 
+5. **Authenticated Web principal。** Web Server 从 Hash 化 Cookie Session 得到规范用户，并在
+   逐请求重跑 Agent Group/Organization 访问门后，把 `authenticatedUserId` 与 Lane 作为
+   Host Envelope 元数据交给 Web Adapter。它们不能从浏览器 JSON 或 Agent 可见正文复制。Web
+   消息随后复用通用 Router 的 Persist-before-route 路径；详见 [web-channel.md](web-channel.md)。
+
 ## Channel Adapters
 
 Channel adapters are responsible for:
