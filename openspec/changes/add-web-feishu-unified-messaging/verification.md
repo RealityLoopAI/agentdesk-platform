@@ -312,11 +312,12 @@ App 级逻辑别名后，`/describe` 与其余 8 个 Endpoint 全部通过。这
 
 验证日期：2026-07-27
 
-| 范围                                 | 命令                                                                                    | 结果                                                          |
-| ------------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| 真实 Host HTTP + Mock 飞书身份提供方 | `pnpm exec vitest run src/web/unified-messaging.e2e.test.ts`                            | 通过，Web/飞书同一规范用户复用同一 Lane 和根 Session          |
-| Runner Mock Provider 明确测试标记    | `pnpm test src/providers/mock.test.ts`（Runner）                                        | 通过，3 个测试                                                |
-| 真实容器 A2A + Gateway               | `AGENT_IMAGE=agentdesk-agent-v2-69585351:e2e-local-deps pnpm e2e:container:a2a-gateway` | 通过，Frontdesk 与 Worker 两个真实容器完成多跳和 Gateway 审计 |
+| 范围                                 | 命令                                                                                        | 结果                                                          |
+| ------------------------------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| 真实 Host HTTP + Mock 飞书身份提供方 | `pnpm exec vitest run src/web/unified-messaging.e2e.test.ts`                                | 通过，Web/飞书同一规范用户复用同一 Lane 和根 Session          |
+| Runner Mock Provider 明确测试标记    | `pnpm test src/providers/mock.test.ts`（Runner）                                            | 通过，3 个测试                                                |
+| Host ↔ Runner ↔ SQLite 容器往返      | `CONTAINER_IMAGE=agentdesk-agent-v2-69585351:verify-current pnpm e2e:container`             | 通过，真实容器跨挂载写入 `outbound.db`                        |
+| 真实容器 A2A + Gateway               | `CONTAINER_IMAGE=agentdesk-agent-v2-69585351:verify-current pnpm e2e:container:a2a-gateway` | 通过，Frontdesk 与 Worker 两个真实容器完成多跳和 Gateway 审计 |
 
 Web E2E 使用真实 Cookie、CSRF、Router、中央数据库和 Session DB，验证飞书与 Web 入站最终都属于
 `user-e2e`。测试还发现并修复了 History 把 Agent 出站 Channel 误信为容器地址的问题：现在只根据
@@ -326,9 +327,14 @@ Web E2E 使用真实 Cookie、CSRF、Router、中央数据库和 Session DB，�
 Handler 和本地 HTTP Gateway，最终在容器出站审计和 Host 中央 `gateway_audit` 同时验证
 `requesterSource=session`、原始用户、Thread、`feishu.bitable.record.list` 和逻辑资源。
 
-标准 `pnpm container:build` 已实际尝试；基础 Node Layer 下载成功，但 Debian 软件源
-`deb.debian.org:80` 网络连接超时，因此本轮使用临时本地依赖覆盖镜像完成真实容器验证。该失败是
-外部软件源不可达，不是 Dockerfile 或 TypeScript 错误；正式发布检查仍需在网络可用环境重建标准镜像。
+标准 `pnpm container:build` 已实际重试。基础 Node Layer 下载成功，Debian Chromium/GTK
+依赖已下载至第 172 个包，但 Docker Desktop 在解包大型 LLVM/Chromium 依赖时以
+`cannot allocate memory` 终止；第一次尝试还遇到 Debian 软件源连接超时。为区分本机镜像构建
+资源问题与应用回归，本轮复用已有的浏览器/容器运行时系统层，删除旧 `node_modules`，再根据当前
+`package.json` 与 `bun.lock` 重新安装 173 个 Runner 包，生成
+`agentdesk-agent-v2-69585351:verify-current`。构建日志确认镜像包含 OTel `0.221.0/2.10.0`
+和当前锁文件；上述两组真实容器测试均使用该镜像。正式发布流水线仍应在内存和网络充足的构建机
+上从标准 Dockerfile 重建、签名并发布镜像，本地 OOM 不属于代码或契约验证通过的替代结论。
 
 ## 迁移兼容、独立发布开关和回滚演练
 
@@ -355,3 +361,34 @@ Session 数据后，旧字段投影可以只读打开，证明加性 Schema 的�
 为 0，并产生两条 `web_sessions_revoked` Enterprise Audit。完整的 SSO、反向代理、Cookie/CSRF、
 身份、Lane 隐私、多维表格、五阶段灰度和回滚步骤记录在
 `docs/web-feishu-unified-messaging-operations.md`。发布开关的权限边界决策记录在 ADR-0065。
+
+## 最终发布门验证
+
+验证日期：2026-07-27
+
+| 范围                      | 命令/检查                                                                                                                           | 结果                                                               |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Host 格式                 | `pnpm format:check`                                                                                                                 | 通过                                                               |
+| Host Lint                 | `pnpm lint`                                                                                                                         | 通过，0 个错误；195 条为项目现有 Warning                           |
+| Host 类型检查与生产构建   | `pnpm typecheck`、`pnpm build`                                                                                                      | 通过                                                               |
+| Host 全量测试             | `pnpm test`                                                                                                                         | 通过，102 个测试文件、972/972 个测试                               |
+| 参考 Gateway 测试         | `pnpm test:reference-gateway`                                                                                                       | 通过，12/12 个测试                                                 |
+| Web 格式、类型与生产构建  | `pnpm web:format:check`、`pnpm web:typecheck`、`pnpm web:build`                                                                     | 通过                                                               |
+| Web 单元/组件测试         | `pnpm web:test`                                                                                                                     | 通过，6 个测试文件、13/13 个测试                                   |
+| Web Chromium 端到端       | `pnpm web:e2e`                                                                                                                      | 9 个通过、1 个按设备条件跳过                                       |
+| Runner 类型检查与全量测试 | `bun run typecheck`、`bun test`（`container/agent-runner`）                                                                         | 通过，30 个测试文件、331/331 个测试                                |
+| Host 生产依赖审计         | `pnpm audit --prod --audit-level high`                                                                                              | 退出码 0；2 个中危，1 个已记录且在当前静态 SPA 中不可达的 RSC 高危 |
+| Runner 高危依赖审计       | `bun audit --audit-level=high`（`container/agent-runner`）                                                                          | 通过，无高危通告                                                   |
+| 严格 Gateway Conformance  | 启用 Bitable 读写 Flag、App/Table 逻辑别名和 `GATEWAY_REQUIRE_FEISHU_BITABLE=true` 的完整检查                                       | 9/9 个 Endpoint 通过，11 个 `feishu.bitable.*` Operation 完整发布  |
+| 真实容器 Smoke            | 分别运行带 `CONTAINER_IMAGE=agentdesk-agent-v2-69585351:verify-current` 的 `pnpm e2e:container` 与 `pnpm e2e:container:a2a-gateway` | 两组通过，覆盖 DB 往返、A2A 身份传播、多维表格 Gateway 与审计      |
+| OpenSpec 严格校验         | `openspec validate add-web-feishu-unified-messaging --strict --no-interactive`                                                      | 通过                                                               |
+
+依赖审计没有隐藏失败：`react-router-dom` 已固定为当前仓库可安装的 `7.18.1`。审计工具所报
+`GHSA-qwww-vcr4-c8h2` 只影响 React Server Components 请求解码，而本项目 Web 端是 Vite 构建的
+同源静态 SPA，不包含 React Server Components 服务端运行路径；上游宣称的修复版 `8.3.0` 在本次
+验证时尚未发布。该例外及升级触发条件记录在 `SECURITY.md`。其余可达高危依赖已通过 OTel、
+`gaxios`、`axios`、`fast-uri` 等版本升级或锁文件 Override 清除。
+
+任务 9.4 的全部代码、契约、依赖和真实容器 Smoke 检查已经完成。任务 5.9 继续保持未勾选：
+仓库中的 Logo 组件和测试资产已实现，但用户提供的低分辨率位图不能自动等同于运营者批准的正式
+SVG/高分辨率品牌资产；正式素材到位并完成品牌审批后才能关闭该项。
