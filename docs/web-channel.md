@@ -108,6 +108,28 @@ Web Agent 回复只有在 `messages_out` 已存在后才进入 Web Adapter；Hos
 `BRAND_UI_TEXT_PRIMARY`、`BRAND_UI_TEXT_SECONDARY`、`BRAND_UI_STATUS_SUCCESS`、
 `BRAND_UI_STATUS_WARNING` 和 `BRAND_UI_STATUS_DANGER`。
 
+后端除检查颜色格式外，还会检查主要文字、品牌按钮和状态色是否达到 WCAG AA 的 4.5:1 对比度；
+合法但对比度不足的自定义值也会回退。前端的全局 `prefers-reduced-motion` 规则会关闭非必要动画。
+
+## 前端会话与实时状态
+
+桌面端使用会话侧栏和消息区双栏布局；窄屏只显示其中一页，并通过 URL 与返回按钮切换。侧栏只呈现
+`GET /api/conversations` 当前返回的 Lane 与 Agent Group，创建会话仍由 Host 重新授权。当前 Lane
+始终写入 `/conversations/:laneId`，所以刷新或复制同源 URL 后可以恢复选择。
+
+历史记录由 TanStack Query 分页读取并按服务端时间、Sequence、方向和消息 ID 确定性排序。用户发送
+消息时生成稳定 `clientMessageId`：本地先显示发送中，POST 返回后绑定服务端消息 ID，随后与 History
+和 SSE 通知归并。失败气泡保留原始客户端 ID，点击重试不会创建新的幂等键。
+
+整个应用只有一个用户级 EventSource。Cursor 和最近 Event ID 只存在页面内存；重连时把最后 Cursor
+作为 `/api/events?cursor=...` 提交。重复 Event 会被忽略，断线采用带抖动的有界指数退避；恢复后只
+触发权威 Query 刷新，不把 SSE Payload 当作消息正文。`session-revoked` 会清除内存 CSRF 并返回
+登录页。
+
+Agent 正文使用 `react-markdown`、GFM、`rehype-sanitize` 和安全代码高亮。JavaScript 等危险链接不会
+生成可点击锚点，远程图片不会加载；外链使用新窗口隔离属性。代码块带语言高亮、横向滚动和复制按钮，
+表格在窄屏可横向滚动。
+
 ## 运行配置
 
 Web Listener 默认关闭。启用时至少需要配置 `WEB_ENABLED=true`、精确的

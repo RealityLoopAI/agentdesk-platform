@@ -118,12 +118,12 @@ web/
 
 前端状态按职责拆分：
 
-| 状态类型 | 保存位置 | 示例 |
-|---|---|---|
-| 服务端权威状态 | TanStack Query Cache | 当前用户、Lane 列表、分页历史 |
-| URL 状态 | React Router | 当前 `laneId` |
-| 短期界面状态 | 组件 State | 输入草稿、侧栏开合、滚动位置 |
-| 实时连接状态 | SSE Provider/Hook | Cursor、连接中、已连接、重连中 |
+| 状态类型       | 保存位置             | 示例                           |
+| -------------- | -------------------- | ------------------------------ |
+| 服务端权威状态 | TanStack Query Cache | 当前用户、Lane 列表、分页历史  |
+| URL 状态       | React Router         | 当前 `laneId`                  |
+| 短期界面状态   | 组件 State           | 输入草稿、侧栏开合、滚动位置   |
+| 实时连接状态   | SSE Provider/Hook    | Cursor、连接中、已连接、重连中 |
 
 不引入 Redux 等额外全局状态库。消息历史的真相源仍是服务端持久化记录，SSE 只向 Query Cache 归并事件。归并键使用服务端消息 ID；发送中的本地消息使用稳定 `clientMessageId` 展示临时状态，在 POST 返回或 SSE 到达后替换为服务端记录。前端必须按服务端 Cursor/Sequence 排序，不能用浏览器到达时间决定顺序。
 
@@ -159,21 +159,21 @@ SSE 客户端只建立一个用户级连接。事件至少包含 `eventId`、`cu
 
 当前主题预设：
 
-| Token | 默认值 | 用途 |
-|---|---|---|
-| `--brand-primary` | `#245866` | 主按钮、当前会话标识、焦点和链接 |
-| `--brand-primary-hover` | `#1B4652` | 主操作悬停 |
-| `--brand-primary-active` | `#143A44` | 主操作按下 |
-| `--brand-surface-subtle` | `#E8F1F2` | 选中项、引用块和浅品牌背景 |
-| `--brand-border` | `#B8D0D3` | 品牌强调边框 |
-| `--canvas` | `#FAF8F4` | 页面暖白背景 |
-| `--surface` | `#FFFFFF` | 卡片和消息工作区 |
-| `--border` | `#DDE5E5` | 普通分隔和边框 |
-| `--text-primary` | `#18343B` | 主要文字 |
-| `--text-secondary` | `#60757A` | 次要文字 |
-| `--status-success` | `#287A5B` | 成功状态 |
-| `--status-warning` | `#B66A20` | 警告状态 |
-| `--status-danger` | `#C44545` | 错误状态 |
+| Token                    | 默认值    | 用途                             |
+| ------------------------ | --------- | -------------------------------- |
+| `--brand-primary`        | `#245866` | 主按钮、当前会话标识、焦点和链接 |
+| `--brand-primary-hover`  | `#1B4652` | 主操作悬停                       |
+| `--brand-primary-active` | `#143A44` | 主操作按下                       |
+| `--brand-surface-subtle` | `#E8F1F2` | 选中项、引用块和浅品牌背景       |
+| `--brand-border`         | `#B8D0D3` | 品牌强调边框                     |
+| `--canvas`               | `#FAF8F4` | 页面暖白背景                     |
+| `--surface`              | `#FFFFFF` | 卡片和消息工作区                 |
+| `--border`               | `#DDE5E5` | 普通分隔和边框                   |
+| `--text-primary`         | `#18343B` | 主要文字                         |
+| `--text-secondary`       | `#60757A` | 次要文字                         |
+| `--status-success`       | `#287A5B` | 成功状态                         |
+| `--status-warning`       | `#A85E18` | 警告状态（白字达到 WCAG AA）     |
+| `--status-danger`        | `#C44545` | 错误状态                         |
 
 这些颜色是根据当前 Logo 图片形成的推荐预设，不替代公司的正式品牌手册。实现时必须集中定义 Token；如后续获得正式色值，只替换主题配置而不改组件。正常正文与背景对比度至少满足 WCAG 2.2 AA；不能只依赖颜色表达成功、警告、错误或选中状态。
 
@@ -338,10 +338,10 @@ SSE Cursor 可以从持久化 Session Message Sequence/State 派生，或使用�
 
 默认行为：
 
-| 来源 | Agent 回复投递 | Web 可见性 |
-|---|---|---|
+| 来源        | Agent 回复投递 | Web 可见性                |
+| ----------- | -------------- | ------------------------- |
 | 飞书群/私聊 | 回复原飞书地址 | 在 Owner 的 Web Lane 可见 |
-| Web | 回复 Web/SSE | 在 Web 可见 |
+| Web         | 回复 Web/SSE   | 在 Web 可见               |
 
 Web 发出的内容默认不发送到飞书。用户可以选择经过验证的飞书私聊订阅，以镜像合格的 Agent 回复；飞书群镜像留待未来显式策略。每次镜像投递必须携带 Origin/Delivery ID，并且即使被飞书回调观察到也不得重新进入路由。
 

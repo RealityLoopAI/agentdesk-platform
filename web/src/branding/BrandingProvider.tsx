@@ -19,7 +19,7 @@ const FALLBACK_BRANDING: PublicBranding = {
     textPrimary: '#18343B',
     textSecondary: '#60757A',
     statusSuccess: '#287A5B',
-    statusWarning: '#B66A20',
+    statusWarning: '#A85E18',
     statusDanger: '#C44545',
   },
 };

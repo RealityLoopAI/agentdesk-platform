@@ -48,16 +48,16 @@
 - [x] 5.8 建立语义化 CSS Token、4px 间距网格、系统字体栈、6/10/14/20px 圆角层级和深青色/暖白色推荐主题，并为缺失或非法品牌配置提供可访问回退
 - [ ] 5.9 导入运营者批准的正式 SVG/高分辨率 Logo，建立导航、登录页、Agent 头像、空状态和低动态处理状态的 Logo 使用组件及安全留白规则
 - [x] 5.10 建立 `/login`、`/conversations`、`/conversations/:laneId` 路由、应用错误边界，以及桌面双栏/窄屏页面切换的响应式骨架
-- [ ] 5.11 实现同源 HTTP Client、`/api/me` 启动认证、飞书 SSO 顶层跳转、CSRF Header、`401` 重新登录和 `403` 无权访问的分离处理
-- [ ] 5.12 实现均衡密度的会话侧栏、会话创建、URL Lane 选择、分页历史、品牌化空状态和确定性消息排序，并使用 TanStack Query 保存服务端权威状态
-- [ ] 5.13 实现混合消息布局：右侧品牌色用户气泡、左侧带 Logo 的 Agent 内容区，以及消息发送中/失败重试和全局网络状态的分级反馈
-- [ ] 5.14 实现消息输入、稳定 `clientMessageId`，以及 POST 响应、历史查询和 SSE 事件按服务端标识归并
-- [ ] 5.15 实现单个用户级 SSE Client，包括 Cursor 保存、Event ID 去重、带抖动的有界指数退避、恢复后 Query 校验和 Session 撤销处理
-- [ ] 5.16 实现安全 Markdown、表格、净化链接和带语言标识/横向滚动/语法高亮/复制按钮的代码块
-- [ ] 5.17 实现键盘操作、焦点管理、ARIA 状态播报、WCAG 2.2 AA 对比度校验、`prefers-reduced-motion` 和不会被高频片段打断的可访问性反馈
-- [ ] 5.18 实现禁止敏感信息持久化、精确 Origin 配置、CSP/安全响应头和 Vite 公开环境变量检查
+- [x] 5.11 实现同源 HTTP Client、`/api/me` 启动认证、飞书 SSO 顶层跳转、CSRF Header、`401` 重新登录和 `403` 无权访问的分离处理
+- [x] 5.12 实现均衡密度的会话侧栏、会话创建、URL Lane 选择、分页历史、品牌化空状态和确定性消息排序，并使用 TanStack Query 保存服务端权威状态
+- [x] 5.13 实现混合消息布局：右侧品牌色用户气泡、左侧带 Logo 的 Agent 内容区，以及消息发送中/失败重试和全局网络状态的分级反馈
+- [x] 5.14 实现消息输入、稳定 `clientMessageId`，以及 POST 响应、历史查询和 SSE 事件按服务端标识归并
+- [x] 5.15 实现单个用户级 SSE Client，包括 Cursor 保存、Event ID 去重、带抖动的有界指数退避、恢复后 Query 校验和 Session 撤销处理
+- [x] 5.16 实现安全 Markdown、表格、净化链接和带语言标识/横向滚动/语法高亮/复制按钮的代码块
+- [x] 5.17 实现键盘操作、焦点管理、ARIA 状态播报、WCAG 2.2 AA 对比度校验、`prefers-reduced-motion` 和不会被高频片段打断的可访问性反馈
+- [x] 5.18 实现禁止敏感信息持久化、精确 Origin 配置、CSP/安全响应头和 Vite 公开环境变量检查
 - [ ] 5.19 配置开发代理和生产静态资源服务，将 `web/dist/` 与 Host 同版本发布，并验证 Hash Asset 长缓存、HTML 不长期缓存及 SPA Fallback
-- [ ] 5.20 增加 Web API/Auth/Branding/Channel Contract 测试，并验证非法主题回退以及浏览器提供的 User/Agent Group/Session ID 不能覆盖服务端上下文
+- [x] 5.20 增加 Web API/Auth/Branding/Channel Contract 测试，并验证非法主题回退以及浏览器提供的 User/Agent Group/Session ID 不能覆盖服务端上下文
 - [ ] 5.21 增加前端组件、交互、无障碍和视觉回归测试，覆盖品牌资源缺失、登录、会话导航、消息归并、错误状态、SSE 重放、Markdown 净化、Logo 动效降级及桌面/窄屏布局
 - [ ] 5.22 使用 Playwright 和 Mock Feishu Provider 增加 SSO、消息往返、刷新恢复、断线重连、登录过期、品牌加载及窄屏流程 E2E
 

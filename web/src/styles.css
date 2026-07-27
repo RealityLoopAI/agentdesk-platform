@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import 'highlight.js/styles/github.css';
 
 :root {
   color-scheme: light;
@@ -17,7 +18,7 @@
   --text-primary: #18343b;
   --text-secondary: #60757a;
   --status-success: #287a5b;
-  --status-warning: #b66a20;
+  --status-warning: #a85e18;
   --status-danger: #c44545;
   --radius-sm: 6px;
   --radius-md: 10px;
@@ -78,6 +79,67 @@ select {
 
 ::selection {
   background: var(--brand-surface-subtle);
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown blockquote {
+  margin-block: 0.75rem;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 1.5rem;
+}
+
+.markdown ul {
+  list-style: disc;
+}
+
+.markdown ol {
+  list-style: decimal;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  margin-block: 1.25rem 0.5rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.markdown h1 {
+  font-size: 1.35rem;
+}
+
+.markdown h2 {
+  font-size: 1.2rem;
+}
+
+.markdown h3 {
+  font-size: 1.05rem;
+}
+
+.markdown blockquote {
+  border-left: 3px solid var(--brand-border);
+  padding-left: 1rem;
+  color: var(--text-secondary);
+}
+
+.markdown pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 @media (prefers-reduced-motion: reduce) {

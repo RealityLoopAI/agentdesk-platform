@@ -49,4 +49,18 @@ describe('public UI branding', () => {
     expect(buildPublicBranding({ displayName: '\u0000\u0007' }).displayName).toBe('Agent Platform');
     expect(buildPublicBranding({ displayName: 'x'.repeat(81) }).displayName).toBe('Agent Platform');
   });
+
+  it('rejects valid hex overrides when their foreground contrast is below WCAG AA', () => {
+    const values: Record<string, string> = {
+      BRAND_UI_PRIMARY: '#FFFFFF',
+      BRAND_UI_TEXT_PRIMARY: '#FFFFFF',
+      BRAND_UI_TEXT_SECONDARY: '#FAF8F4',
+      BRAND_UI_STATUS_WARNING: '#F2C94C',
+    };
+    const theme = buildPublicBranding({ read: (key) => values[key] }).theme;
+    expect(theme.brandPrimary).toBe(DEFAULT_UI_THEME.brandPrimary);
+    expect(theme.textPrimary).toBe(DEFAULT_UI_THEME.textPrimary);
+    expect(theme.textSecondary).toBe(DEFAULT_UI_THEME.textSecondary);
+    expect(theme.statusWarning).toBe(DEFAULT_UI_THEME.statusWarning);
+  });
 });

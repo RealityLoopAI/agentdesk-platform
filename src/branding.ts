@@ -131,7 +131,7 @@ export const DEFAULT_UI_THEME = {
   textPrimary: '#18343B',
   textSecondary: '#60757A',
   statusSuccess: '#287A5B',
-  statusWarning: '#B66A20',
+  statusWarning: '#A85E18',
   statusDanger: '#C44545',
 } as const;
 
@@ -191,6 +191,45 @@ function publicColor(raw: string | undefined, fallback: string): string {
   return candidate && /^#[0-9A-Fa-f]{6}$/.test(candidate) ? candidate.toUpperCase() : fallback;
 }
 
+function relativeLuminance(hex: string): number {
+  const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255);
+  const [red = 0, green = 0, blue = 0] = channels.map((channel) =>
+    channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+  );
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function contrastRatio(left: string, right: string): number {
+  const leftLuminance = relativeLuminance(left);
+  const rightLuminance = relativeLuminance(right);
+  return (Math.max(leftLuminance, rightLuminance) + 0.05) / (Math.min(leftLuminance, rightLuminance) + 0.05);
+}
+
+function ensureAccessibleTheme(theme: PublicUiTheme): PublicUiTheme {
+  const whiteTextTokens: Array<keyof PublicUiTheme> = [
+    'brandPrimary',
+    'brandPrimaryHover',
+    'brandPrimaryActive',
+    'statusSuccess',
+    'statusWarning',
+    'statusDanger',
+  ];
+  for (const key of whiteTextTokens) {
+    if (contrastRatio(theme[key], '#FFFFFF') < 4.5) theme[key] = DEFAULT_UI_THEME[key];
+  }
+  if (contrastRatio(theme.textPrimary, theme.canvas) < 4.5) {
+    theme.canvas = DEFAULT_UI_THEME.canvas;
+    theme.textPrimary = DEFAULT_UI_THEME.textPrimary;
+  }
+  if (contrastRatio(theme.textSecondary, theme.canvas) < 4.5) {
+    theme.textSecondary = DEFAULT_UI_THEME.textSecondary;
+  }
+  if (contrastRatio(theme.textPrimary, theme.surface) < 4.5) {
+    theme.surface = DEFAULT_UI_THEME.surface;
+  }
+  return theme;
+}
+
 /**
  * Public UI-only branding projection. Keeping this builder pure makes the
  * validation contract testable without mutating process-global constants.
@@ -209,7 +248,7 @@ export function buildPublicBranding(
   return {
     displayName: publicDisplayName(args.displayName ?? PLATFORM_BRAND),
     logoPath: publicLogoPath(read('BRAND_UI_LOGO_PATH')),
-    theme,
+    theme: ensureAccessibleTheme(theme),
   };
 }
 

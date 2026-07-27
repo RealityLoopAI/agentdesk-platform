@@ -4,14 +4,14 @@
 
 验证日期：2026-07-27
 
-| 范围 | 命令 | 结果 |
-|---|---|---|
-| Host 依赖 | `pnpm install --frozen-lockfile` | 通过 |
-| Host 类型检查 | `pnpm typecheck` | 通过 |
-| Host 测试 | `pnpm test` | 通过，76 个测试文件、864 个测试 |
-| Runner 依赖 | `bun install --frozen-lockfile` | 通过 |
-| Runner 类型检查 | `bun run typecheck` | 通过 |
-| Runner 测试 | `bun test` | 通过，320 个测试 |
+| 范围            | 命令                             | 结果                            |
+| --------------- | -------------------------------- | ------------------------------- |
+| Host 依赖       | `pnpm install --frozen-lockfile` | 通过                            |
+| Host 类型检查   | `pnpm typecheck`                 | 通过                            |
+| Host 测试       | `pnpm test`                      | 通过，76 个测试文件、864 个测试 |
+| Runner 依赖     | `bun install --frozen-lockfile`  | 通过                            |
+| Runner 类型检查 | `bun run typecheck`              | 通过                            |
+| Runner 测试     | `bun test`                       | 通过，320 个测试                |
 
 受限沙箱内运行 Host 测试时，`scripts/q.test.ts` 的 7 个子进程用例因 `tsx` 无权创建本地 IPC
 而失败；在允许本地 IPC 的执行环境中复跑后 864/864 全部通过。该环境差异发生在任何实现
@@ -21,11 +21,11 @@
 
 验证日期：2026-07-27
 
-| 范围 | 命令 | 结果 |
-|---|---|---|
-| 身份层类型检查 | `pnpm typecheck` | 通过 |
-| 身份迁移、DB 模块、Sender Resolver、飞书可信身份、Organization/Gateway 守卫 | `pnpm exec vitest run src/db/migrations/036-user-identities.test.ts src/db/user-identities.test.ts src/modules/permissions/user-identity-resolver.test.ts src/channels/feishu-webhook.test.ts src/modules/permissions/operability-gateway-isolation.test.ts` | 通过，5 个测试文件、35 个测试 |
-| Host 全量回归 | `pnpm test` | 通过，79 个测试文件、874 个测试 |
+| 范围                                                                        | 命令                                                                                                                                                                                                                                                         | 结果                            |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
+| 身份层类型检查                                                              | `pnpm typecheck`                                                                                                                                                                                                                                             | 通过                            |
+| 身份迁移、DB 模块、Sender Resolver、飞书可信身份、Organization/Gateway 守卫 | `pnpm exec vitest run src/db/migrations/036-user-identities.test.ts src/db/user-identities.test.ts src/modules/permissions/user-identity-resolver.test.ts src/channels/feishu-webhook.test.ts src/modules/permissions/operability-gateway-isolation.test.ts` | 通过，5 个测试文件、35 个测试   |
+| Host 全量回归                                                               | `pnpm test`                                                                                                                                                                                                                                                  | 通过，79 个测试文件、874 个测试 |
 
 本阶段还验证了新 Channel Inbound 会由 Host 把解析后的规范用户写入
 `messages_in.origin_user_id`。旧 Session 行仍可回退到正文中的 `senderId`，但新身份映射不会
@@ -35,9 +35,9 @@
 
 验证日期：2026-07-27
 
-| 范围 | 命令 | 结果 |
-|---|---|---|
-| Host 类型检查 | `pnpm typecheck` | 通过 |
+| 范围                                                           | 命令                                                                                                  | 结果                          |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------- |
+| Host 类型检查                                                  | `pnpm typecheck`                                                                                      | 通过                          |
 | Web 配置、Hash Session、一次性 OAuth 事务、飞书 SSO 与身份冲突 | `pnpm exec vitest run src/web/feishu-sso.test.ts src/db/web-auth.test.ts src/config-validate.test.ts` | 通过，3 个测试文件、47 个测试 |
 
 SSO 测试覆盖合法登录、浏览器绑定的 State、S256 PKCE、Code 重放拒绝和已登录用户身份冲突
@@ -48,13 +48,13 @@ Code、Access Token、原始 Web Session Token 或原始 CSRF Token。
 
 验证日期：2026-07-27
 
-| 范围 | 命令 | 结果 |
-|---|---|---|
-| Web Listener、Cookie、`/api/me`、Logout、CSRF、Origin、Body Limit、Rate Limit | `pnpm exec vitest run src/web/server.test.ts src/web/feishu-sso.test.ts src/db/web-auth.test.ts src/config-validate.test.ts` | 通过，4 个测试文件、50 个测试 |
-| 新增文件格式 | `pnpm exec prettier --check src/web/server.ts src/web/server.test.ts src/index.ts` | 通过 |
-| 新增 Web Listener Lint | `pnpm exec eslint src/web/server.ts src/web/server.test.ts` | 通过 |
-| Host 类型检查 | `pnpm typecheck` | 通过 |
-| Host 全量回归 | `pnpm test` | 通过，82 个测试文件、894 个测试 |
+| 范围                                                                          | 命令                                                                                                                         | 结果                            |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Web Listener、Cookie、`/api/me`、Logout、CSRF、Origin、Body Limit、Rate Limit | `pnpm exec vitest run src/web/server.test.ts src/web/feishu-sso.test.ts src/db/web-auth.test.ts src/config-validate.test.ts` | 通过，4 个测试文件、50 个测试   |
+| 新增文件格式                                                                  | `pnpm exec prettier --check src/web/server.ts src/web/server.test.ts src/index.ts`                                           | 通过                            |
+| 新增 Web Listener Lint                                                        | `pnpm exec eslint src/web/server.ts src/web/server.test.ts`                                                                  | 通过                            |
+| Host 类型检查                                                                 | `pnpm typecheck`                                                                                                             | 通过                            |
+| Host 全量回归                                                                 | `pnpm test`                                                                                                                  | 通过，82 个测试文件、894 个测试 |
 
 HTTP 集成测试通过本机回环随机端口驱动真实重定向和 Cookie。受限沙箱禁止监听回环端口，
 因此该组测试与全量回归在允许本地 IPC/回环端口的执行环境中运行。Web Listener 使用独立
@@ -64,11 +64,11 @@ HTTP 集成测试通过本机回环随机端口驱动真实重定向和 Cookie�
 
 验证日期：2026-07-27
 
-| 范围 | 命令 | 结果 |
-|---|---|---|
-| Host 类型检查 | `pnpm typecheck` | 通过 |
-| Lane Migration、DB 模块、Session Resolver、Router 跨端复用、A2A 身份连续性 | `pnpm exec vitest run src/modules/agent-to-agent/agent-route.test.ts src/router.conversation-lane.test.ts src/session-manager.conversation-lane.test.ts src/db/conversation-lanes.test.ts src/db/migrations/038-conversation-lanes.test.ts` | 通过，5 个测试文件、41 个测试 |
-| Host 全量回归 | `pnpm test` | 通过，86 个测试文件、904 个测试 |
+| 范围                                                                       | 命令                                                                                                                                                                                                                                        | 结果                            |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Host 类型检查                                                              | `pnpm typecheck`                                                                                                                                                                                                                            | 通过                            |
+| Lane Migration、DB 模块、Session Resolver、Router 跨端复用、A2A 身份连续性 | `pnpm exec vitest run src/modules/agent-to-agent/agent-route.test.ts src/router.conversation-lane.test.ts src/session-manager.conversation-lane.test.ts src/db/conversation-lanes.test.ts src/db/migrations/038-conversation-lanes.test.ts` | 通过，5 个测试文件、41 个测试   |
+| Host 全量回归                                                              | `pnpm test`                                                                                                                                                                                                                                 | 通过，86 个测试文件、904 个测试 |
 
 测试证明 Alice/Bob 即使在同一个飞书群也分别进入自己的 Lane 与根 Session；Alice 的 Web
 Turn 使用服务端授权的 Lane 后复用飞书根 Session。每条入站行仍保存自己的 Channel、
@@ -83,12 +83,12 @@ Fail Closed。额外的两跳 A2A 回归证明 Agent 可见正文中的伪造 `s
 
 验证日期：2026-07-27
 
-| 范围 | 命令 | 结果 |
-|---|---|---|
-| Host 类型检查 | `pnpm typecheck` | 通过 |
-| Web Adapter Contract、会话服务、历史分页、Migration | `pnpm exec vitest run src/channels/web.test.ts src/channels/channel-contract.test.ts src/web/conversations.test.ts src/db/migrations/039-web-message-receipts.test.ts` | 通过，4 个测试文件、15 个测试 |
-| 真实 HTTP API、Cookie/CSRF/Origin 和消息去重 | `pnpm exec vitest run src/web/server.test.ts src/web/conversations.test.ts src/db/migrations/039-web-message-receipts.test.ts` | 通过，3 个测试文件、8 个测试 |
-| Host 全量回归 | `pnpm test` | 通过，89 个测试文件、910 个测试 |
+| 范围                                                | 命令                                                                                                                                                                   | 结果                            |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Host 类型检查                                       | `pnpm typecheck`                                                                                                                                                       | 通过                            |
+| Web Adapter Contract、会话服务、历史分页、Migration | `pnpm exec vitest run src/channels/web.test.ts src/channels/channel-contract.test.ts src/web/conversations.test.ts src/db/migrations/039-web-message-receipts.test.ts` | 通过，4 个测试文件、15 个测试   |
+| 真实 HTTP API、Cookie/CSRF/Origin 和消息去重        | `pnpm exec vitest run src/web/server.test.ts src/web/conversations.test.ts src/db/migrations/039-web-message-receipts.test.ts`                                         | 通过，3 个测试文件、8 个测试    |
+| Host 全量回归                                       | `pnpm test`                                                                                                                                                            | 通过，89 个测试文件、910 个测试 |
 
 HTTP 测试证明服务器忽略浏览器伪造的 User、Agent Group、Session 和 Lane 字段，只使用 Hash 化
 Web Session、重新授权后的 Lane 与数据库 Binding。相同 `clientMessageId` 重试只调用一次 Web
@@ -102,12 +102,12 @@ Membership 后，下一次 List 与 History 请求立即隐藏/拒绝该 Lane。
 
 验证日期：2026-07-27
 
-| 范围 | 命令 | 结果 |
-|---|---|---|
-| Host 类型检查 | `pnpm typecheck` | 通过 |
-| Event Migration/DB、Web Adapter 出站引用、SSE 重放/授权/连接上限/Backpressure/Session 撤销 | `pnpm exec vitest run src/web/events.test.ts src/db/web-events.test.ts src/db/migrations/040-web-events.test.ts src/channels/web.test.ts src/web/conversations.test.ts` | 通过，5 个测试文件、13 个测试 |
-| 真实 HTTP SSE、Cookie、精确 Origin、非法 Cursor 与 `Last-Event-ID` | `pnpm exec vitest run src/web/server.test.ts src/web/events.test.ts src/db/web-events.test.ts src/db/migrations/040-web-events.test.ts src/channels/web.test.ts src/web/conversations.test.ts` | 通过，6 个测试文件、18 个测试 |
-| Host 全量回归 | `pnpm test` | 通过，92 个测试文件、920 个测试 |
+| 范围                                                                                       | 命令                                                                                                                                                                                           | 结果                            |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Host 类型检查                                                                              | `pnpm typecheck`                                                                                                                                                                               | 通过                            |
+| Event Migration/DB、Web Adapter 出站引用、SSE 重放/授权/连接上限/Backpressure/Session 撤销 | `pnpm exec vitest run src/web/events.test.ts src/db/web-events.test.ts src/db/migrations/040-web-events.test.ts src/channels/web.test.ts src/web/conversations.test.ts`                        | 通过，5 个测试文件、13 个测试   |
+| 真实 HTTP SSE、Cookie、精确 Origin、非法 Cursor 与 `Last-Event-ID`                         | `pnpm exec vitest run src/web/server.test.ts src/web/events.test.ts src/db/web-events.test.ts src/db/migrations/040-web-events.test.ts src/channels/web.test.ts src/web/conversations.test.ts` | 通过，6 个测试文件、18 个测试   |
+| Host 全量回归                                                                              | `pnpm test`                                                                                                                                                                                    | 通过，92 个测试文件、920 个测试 |
 
 测试证明 SSE Event 只引用已经持久化的服务端消息，不复制正文、Token 或 Organization。重放只
 查询当前规范用户的事件，每条事件还会重新执行 Lane Owner 与当前 Agent Group/Organization
@@ -122,15 +122,15 @@ Origin，且会从标准 `Last-Event-ID` 之后继续发送。
 
 验证日期：2026-07-27
 
-| 范围 | 命令 | 结果 |
-|---|---|---|
-| Host 类型检查 | `pnpm typecheck` | 通过 |
-| 公开品牌配置与真实 HTTP 接口 | `pnpm vitest run src/branding.test.ts src/web/server.test.ts` | 通过，2 个测试文件、9 个测试 |
-| 前端类型检查 | `pnpm web:typecheck` | 通过 |
-| 登录页与品牌回退组件测试 | `pnpm web:test` | 通过，1 个测试文件、2 个测试 |
-| 前端生产构建 | `pnpm web:build` | 通过，生成 Hash CSS/JavaScript Asset 与 Source Map |
-| 新增文件格式 | `pnpm exec prettier --check ...` | 通过 |
-| Host 新增代码 Lint | `pnpm exec eslint src/branding.ts src/branding.test.ts src/web/server.ts src/web/server.test.ts` | 通过，无错误；保留 `readBrandVar` 原有的 1 条 catch-all 警告 |
+| 范围                         | 命令                                                                                             | 结果                                                         |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| Host 类型检查                | `pnpm typecheck`                                                                                 | 通过                                                         |
+| 公开品牌配置与真实 HTTP 接口 | `pnpm vitest run src/branding.test.ts src/web/server.test.ts`                                    | 通过，2 个测试文件、9 个测试                                 |
+| 前端类型检查                 | `pnpm web:typecheck`                                                                             | 通过                                                         |
+| 登录页与品牌回退组件测试     | `pnpm web:test`                                                                                  | 通过，1 个测试文件、2 个测试                                 |
+| 前端生产构建                 | `pnpm web:build`                                                                                 | 通过，生成 Hash CSS/JavaScript Asset 与 Source Map           |
+| 新增文件格式                 | `pnpm exec prettier --check ...`                                                                 | 通过                                                         |
+| Host 新增代码 Lint           | `pnpm exec eslint src/branding.ts src/branding.test.ts src/web/server.ts src/web/server.test.ts` | 通过，无错误；保留 `readBrandVar` 原有的 1 条 catch-all 警告 |
 
 品牌接口测试验证登录前只暴露经过校验的显示名、同源 Logo 路径和主题颜色，不返回 Secret、
 Namespace、Token 或 Cookie。前端只允许 `VITE_WEB_PROXY_TARGET` 进入公开环境变量，API Client
@@ -138,3 +138,25 @@ Namespace、Token 或 Cookie。前端只允许 `VITE_WEB_PROXY_TARGET` 进入公
 
 组件测试验证登录页会先读取公开品牌配置，飞书 SSO 使用浏览器顶层导航；认证失败页面只显示通用
 错误，不泄露 Provider Code、Token 或 OAuth State。生产构建成功生成可发布的 `web/dist/`。
+
+## Web 会话交互、安全 Markdown 与实时客户端
+
+验证日期：2026-07-27
+
+| 范围                                                                        | 命令                                   | 结果                                                                 |
+| --------------------------------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------- |
+| 前端类型检查                                                                | `pnpm web:typecheck`                   | 通过                                                                 |
+| 会话列表/创建、发送/稳定重试 ID、403、SSE 重放、Session 撤销、安全 Markdown | `pnpm web:test`                        | 通过，5 个测试文件、10 个测试                                        |
+| 前端生产构建                                                                | `pnpm web:build`                       | 通过；登录主包 410.68 KB、按需会话包 338.97 KB，均低于 500 KB 警告线 |
+| Host 类型检查                                                               | `pnpm typecheck`                       | 通过                                                                 |
+| 主题格式与 WCAG AA 对比度回退                                               | `pnpm vitest run src/branding.test.ts` | 通过，4 个测试                                                       |
+| 桌面可视检查                                                                | 本机 Vite + Mock API，1280×720         | 通过；双栏、混合消息、GFM、代码高亮与输入区无溢出                    |
+| 窄屏可视检查                                                                | 本机 Vite + Mock API，390×844          | 通过；消息页/列表页切换、返回按钮、代码横向区域和底部输入可用        |
+
+SSE 测试使用浏览器 EventSource 替身验证同一个 Event ID 只触发一次刷新，重连 URL 携带最后的内存
+Cursor，服务端 `session-revoked` 会关闭连接并返回登录页。消息测试验证首发失败后点击重试仍使用
+同一个 `clientMessageId`；`403` 显示权限变化说明，而不是误报为未登录或普通网络错误。
+
+Markdown 测试验证 Script 被删除、`javascript:` 链接不会变为可点击链接、外链带
+`noopener noreferrer`，GFM 表格和带复制按钮的语法高亮代码块正常渲染。主题测试额外证明：
+即使颜色字符串是合法十六进制，只要与白字或页面背景不足 4.5:1，也会回退到推荐 Token。

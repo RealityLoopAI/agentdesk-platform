@@ -1,11 +1,20 @@
 import { useQuery } from '@tanstack/react-query';
-import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import { useEffect } from 'react';
+import { Navigate, Outlet, useLocation, useNavigate } from 'react-router-dom';
 
-import { ApiError, getMe } from '@/api/client';
+import { ApiError, getMe, subscribeAuthenticationRequired } from '@/api/client';
 import { BrandLogo } from '@/branding/BrandLogo';
 
 export function ProtectedRoute() {
   const location = useLocation();
+  const navigate = useNavigate();
+  useEffect(
+    () =>
+      subscribeAuthenticationRequired(() => {
+        navigate('/login', { replace: true });
+      }),
+    [navigate],
+  );
   const me = useQuery({
     queryKey: ['me'],
     queryFn: getMe,

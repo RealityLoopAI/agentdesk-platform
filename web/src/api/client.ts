@@ -1,4 +1,11 @@
-import type { MeResponse, PublicBranding } from './types';
+import type {
+  ConversationHistoryResponse,
+  ConversationListResponse,
+  ConversationSummary,
+  MeResponse,
+  PublicBranding,
+  SubmittedMessage,
+} from './types';
 
 export class ApiError extends Error {
   constructor(
@@ -11,9 +18,20 @@ export class ApiError extends Error {
 }
 
 let csrfToken: string | null = null;
+const authRequiredSubscribers = new Set<() => void>();
 
 export function clearClientCredentials(): void {
   csrfToken = null;
+}
+
+export function subscribeAuthenticationRequired(callback: () => void): () => void {
+  authRequiredSubscribers.add(callback);
+  return () => authRequiredSubscribers.delete(callback);
+}
+
+export function notifyAuthenticationRequired(): void {
+  clearClientCredentials();
+  for (const callback of authRequiredSubscribers) callback();
 }
 
 async function parseError(response: Response): Promise<ApiError> {
@@ -50,7 +68,7 @@ export async function apiFetch<T>(
     credentials: 'include',
   });
   if (!response.ok) {
-    if (response.status === 401) clearClientCredentials();
+    if (response.status === 401) notifyAuthenticationRequired();
     throw await parseError(response);
   }
   if (response.status === 204) return undefined as T;
@@ -66,4 +84,47 @@ export async function getMe(): Promise<MeResponse> {
   const response = await apiFetch<MeResponse>('/api/me');
   csrfToken = response.csrfToken;
   return response;
+}
+
+export async function listConversations(): Promise<ConversationListResponse> {
+  return apiFetch<ConversationListResponse>('/api/conversations');
+}
+
+export async function createConversation(agentGroupId: string): Promise<ConversationSummary> {
+  const response = await apiFetch<{ conversation: ConversationSummary }>('/api/conversations', {
+    method: 'POST',
+    json: { agentGroupId },
+  });
+  return response.conversation;
+}
+
+export async function getConversationHistory(
+  laneId: string,
+  cursor: string | null,
+): Promise<ConversationHistoryResponse> {
+  const query = new URLSearchParams({ limit: '50' });
+  if (cursor) query.set('cursor', cursor);
+  return apiFetch<ConversationHistoryResponse>(
+    `/api/conversations/${encodeURIComponent(laneId)}/messages?${query.toString()}`,
+  );
+}
+
+export async function submitMessage(args: {
+  laneId: string;
+  clientMessageId: string;
+  text: string;
+}): Promise<SubmittedMessage> {
+  const response = await apiFetch<{ message: SubmittedMessage }>(
+    `/api/conversations/${encodeURIComponent(args.laneId)}/messages`,
+    {
+      method: 'POST',
+      json: { clientMessageId: args.clientMessageId, text: args.text },
+    },
+  );
+  return response.message;
+}
+
+export async function logout(): Promise<void> {
+  await apiFetch<void>('/api/logout', { method: 'POST' });
+  notifyAuthenticationRequired();
 }
