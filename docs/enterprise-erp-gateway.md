@@ -436,6 +436,11 @@ Host、Web、Channel、Agent 容器和 Prompt 都不得持有这些值，也不�
 Gateway 只在 `/describe` 中发布当前真正启用的 Operation。Agent 必须先发现再调用；没有声明就要明确
 报告能力不可用，不能根据 Prompt 猜测“应该支持”。
 
+参考 Gateway 进一步用 `FEISHU_BITABLE_READ_ENABLED` 和
+`FEISHU_BITABLE_WRITE_ENABLED` 分别控制只读与写 Operation，两者默认关闭。开关同时约束
+Discovery 和执行；关闭的 Operation 返回 `OPERATION_NOT_FOUND`，不会触达飞书 API。分阶段启用和
+回滚流程见 [Web 与飞书统一消息运维手册](web-feishu-unified-messaging-operations.md)。
+
 ### 公共输入规则
 
 - `resource` 是稳定的逻辑别名，例如 `sales.pipeline`。Gateway 在运营者白名单中把它映射到

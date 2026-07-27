@@ -307,3 +307,51 @@ Mock 测试还验证飞书认证、文档权限、Validation、Not Found、写�
 首次 Conformance 刻意只配置 Table 级别名，检查正确报告缺少 `feishu.bitable.table.list`；补充
 App 级逻辑别名后，`/describe` 与其余 8 个 Endpoint 全部通过。这证明 Gateway 只宣传实际配置的
 能力，不会因为代码存在就虚假声明可用。
+
+## 统一消息端到端与真实容器链路
+
+验证日期：2026-07-27
+
+| 范围                                 | 命令                                                                                    | 结果                                                          |
+| ------------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| 真实 Host HTTP + Mock 飞书身份提供方 | `pnpm exec vitest run src/web/unified-messaging.e2e.test.ts`                            | 通过，Web/飞书同一规范用户复用同一 Lane 和根 Session          |
+| Runner Mock Provider 明确测试标记    | `pnpm test src/providers/mock.test.ts`（Runner）                                        | 通过，3 个测试                                                |
+| 真实容器 A2A + Gateway               | `AGENT_IMAGE=agentdesk-agent-v2-69585351:e2e-local-deps pnpm e2e:container:a2a-gateway` | 通过，Frontdesk 与 Worker 两个真实容器完成多跳和 Gateway 审计 |
+
+Web E2E 使用真实 Cookie、CSRF、Router、中央数据库和 Session DB，验证飞书与 Web 入站最终都属于
+`user-e2e`。测试还发现并修复了 History 把 Agent 出站 Channel 误信为容器地址的问题：现在只根据
+`in_reply_to` 指向的 Host 单写入站行确定来源，并过滤指向其他用户入站行的异常回复。
+
+真实容器链路从 Web 规范身份开始，经过 Frontdesk A2A 委派到 Worker，再调用生产 Gateway MCP
+Handler 和本地 HTTP Gateway，最终在容器出站审计和 Host 中央 `gateway_audit` 同时验证
+`requesterSource=session`、原始用户、Thread、`feishu.bitable.record.list` 和逻辑资源。
+
+标准 `pnpm container:build` 已实际尝试；基础 Node Layer 下载成功，但 Debian 软件源
+`deb.debian.org:80` 网络连接超时，因此本轮使用临时本地依赖覆盖镜像完成真实容器验证。该失败是
+外部软件源不可达，不是 Dockerfile 或 TypeScript 错误；正式发布检查仍需在网络可用环境重建标准镜像。
+
+## 迁移兼容、独立发布开关和回滚演练
+
+验证日期：2026-07-27
+
+| 范围                                   | 命令                                                                                                                                                                                                | 结果                      |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| 034 版本旧库升级与只读旧查询           | `pnpm exec vitest run src/db/migrations/unified-messaging-compat.test.ts`                                                                                                                           | 通过，1 个测试            |
+| Web、Lane、撤销工具和迁移回滚组合      | `pnpm exec vitest run src/web/config.test.ts src/feature-flags.test.ts src/router.conversation-lane.test.ts scripts/revoke-web-sessions.test.ts src/db/migrations/unified-messaging-compat.test.ts` | 通过，5 个文件、20 个测试 |
+| Gateway 多维表格开关与 Provider 零调用 | `node --test examples/reference-gateway/feishu-bitable-adapter.test.mjs`                                                                                                                            | 通过，12 个测试           |
+| Host 类型检查                          | `pnpm typecheck`                                                                                                                                                                                    | 通过                      |
+
+迁移测试先用真实迁移计划构造 034 版本数据库，写入旧 `feishu:<id>` 用户、旧 Feishu-only
+`per-user` Session 和全局 NULL Organization Role，再执行当前升级。升级没有重写用户或 Session，
+没有自动猜测 Lane；升级后仍能插入/读取 NULL-org 兼容 Agent Group。数据库加入 Lane 与 Web
+Session 数据后，旧字段投影可以只读打开，证明加性 Schema 的紧急代码回滚查询兼容。
+
+四个开关都默认关闭并严格解析。`WEB_ENABLED` 未设置时不产生 Web 配置；关闭 Lane 时，飞书即使
+已有 Identity/Binding 也继续使用旧 Session Key，而已由 Web Server 授权的 Web-only Lane 仍可
+使用。Gateway 读/写开关分别控制 Discovery 与执行，关闭的 Operation 返回
+`OPERATION_NOT_FOUND`，Mock Provider 调用数保持为 0。
+
+回滚工具在临时中央数据库中先 Dry-run 两个用户，再实际撤销两个 Web Session；最终活动 Session
+为 0，并产生两条 `web_sessions_revoked` Enterprise Audit。完整的 SSO、反向代理、Cookie/CSRF、
+身份、Lane 隐私、多维表格、五阶段灰度和回滚步骤记录在
+`docs/web-feishu-unified-messaging-operations.md`。发布开关的权限边界决策记录在 ADR-0065。

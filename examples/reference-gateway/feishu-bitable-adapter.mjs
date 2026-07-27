@@ -33,9 +33,6 @@ const WRITE_OPERATIONS = new Set([
   'feishu.bitable.record.batch_update',
   'feishu.bitable.record.batch_delete',
 ]);
-const READ_OPERATIONS = new Set(
-  FEISHU_BITABLE_OPERATION_NAMES.filter((operation) => !WRITE_OPERATIONS.has(operation)),
-);
 const DELETE_OPERATIONS = new Set(['feishu.bitable.record.delete', 'feishu.bitable.record.batch_delete']);
 const COMPUTED_FIELD_TYPES = new Set([19, 20, 1001, 1002, 1003, 1004, 1005, 3001]);
 const DEFAULT_PAGE_SIZE = 20;
@@ -110,14 +107,10 @@ export function loadFeishuBitableConfigFromEnv(env = process.env) {
   ];
   const readEnabled = parseOptInFlag('FEISHU_BITABLE_READ_ENABLED', env.FEISHU_BITABLE_READ_ENABLED);
   const writeEnabled = parseOptInFlag('FEISHU_BITABLE_WRITE_ENABLED', env.FEISHU_BITABLE_WRITE_ENABLED);
-  const hasCredentialConfig = credentialKeys.some(
-    (key) => typeof env[key] === 'string' && env[key].trim(),
-  );
+  const hasCredentialConfig = credentialKeys.some((key) => typeof env[key] === 'string' && env[key].trim());
   if (!hasCredentialConfig) {
     if (readEnabled || writeEnabled) {
-      throw new Error(
-        'Feishu Bitable feature flag is enabled but Gateway credentials/resources are not configured',
-      );
+      throw new Error('Feishu Bitable feature flag is enabled but Gateway credentials/resources are not configured');
     }
     return null;
   }

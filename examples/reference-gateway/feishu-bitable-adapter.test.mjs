@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
-  createFeishuBitableAdapter,
-  loadFeishuBitableConfigFromEnv,
-} from './feishu-bitable-adapter.mjs';
+import { createFeishuBitableAdapter, loadFeishuBitableConfigFromEnv } from './feishu-bitable-adapter.mjs';
 
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
@@ -165,6 +162,20 @@ test('read and write release gates independently control discovery and execution
   ).adapter;
   assert.ok(writeOnly.describeOperations().every((descriptor) => descriptor.mutating === true));
   assert.equal(writeOnly.describeOperations().length, 6);
+
+  const allDisabledHarness = makeHarness(
+    () => {
+      throw new Error('disabled operation must not reach Feishu');
+    },
+    { readEnabled: false, writeEnabled: false },
+  );
+  assert.deepEqual(allDisabledHarness.adapter.describeOperations(), []);
+  const disabledRead = await allDisabledHarness.adapter.execute(
+    request('feishu.bitable.record.list', { resource: 'sales.pipeline' }, { idempotencyKey: null }),
+  );
+  assert.equal(disabledRead.status, 404);
+  assert.equal(disabledRead.body.code, 'OPERATION_NOT_FOUND');
+  assert.equal(allDisabledHarness.calls.length, 0);
 });
 
 test('Bitable feature flags are opt-in and fail closed on invalid or missing configuration', () => {

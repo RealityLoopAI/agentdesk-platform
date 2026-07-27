@@ -98,6 +98,11 @@ re-check below — the events only tighten the window).
 再执行既有成员、角色和 Organization 门控。此元数据不会进入 Agent Prompt，数据库也不保存
 飞书 Token。
 
+如果部署同时启用 Web，只有在 `CROSS_CHANNEL_LANES_ENABLED=true` 且外部身份、Channel 地址、
+规范用户、Agent Group 和用户级 Session 模式全部匹配时，飞书消息才会自动命中 Web
+Conversation Lane。详细启用与回滚步骤见
+[Web 与飞书统一消息运维手册](web-feishu-unified-messaging-operations.md)。
+
 旧部署的 `users.id = feishu:ou_*` 保持不变；安全回填只增加 `(App Scope, open_id) ->
 users.id` 的关联，不重写 Role、Membership、Session 或 Audit 外键。身份冲突会拒绝处理，
 不会自动合并两个用户的权限。

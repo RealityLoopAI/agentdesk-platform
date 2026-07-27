@@ -2,6 +2,9 @@
 
 面向运维和 oncall。线上出问题时该看哪里、怎么诊断、怎么处置都在这里。
 
+Web/飞书统一消息的首次部署、Feature Flag 灰度和完整回滚演练见
+[Web 与飞书统一消息运维手册](web-feishu-unified-messaging-operations.md)。
+
 读者预设：已经读过 [PLATFORM.md](PLATFORM.md) 顶层概览，知道三 DB 模型 + 容器拓扑。
 
 > 本文用默认品牌命名空间 `agentdesk` 书写。指标前缀、服务名、日志文件名随 `BRAND_NAMESPACE` 派生；下文示例按默认值。

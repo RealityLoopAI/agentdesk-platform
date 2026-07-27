@@ -236,6 +236,7 @@ pnpm exec tsx scripts/trace.ts --user <id>              # 只读会话分诊(--a
 - [docs/ENV-QUICK-START.md](docs/ENV-QUICK-START.md) — 环境变量按场景导航(最小 CLI / 生产 Feishu+网关 / 可选 tracing),先看哪些真的必填
 - [docs/configuration-reference.md](docs/configuration-reference.md) — per-group `container.json` 字段全表 + 环境变量入口
 - [docs/feishu-channel.md](docs/feishu-channel.md) — 飞书接入
+- [docs/web-feishu-unified-messaging-operations.md](docs/web-feishu-unified-messaging-operations.md) — Web/飞书统一消息部署、灰度与回滚
 - [docs/decisions/README.md](docs/decisions/README.md) — ADR 决策档案
 - [docs/business-optimization-roadmap.md](docs/business-optimization-roadmap.md) — 业务侧优化 backlog(56 条经核实的待办 + 优先级)
 - [examples/](examples/) — 把业务接入框架的参考样例

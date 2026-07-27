@@ -175,6 +175,11 @@ Web Listener 默认关闭。启用时至少需要配置 `WEB_ENABLED=true`、精
 `src/web/config.ts`。本机开发如果使用 HTTP，必须显式开启仅限回环地址的
 `WEB_ALLOW_INSECURE_HTTP`。
 
+跨渠道自动关联由独立的 `CROSS_CHANNEL_LANES_ENABLED` 控制，默认关闭。关闭时，Web 中经过授权的
+Lane 仍可正常使用，但原生飞书消息继续命中旧 Session Key，不会仅因数据库中已有 Binding 就合并
+历史。完整的反向代理、SSO、Cookie/CSRF、身份关联、灰度顺序和回滚操作见
+[Web 与飞书统一消息运维手册](web-feishu-unified-messaging-operations.md)。
+
 生产发布先运行 `pnpm build`，它会同时生成 Host `dist/` 与前端 `web/dist/`。Host 从该固定相对
 目录提供静态文件：带 Vite 内容 Hash 的 Asset 使用一年不可变缓存，HTML 使用 `no-cache`，品牌
 文件使用一小时缓存。`/login`、`/conversations` 和 `/conversations/:laneId` 支持 SPA 回退；

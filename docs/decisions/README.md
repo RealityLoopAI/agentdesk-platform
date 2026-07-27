@@ -116,6 +116,7 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0063](ADR-0063-feishu-bitable-through-gateway.md) | 飞书多维表格只通过 Backend Gateway 访问：拒绝 Channel 直连和容器持凭证 MCP，统一授权、幂等、确认与审计 | Accepted | 2026-07-27 | `gateway`, `feishu`, `bitable`, `security`, `audit`, `contract` |
 
 | [ADR-0064](ADR-0064-web-ui-foundation.md) | 建立同源 React Web UI 与公开品牌投影：公开配置显式校验，前端 Bundle 禁止 Secret，Host 同版本发布静态资源 | Accepted | 2026-07-27 | `web`, `frontend`, `branding`, `security`, `testing` |
+| [ADR-0065](ADR-0065-unified-messaging-release-gates.md) | 在权限边界实施 Web、跨渠道 Lane、多维表格读/写的独立发布开关，并保留可审计回滚路径 | Accepted | 2026-07-27 | `web`, `feishu`, `feature-flags`, `gateway`, `rollback`, `privacy` |
 
 ---
 

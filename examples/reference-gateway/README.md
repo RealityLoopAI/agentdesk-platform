@@ -127,9 +127,12 @@ that is the verification working, not a contract violation.)
 | `FEISHU_BITABLE_CURSOR_SECRET` | 至少 32 字符，用于签名不透明分页 Cursor |
 | `FEISHU_BITABLE_CONFIRMATION_SECRET` | 至少 32 字符，用于签名用户确认凭据 |
 | `FEISHU_BITABLE_BASE_URL` | 可选；仅供 Mock/私有代理测试，默认飞书开放平台 |
+| `FEISHU_BITABLE_READ_ENABLED` | 默认 `false`；发布 5 个只读 Operation |
+| `FEISHU_BITABLE_WRITE_ENABLED` | 默认 `false`；发布 6 个写 Operation，必须晚于只读灰度 |
 
 任一必需项缺失都会在启动时 Fail Closed；未配置任何一项则保持功能关闭，`/describe`
-不会宣传多维表格能力。
+不会宣传多维表格能力。配置完整但两个 Feature Flag 都关闭时同样不宣传；关闭的 Operation
+直接返回 `OPERATION_NOT_FOUND`，不会访问飞书。
 
 资源白名单示例：
 
@@ -192,6 +195,8 @@ export FEISHU_BITABLE_APP_SECRET='从 Secret Manager 注入'
 export FEISHU_BITABLE_CURSOR_SECRET="$(openssl rand -hex 32)"
 export FEISHU_BITABLE_CONFIRMATION_SECRET="$(openssl rand -hex 32)"
 export FEISHU_BITABLE_RESOURCES_JSON='{"sales.pipeline":{"appToken":"bas...","tableId":"tbl...","readers":["canonical-user-alice"],"writers":["canonical-user-alice"]}}'
+export FEISHU_BITABLE_READ_ENABLED=true
+export FEISHU_BITABLE_WRITE_ENABLED=false
 node examples/reference-gateway/server.mjs
 ```
 

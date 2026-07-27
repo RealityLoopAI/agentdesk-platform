@@ -13,6 +13,9 @@ Two configuration surfaces in AgentDesk:
    the **container runner** (`container/agent-runner/src/config.ts`, runtime) —
    so they were scattered. This doc consolidates them.
 
+Web/飞书统一消息的四个发布开关、进程归属、依赖和回滚顺序集中记录在
+[`web-feishu-unified-messaging-operations.md`](web-feishu-unified-messaging-operations.md)。
+
 > Roadmap note: this reference was the "operators can't discover per-group
 > fields without reverse-engineering source" gap (`docs/business-optimization-roadmap.md` 1.6).
 > When you add or rename a `container.json` field, update this table in the same PR.
