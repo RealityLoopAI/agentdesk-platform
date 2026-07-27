@@ -269,3 +269,41 @@ Conflict/Rate Limit 默认可重试。
 Conformance Runner 新增 `GATEWAY_REQUIRE_FEISHU_BITABLE=true` 开关；开启后会检查 `/describe`
 是否发布完整多维表格 Operation Catalog。该开关默认关闭，因此不影响未启用多维表格的通用
 Gateway。此阶段只证明契约可校验，真实飞书 API Adapter 和 Token 隔离属于后续任务 7.4–7.11。
+
+## 飞书多维表格参考 Gateway Adapter
+
+验证日期：2026-07-27
+
+| 范围                                     | 命令                                                                                   | 结果                                               |
+| ---------------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Adapter/Server JavaScript 语法           | `node --check examples/reference-gateway/{feishu-bitable-adapter,server}.mjs`          | 通过                                               |
+| Mock 飞书 API 安全与行为回归             | `pnpm test:reference-gateway`                                                          | 通过，10 个测试                                    |
+| 带多维表格 Mock 配置的真实 Gateway 契约  | `GATEWAY_REQUIRE_FEISHU_BITABLE=true pnpm exec tsx scripts/gateway-conformance.ts ...` | 通过，9/9 Endpoint                                 |
+| Host 类型检查                            | `pnpm typecheck`                                                                       | 通过                                               |
+| Host 全量回归（已包含参考 Gateway 测试） | `pnpm test`                                                                            | 通过，95 个 Host 文件/933 测试；10 个 Adapter 测试 |
+
+参考 Adapter 使用应用凭证获取并缓存 `tenant_access_token`，Token 只存在模块闭包，且响应、错误、
+Discovery 和审计都不返回凭证。环境配置不完整会在进程启动时 Fail Closed；完全未配置时
+`/describe` 不发布多维表格 Operation。测试证明 Agent 附带原始 `app_token`/`table_id` 会在调用
+飞书前被严格输入校验拒绝，Table Discovery 也只返回运营者配置的逻辑资源。
+
+每次调用都使用规范 `requester.userId` 和资源 Readers/Writers 策略授权；未知资源、Bob 访问
+Alice 资源和 `requesterSource='agent-asserted'` 写均未触发飞书请求。Record/List Cursor 使用
+HMAC 签名并绑定资源与查询条件，不暴露或允许跨查询复用飞书 `page_token`。
+
+字段写入使用 TTL Schema 缓存，未知字段会在写前刷新一次以处理 Schema 漂移；仍不合法的字段、
+只读字段、类型、选项和必填错误均在调用写 API 前拒绝。Best-effort Batch 把单条本地校验或上游
+失败放入索引对齐结果，只有部分提交时才报告 `partial=true`。Atomic 默认关闭，只有运营者明确把
+已验证为原子的 Provider 路径加入 `atomicBatchOperations` 后才允许，避免用多次飞书调用伪装事务。
+
+所有写 Operation 共用稳定幂等记录；相同 Key/输入重放返回首次结果，不同输入复用 Key 返回
+`CONFLICT`。Delete 和配置的高影响 Update 使用由可信确认服务签发的 HMAC 凭据，绑定规范用户、
+Operation、逻辑资源、排序后的 Record 集、字段集和有效期；缺失或错绑确认不会调用飞书。
+
+Mock 测试还验证飞书认证、文档权限、Validation、Not Found、写冲突、超时和限流被转换到平台封闭
+错误，`Retry-After` 被限制在 30 秒以内。审计只记录规范用户、Operation、逻辑资源、结果、耗时、
+幂等键和 Input Hash；测试值中的单元格正文、真实资源映射及 Token 均未进入审计。
+
+首次 Conformance 刻意只配置 Table 级别名，检查正确报告缺少 `feishu.bitable.table.list`；补充
+App 级逻辑别名后，`/describe` 与其余 8 个 Endpoint 全部通过。这证明 Gateway 只宣传实际配置的
+能力，不会因为代码存在就虚假声明可用。

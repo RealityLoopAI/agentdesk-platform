@@ -18,6 +18,11 @@ and authorization is illustrative. The idempotency cache is process-local (a
 real backend persists it with the write). The inline comments in
 [`server.mjs`](server.mjs) mark exactly where a real backend plugs in.
 
+The optional Feishu Bitable adapter is stricter than the generic demo
+operations, but is still a reference implementation: its idempotency and
+confirmation-use stores are in memory. Production must persist those records
+transactionally.
+
 > **Going to production?** [`docs/gateway-kickstart.md`](../../docs/gateway-kickstart.md)
 > walks this skeleton → your backend, with the hardening recipes (identity
 > mapping, permission denial, idempotency, audit, HMAC + clock-skew + nonce
@@ -35,6 +40,7 @@ real backend persists it with the write). The inline comments in
 | `POST /memory/get`    | exact lookup by `(namespace, subject)`; returns the live `value` + `source` provenance + `validAt`                                                                                                                          |
 | `POST /memory/upsert` | A.U.D.N. reconciliation (ADR-0050): canonical-value equality → `no-op`; change → supersede (invalidate the old version, append a new one). Returns `value` + `source` + `validAt` + `op`                                    |
 | `POST /memory/search` | naive keyword match over stored JSON, scoped by namespace + subject; returns `{ value, source, score, validAt, invalidAt? }[]` — live only by default, `includeHistory: true` adds superseded versions (ADR-0033, ADR-0050) |
+| `feishu.bitable.*` through `/describe`, `/authorize`, `/execute` | optional Gateway-only App/Table/Field discovery and Record CRUD; disabled unless all credential, signing-secret and resource-whitelist settings are present |
 
 Every response carries `contractVersion: 1`. The `requesterSource='session'` vs
 `'agent-asserted'` gate on mutating operations is the contract's identity-trust
@@ -104,6 +110,113 @@ GATEWAY_SIGNING_KEY=test-key pnpm exec tsx scripts/gateway-conformance.ts http:/
 
 (Probing a signed gateway _without_ the key returns `401` on every endpoint —
 that is the verification working, not a contract violation.)
+
+## 可选：在 Gateway 中启用飞书多维表格
+
+多维表格能力默认关闭。启用后，Agent 仍只看见通用
+`gateway_describe`/`gateway_authorize`/`gateway_execute`，飞书聊天 Adapter
+不会持有多维表格凭证或调用 Record API。
+
+需要设置以下环境变量：
+
+| 变量 | 说明 |
+|---|---|
+| `FEISHU_BITABLE_APP_ID` | 飞书自建应用 App ID，只存在 Gateway 进程 |
+| `FEISHU_BITABLE_APP_SECRET` | 飞书自建应用 Secret，只存在 Gateway 进程 |
+| `FEISHU_BITABLE_RESOURCES_JSON` | 逻辑资源白名单和规范用户读写策略 |
+| `FEISHU_BITABLE_CURSOR_SECRET` | 至少 32 字符，用于签名不透明分页 Cursor |
+| `FEISHU_BITABLE_CONFIRMATION_SECRET` | 至少 32 字符，用于签名用户确认凭据 |
+| `FEISHU_BITABLE_BASE_URL` | 可选；仅供 Mock/私有代理测试，默认飞书开放平台 |
+
+任一必需项缺失都会在启动时 Fail Closed；未配置任何一项则保持功能关闭，`/describe`
+不会宣传多维表格能力。
+
+资源白名单示例：
+
+```json
+{
+  "sales": {
+    "appToken": "bas...",
+    "name": "销售应用",
+    "readers": ["canonical-user-alice"],
+    "writers": [],
+    "allowedOperations": [
+      "feishu.bitable.app.get",
+      "feishu.bitable.table.list"
+    ]
+  },
+  "sales.pipeline": {
+    "appToken": "bas...",
+    "tableId": "tbl...",
+    "name": "销售管道",
+    "readers": ["canonical-user-alice"],
+    "writers": ["canonical-user-alice"],
+    "requiredFields": ["客户"],
+    "highImpactFields": ["成交金额"],
+    "atomicBatchOperations": [],
+    "views": { "board": "vew..." },
+    "filters": {
+      "active": {
+        "conjunction": "and",
+        "conditions": []
+      }
+    },
+    "sorts": {
+      "recent": [
+        { "field_name": "更新时间", "desc": true }
+      ]
+    }
+  }
+}
+```
+
+这里的 `readers`/`writers` 必须填写 Host 传来的规范 `users.id`，不能填写浏览器自报
+身份，也不能用 Organization 代替 Gateway 业务授权。显式写入 `"*"` 才表示该资源对所有
+规范用户开放；省略列表默认为拒绝。
+
+Agent 输入只能使用 `sales.pipeline` 这样的逻辑 `resource`。真实 `appToken` 和
+`tableId` 只保存在上面的 Gateway 配置中；响应、错误和审计不会返回这些映射。Record List
+中的 `viewAlias`、`filterAlias`、`sortAlias` 也必须来自该资源的白名单，不能提交任意飞书
+表达式。
+
+Batch 必须显式选择 `best-effort` 或 `atomic`。参考实现默认只接受
+`best-effort`；只有运营者确认上游调用真的能保证“全成或全败”后，才可把对应
+`feishu.bitable.record.batch_*` 名称加入 `atomicBatchOperations`。不能用多次单条飞书
+调用伪装成原子事务。
+
+建议使用 Secret Manager 注入变量。下面只演示本地启动方式，不要把真实 Secret 提交到仓库：
+
+```bash
+export FEISHU_BITABLE_APP_ID='cli_...'
+export FEISHU_BITABLE_APP_SECRET='从 Secret Manager 注入'
+export FEISHU_BITABLE_CURSOR_SECRET="$(openssl rand -hex 32)"
+export FEISHU_BITABLE_CONFIRMATION_SECRET="$(openssl rand -hex 32)"
+export FEISHU_BITABLE_RESOURCES_JSON='{"sales.pipeline":{"appToken":"bas...","tableId":"tbl...","readers":["canonical-user-alice"],"writers":["canonical-user-alice"]}}'
+node examples/reference-gateway/server.mjs
+```
+
+启用后可要求 Conformance Runner 验证完整 Operation Catalog：
+
+```bash
+cd container/agent-runner
+GATEWAY_REQUIRE_FEISHU_BITABLE=true \
+  pnpm exec tsx scripts/gateway-conformance.ts http://localhost:8088
+```
+
+删除与 `highImpactFields` 更新需要确认。`/authorize` 只返回
+`user-confirmation` obligation 和绑定摘要，不会给 Agent 一张可自行满足的凭据。运营系统在
+真正向用户展示并取得确认后，才可从
+[`feishu-bitable-adapter.mjs`](feishu-bitable-adapter.mjs) 的
+`issueConfirmation(...)` 签发短期凭据；该方法不能暴露为 Agent Tool。
+
+运行 Mock 飞书 API 回归：
+
+```bash
+node --test examples/reference-gateway/feishu-bitable-adapter.test.mjs
+```
+
+测试覆盖 Token 隔离、白名单、规范用户授权、分页、Schema 漂移、字段校验、限流、超时、
+封闭错误、幂等重放、未确认删除/高影响更新，以及 Best-effort 部分失败。
 
 ## Point an agent group at it
 

@@ -50,6 +50,11 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 
+import {
+  createFeishuBitableAdapter,
+  loadFeishuBitableConfigFromEnv,
+} from './feishu-bitable-adapter.mjs';
+
 const PORT = Number.parseInt(process.env.PORT || '8088', 10);
 
 /**
@@ -71,6 +76,19 @@ const SIGNING_KEY = process.env.GATEWAY_SIGNING_KEY?.trim() || null;
 
 /** Wire-contract version the platform stamps; we echo it back. */
 const CONTRACT_VERSION = 1;
+
+/**
+ * Optional Feishu Bitable business adapter (ADR-0056). No Bitable operation is
+ * advertised unless the full Gateway-only credential/resource configuration is
+ * present. Secrets and tenant tokens stay inside the adapter closure.
+ */
+const BITABLE_CONFIG = loadFeishuBitableConfigFromEnv(process.env);
+const bitableAdapter = BITABLE_CONFIG
+  ? createFeishuBitableAdapter({
+      ...BITABLE_CONFIG,
+      audit: (event) => console.error(`[bitable-audit] ${JSON.stringify(event)}`),
+    })
+  : null;
 
 /**
  * In-memory durable store. Real backends use a database.
@@ -152,7 +170,7 @@ function runOperation(op, req) {
  * failure — instead of an HTTP status, since a batch aggregates many outcomes.
  * Honors per-op idempotency replay exactly like single /execute.
  */
-function runSingleForBulk(entry, req, dryRun) {
+async function runSingleForBulk(entry, req, dryRun) {
   const op = String(entry?.operation || '');
   if (!OPERATION_NAMES.has(op)) {
     return { ok: false, error: { code: 'OPERATION_NOT_FOUND', message: `unknown operation: ${op}` } };
@@ -162,6 +180,22 @@ function runSingleForBulk(entry, req, dryRun) {
     return { ok: false, error: { code: 'BACKEND_UNAUTHORIZED', message: 'untrusted requester may not mutate' } };
   }
   const key = entry?.idempotencyKey;
+  if (bitableAdapter?.isOperation(op)) {
+    const outcome = await bitableAdapter.execute({
+      ...req,
+      operation: op,
+      input: entry?.input ?? {},
+      dryRun,
+      idempotencyKey: key,
+    });
+    if (outcome?.status && outcome?.body) return { ok: false, error: outcome.body };
+    return {
+      ok: true,
+      ...(dryRun ? { preview: outcome.preview } : { result: outcome.result }),
+      auditId: outcome.auditId,
+      ...(outcome.replayed ? { replayed: true } : {}),
+    };
+  }
   if (def.mutating && !dryRun && key && idempotency.has(key)) {
     return { ...idempotency.get(key), replayed: true };
   }
@@ -180,7 +214,7 @@ function runSingleForBulk(entry, req, dryRun) {
  * would reflect what the fronted system can actually do, with required fields
  * and approval hints per operation.
  */
-const OPERATIONS = [
+const BASE_OPERATIONS = [
   {
     // The conformance runner probes /authorize and /execute with this exact
     // operation name. Exposing it as a safe, non-mutating no-op lets a
@@ -235,6 +269,7 @@ const OPERATIONS = [
     },
   },
 ];
+const OPERATIONS = [...BASE_OPERATIONS, ...(bitableAdapter?.describeOperations() ?? [])];
 const OPERATION_NAMES = new Set(OPERATIONS.map((o) => o.name));
 
 // --- HMAC verification ------------------------------------------------------
@@ -316,8 +351,9 @@ const handlers = {
     ],
   }),
 
-  '/authorize': (req) => {
+  '/authorize': async (req) => {
     const op = String(req.operation || '');
+    if (bitableAdapter?.isOperation(op)) return bitableAdapter.authorize(req);
     if (!OPERATION_NAMES.has(op)) {
       return { allowed: false, reason: `unknown operation: ${op}` };
     }
@@ -333,8 +369,9 @@ const handlers = {
     };
   },
 
-  '/execute': (req) => {
+  '/execute': async (req) => {
     const op = String(req.operation || '');
+    if (bitableAdapter?.isOperation(op)) return bitableAdapter.execute(req);
     if (!OPERATION_NAMES.has(op)) {
       // Surface a structured, classifiable error (maps to OPERATION_NOT_FOUND).
       return { status: 404, body: { code: 'OPERATION_NOT_FOUND', message: `unknown operation: ${op}` } };
@@ -380,7 +417,7 @@ const handlers = {
   },
 
   // Optional batch endpoint (ADR-0036). Runs N operations in one round-trip.
-  '/bulk_execute': (req) => {
+  '/bulk_execute': async (req) => {
     const ops = Array.isArray(req.operations) ? req.operations : null;
     if (!ops || ops.length === 0) {
       return { status: 400, body: { code: 'VALIDATION_FAILED', message: 'operations must be a non-empty array' } };
@@ -388,6 +425,16 @@ const handlers = {
     const dryRun = req.dryRun === true;
 
     if (req.atomic === true) {
+      if (ops.some((entry) => bitableAdapter?.isOperation(String(entry?.operation || '')))) {
+        return {
+          status: 422,
+          body: {
+            code: 'VALIDATION_FAILED',
+            message:
+              'generic atomic bulk_execute cannot span Feishu calls; use one feishu.bitable.record.batch_* operation',
+          },
+        };
+      }
       // All-or-nothing. A real backend wraps the commits in ONE transaction; this
       // reference approximates by pre-validating every op (existence + trust) and
       // committing only if all pass — otherwise nothing commits.
@@ -411,11 +458,14 @@ const handlers = {
           ),
         };
       }
-      return { ok: true, partial: false, results: ops.map((o) => runSingleForBulk(o, req, dryRun)) };
+      const results = [];
+      for (const operation of ops) results.push(await runSingleForBulk(operation, req, dryRun));
+      return { ok: true, partial: false, results };
     }
 
     // Best-effort: each op runs independently; partial=true if any failed.
-    const results = ops.map((o) => runSingleForBulk(o, req, dryRun));
+    const results = [];
+    for (const operation of ops) results.push(await runSingleForBulk(operation, req, dryRun));
     const anyFailed = results.some((r) => r.ok === false);
     return { ok: !anyFailed, partial: anyFailed, results };
   },
@@ -586,7 +636,7 @@ const server = http.createServer((req, res) => {
 
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
-  req.on('end', () => {
+  req.on('end', async () => {
     const rawBody = Buffer.concat(chunks).toString('utf8');
 
     const sigError = verifySignature(req.headers, rawBody);
@@ -601,7 +651,7 @@ const server = http.createServer((req, res) => {
 
     let result;
     try {
-      result = handler(parsed);
+      result = await handler(parsed);
     } catch (err) {
       return sendError(res, 500, {
         code: 'BACKEND_UNAVAILABLE',
@@ -623,4 +673,5 @@ server.listen(PORT, () => {
   console.error(
     `  endpoints: /describe /authorize /execute /bulk_execute /task/status /memory/get /memory/upsert /memory/search /memory/feedback`,
   );
+  console.error(`  Feishu Bitable: ${bitableAdapter ? 'enabled through Gateway operations' : 'disabled'}`);
 });

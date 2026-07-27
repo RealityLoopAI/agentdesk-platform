@@ -75,14 +75,14 @@
 - [x] 7.1 定义并文档化 `feishu.bitable.*` Operation 名称、输入/输出 Schema、错误类型和 Discovery 元数据
 - [x] 7.2 扩展 Gateway Contract/Conformance Fixtures，覆盖 App/Table/Field 发现和 Record List/Get/Create/Update/Delete
 - [x] 7.3 为 Batch Create/Update/Delete 定义记录数量上限、Atomic/Best-effort 行为和索引对齐结果
-- [ ] 7.4 实现可复用的参考 Gateway 多维表格 Adapter，使用应用凭证并将 Token 完全限制在 Gateway 进程
-- [ ] 7.5 实现逻辑资源别名到 `app_token`/`table_id` 的运营者白名单，拒绝 Agent 任意原始资源标识
-- [ ] 7.6 实现 Field Schema 获取/TTL 缓存、字段名/类型/必填/可写校验和有界分页
-- [ ] 7.7 实现逐调用规范用户业务授权，并默认拒绝 `requesterSource='agent-asserted'` 的写操作
-- [ ] 7.8 实现稳定幂等记录，使 Create/Update/Delete 和 Batch 重放返回首次已提交结果
-- [ ] 7.9 实现 Delete/高影响 Update 的用户确认 Obligation，并绑定用户、资源、Record 集合和有效期
-- [ ] 7.10 实现飞书认证、授权、校验、Not Found、Conflict、Timeout 和 Rate Limit 的封闭错误转换
-- [ ] 7.11 增加 Mock Feishu API 测试，覆盖分页、Schema 漂移、限流、部分失败、幂等重放和未确认删除
+- [x] 7.4 实现可复用的参考 Gateway 多维表格 Adapter，使用应用凭证并将 Token 完全限制在 Gateway 进程
+- [x] 7.5 实现逻辑资源别名到 `app_token`/`table_id` 的运营者白名单，拒绝 Agent 任意原始资源标识
+- [x] 7.6 实现 Field Schema 获取/TTL 缓存、字段名/类型/必填/可写校验和有界分页
+- [x] 7.7 实现逐调用规范用户业务授权，并默认拒绝 `requesterSource='agent-asserted'` 的写操作
+- [x] 7.8 实现稳定幂等记录，使 Create/Update/Delete 和 Batch 重放返回首次已提交结果
+- [x] 7.9 实现 Delete/高影响 Update 的用户确认 Obligation，并绑定用户、资源、Record 集合和有效期
+- [x] 7.10 实现飞书认证、授权、校验、Not Found、Conflict、Timeout 和 Rate Limit 的封闭错误转换
+- [x] 7.11 增加 Mock Feishu API 测试，覆盖分页、Schema 漂移、限流、部分失败、幂等重放和未确认删除
 
 ## 8. 审计、可观测性与诚实能力声明
 
