@@ -115,6 +115,8 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0062](ADR-0062-web-channel-conversation-lanes.md) | 用用户级 Conversation Lane 承载飞书与 Web 连续会话；独立 Web Listener，结构查询禁止使用 `conversation_thread_id` | Accepted | 2026-07-27 | `web`, `channels`, `session-isolation`, `identity`, `db`, `sse` |
 | [ADR-0063](ADR-0063-feishu-bitable-through-gateway.md) | 飞书多维表格只通过 Backend Gateway 访问：拒绝 Channel 直连和容器持凭证 MCP，统一授权、幂等、确认与审计 | Accepted | 2026-07-27 | `gateway`, `feishu`, `bitable`, `security`, `audit`, `contract` |
 
+| [ADR-0064](ADR-0064-web-ui-foundation.md) | 建立同源 React Web UI 与公开品牌投影：公开配置显式校验，前端 Bundle 禁止 Secret，Host 同版本发布静态资源 | Accepted | 2026-07-27 | `web`, `frontend`, `branding`, `security`, `testing` |
+
 ---
 
 ## 在 PR 中如何引用 ADR

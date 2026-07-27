@@ -117,3 +117,24 @@ Membership 后，下一次 List 与 History 请求立即隐藏/拒绝该 Lane。
 `ServerResponse` Backpressure 后立即关闭，Web Session 被撤销后在心跳检查中收到
 `session-revoked` 并断开。真实回环 HTTP 测试验证 `/api/events` 同时要求有效 Cookie 和精确
 Origin，且会从标准 `Last-Event-ID` 之后继续发送。
+
+## Web 前端工程、品牌投影与登录骨架
+
+验证日期：2026-07-27
+
+| 范围 | 命令 | 结果 |
+|---|---|---|
+| Host 类型检查 | `pnpm typecheck` | 通过 |
+| 公开品牌配置与真实 HTTP 接口 | `pnpm vitest run src/branding.test.ts src/web/server.test.ts` | 通过，2 个测试文件、9 个测试 |
+| 前端类型检查 | `pnpm web:typecheck` | 通过 |
+| 登录页与品牌回退组件测试 | `pnpm web:test` | 通过，1 个测试文件、2 个测试 |
+| 前端生产构建 | `pnpm web:build` | 通过，生成 Hash CSS/JavaScript Asset 与 Source Map |
+| 新增文件格式 | `pnpm exec prettier --check ...` | 通过 |
+| Host 新增代码 Lint | `pnpm exec eslint src/branding.ts src/branding.test.ts src/web/server.ts src/web/server.test.ts` | 通过，无错误；保留 `readBrandVar` 原有的 1 条 catch-all 警告 |
+
+品牌接口测试验证登录前只暴露经过校验的显示名、同源 Logo 路径和主题颜色，不返回 Secret、
+Namespace、Token 或 Cookie。前端只允许 `VITE_WEB_PROXY_TARGET` 进入公开环境变量，API Client
+使用同源 Cookie，并把 CSRF Token 仅保存在页面内存。
+
+组件测试验证登录页会先读取公开品牌配置，飞书 SSO 使用浏览器顶层导航；认证失败页面只显示通用
+错误，不泄露 Provider Code、Token 或 OAuth State。生产构建成功生成可发布的 `web/dist/`。

@@ -1,5 +1,6 @@
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 
+import { buildPublicBranding } from '../branding.js';
 import { getDb } from '../db/connection.js';
 import {
   authenticateWebSession,
@@ -309,6 +310,11 @@ export function createWebRequestHandler(
         } catch {
           redirect(res, '/login?error=authentication_failed', clearOauthCookie(config));
         }
+        return;
+      }
+
+      if (method === 'GET' && url.pathname === '/api/branding') {
+        json(res, 200, { branding: buildPublicBranding() });
         return;
       }
 

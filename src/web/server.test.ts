@@ -117,6 +117,21 @@ afterEach(async () => {
 });
 
 describe('Web HTTP authentication boundary', () => {
+  it('exposes only validated public branding before authentication', async () => {
+    const base = await serve(CONFIG);
+    const response = await fetch(`${base}/api/branding`);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      branding: {
+        displayName: expect.any(String),
+        logoPath: '/brand/logo.svg',
+        theme: { brandPrimary: '#245866', canvas: '#FAF8F4' },
+      },
+    });
+    expect(JSON.stringify(body)).not.toMatch(/secret|namespace|token|cookie/i);
+  });
+
   it('sets hardened cookies, exposes /api/me and revokes the server session on logout', async () => {
     const base = await serve(CONFIG, providerFetch());
     const { sessionCookie, csrfToken } = await login(base);

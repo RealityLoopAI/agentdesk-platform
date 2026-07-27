@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-labelledby="title description">
+  <title id="title">品牌连接标记</title>
+  <desc id="description">四个圆润的深青色连接环汇聚在中心</desc>
+  <g fill="none" stroke="#245866" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M100 100C81 89 68 71 76 52c8-18 31-24 48-13 18 11 23 34 11 50-8 11-21 15-35 11Z"/>
+    <path d="M100 100C111 81 129 68 148 76c18 8 24 31 13 48-11 18-34 23-50 11-11-8-15-21-11-35Z"/>
+    <path d="M100 100c19 11 32 29 24 48-8 18-31 24-48 13-18-11-23-34-11-50 8-11 21-15 35-11Z"/>
+    <path d="M100 100c-11 19-29 32-48 24-18-8-24-31-13-48 11-18 34-23 50-11 11 8 15 21 11 35Z"/>
+  </g>
+  <circle cx="100" cy="100" r="12" fill="#FAF8F4" stroke="#245866" stroke-width="8"/>
+</svg>

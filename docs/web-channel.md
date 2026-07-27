@@ -82,6 +82,32 @@ Web Agent 回复只有在 `messages_out` 已存在后才进入 Web Adapter；Hos
 `messageId/sessionId` 投递引用，Adapter 用它校验 Lane 根 Session 并写入
 `conversation.message.available` 事件。重复投递由事件唯一键收敛，不会产生多条通知。
 
+## 前端工程与品牌
+
+`web/` 是 React + Vite + TypeScript 单页应用。React Router 让当前 Lane 体现在
+`/conversations/:laneId` URL 中；TanStack Query 保存服务器返回的会话与消息状态。Tailwind CSS
+负责语义化主题 Token，仓库自有的 shadcn 风格组件与 Radix UI 原语负责可访问交互。开发期运行
+`pnpm web:dev`，类型、组件测试和生产构建分别运行 `pnpm web:typecheck`、`pnpm web:test` 与
+`pnpm web:build`。
+
+浏览器请求只使用 `/api/*` 和 `/auth/*` 相对路径，并携带同源 HttpOnly Cookie。CSRF Token 只保留
+在页面内存，不写入 Local Storage、Session Storage 或 IndexedDB。Vite 的公开环境变量只允许
+`VITE_WEB_PROXY_TARGET`，它仅供本机开发代理使用；变量名或值疑似包含 Secret 时构建会失败。
+
+登录前可访问的 `GET /api/branding` 只返回显示用途的品牌投影：
+
+- `displayName`：来自 `BRAND_NAME`，控制字符或超长值回退为通用名称；
+- `logoPath`：来自 `BRAND_UI_LOGO_PATH`，只接受不含查询参数的同源 SVG/PNG/WebP 路径；
+- `theme`：只接受六位十六进制颜色，非法值逐项回退。
+
+默认主题把运营者提供 Logo 的深青色与连结感用于重点动作，正文区域保持暖白色以减少长时间阅读
+疲劳。前端以 CSS 变量应用公开 Token，Logo 加载失败时显示文字回退，不会执行远程脚本或读取本机
+文件路径。可选主题变量为 `BRAND_UI_PRIMARY`、`BRAND_UI_PRIMARY_HOVER`、
+`BRAND_UI_PRIMARY_ACTIVE`、`BRAND_UI_SURFACE_SUBTLE`、`BRAND_UI_BORDER`、
+`BRAND_UI_CANVAS`、`BRAND_UI_SURFACE`、`BRAND_UI_NEUTRAL_BORDER`、
+`BRAND_UI_TEXT_PRIMARY`、`BRAND_UI_TEXT_SECONDARY`、`BRAND_UI_STATUS_SUCCESS`、
+`BRAND_UI_STATUS_WARNING` 和 `BRAND_UI_STATUS_DANGER`。
+
 ## 运行配置
 
 Web Listener 默认关闭。启用时至少需要配置 `WEB_ENABLED=true`、精确的
