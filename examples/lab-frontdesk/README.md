@@ -24,6 +24,11 @@ rather than a frontdesk + specialist-worker topology.
 - `backendGateway.baseUrl` points at `http://localhost:8088` as a placeholder.
   Override it with `scripts/configure-enterprise-gateway.ts --base-url ...`
   after copying into `groups/`.
+- Feishu is only the example's chat channel. Bitable CRUD is optional and
+  available only through Backend Gateway operations advertised by a live
+  `gateway_describe` response. The prompt deliberately refuses to claim full
+  CRUD when any required operation is absent; the channel never owns Bitable
+  credentials or calls its API directly.
 - The prompt is intentionally specific to a lab-automation domain. Treat it as
   a structural template (sections, rules, tone), not a drop-in for your
   business — rewrite the domain content for your own use case.
