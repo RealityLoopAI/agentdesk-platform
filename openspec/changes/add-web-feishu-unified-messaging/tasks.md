@@ -95,8 +95,8 @@
 
 ## 9. 端到端验证与发布
 
-- [ ] 9.1 增加真实 Host + Mock Provider 的 Web 消息往返 E2E，验证同一规范用户在 Web/飞书共享 Lane
-- [ ] 9.2 增加真实容器 A2A + Gateway E2E，验证 Web 来源身份到 Worker 多跳和多维表格审计
+- [x] 9.1 增加真实 Host + Mock Provider 的 Web 消息往返 E2E，验证同一规范用户在 Web/飞书共享 Lane
+- [x] 9.2 增加真实容器 A2A + Gateway E2E，验证 Web 来源身份到 Worker 多跳和多维表格审计
 - [ ] 9.3 增加迁移兼容测试，覆盖旧数据库、旧 Feishu-only Session、NULL Organization 和回滚后只读兼容
 - [ ] 9.4 运行 Host/Runner Typecheck、全部测试、格式、Lint、依赖审计、Conformance 和容器 Smoke Test
 - [ ] 9.5 编写 Web/SSO 配置、反向代理、Cookie/CSRF、身份关联、Lane 隐私和多维表格运营指南

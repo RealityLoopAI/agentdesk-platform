@@ -29,6 +29,7 @@
     "audit:export": "tsx scripts/export-audit.ts",
     "container:build": "bash container/build.sh",
     "e2e:container": "tsx scripts/e2e-container-roundtrip.ts",
+    "e2e:container:a2a-gateway": "tsx scripts/e2e-container-a2a-gateway.ts",
     "chat": "tsx scripts/chat.ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\"",

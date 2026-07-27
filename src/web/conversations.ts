@@ -360,7 +360,7 @@ export function getWebConversationHistory(args: {
     }>;
     const outgoing = outbound
       .prepare(
-        `SELECT id, seq, kind, timestamp, platform_id, channel_type, thread_id, content
+        `SELECT id, seq, kind, timestamp, platform_id, channel_type, thread_id, content, in_reply_to
          FROM messages_out
          WHERE kind NOT IN ('system', 'llm-usage') AND channel_type IS NOT 'agent'`,
       )
@@ -373,12 +373,22 @@ export function getWebConversationHistory(args: {
       channel_type: string | null;
       thread_id: string | null;
       content: string;
+      in_reply_to: string | null;
     }>;
     const deliveryRows = inbound.prepare('SELECT message_out_id, status FROM delivered').all() as Array<{
       message_out_id: string;
       status: string;
     }>;
     const deliveries = new Map(deliveryRows.map((row) => [row.message_out_id, row.status]));
+    const trustedRoutes = new Map(
+      incoming
+        .filter(
+          (row) =>
+            row.origin_user_id === args.userId ||
+            (row.origin_user_id === null && legacyInboundOwner(row.content) === args.userId),
+        )
+        .map((row) => [row.id, { type: row.channel_type, platformId: row.platform_id, threadId: row.thread_id }]),
+    );
 
     const messages: WebHistoryMessage[] = [
       ...incoming
@@ -397,16 +407,25 @@ export function getWebConversationHistory(args: {
           channel: { type: row.channel_type, platformId: row.platform_id, threadId: row.thread_id },
           status: row.status === 'failed' ? 'failed' : 'accepted',
         })),
-      ...outgoing.map((row) => ({
-        id: row.id,
-        sequence: row.seq,
-        direction: 'agent' as const,
-        kind: row.kind,
-        timestamp: row.timestamp,
-        text: messageText(row.content),
-        channel: { type: row.channel_type, platformId: row.platform_id, threadId: row.thread_id },
-        status: deliveries.get(row.id) ?? 'pending',
-      })),
+      ...outgoing
+        // For Lane replies, the Host-written inbound source is the same
+        // trusted routing authority used by delivery.ts. Container-written
+        // address columns may be null (bare model reply) or forged.
+        .filter((row) => !row.in_reply_to || trustedRoutes.has(row.in_reply_to))
+        .map((row) => ({
+          id: row.id,
+          sequence: row.seq,
+          direction: 'agent' as const,
+          kind: row.kind,
+          timestamp: row.timestamp,
+          text: messageText(row.content),
+          channel: (row.in_reply_to ? trustedRoutes.get(row.in_reply_to) : undefined) ?? {
+            type: row.channel_type,
+            platformId: row.platform_id,
+            threadId: row.thread_id,
+          },
+          status: deliveries.get(row.id) ?? 'pending',
+        })),
     ].sort((left, right) => compareKey(historyKey(left), historyKey(right)));
 
     const eligible = cursor

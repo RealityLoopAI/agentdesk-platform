@@ -284,3 +284,25 @@ describe('dual LLM configuration', () => {
     });
   });
 });
+
+describe('container runner idle-exit normalization', () => {
+  it('preserves a non-negative idleExitMs for the mounted runner config', () => {
+    writeContainerConfig('idle', {
+      mcpServers: {},
+      packages: { apt: [], npm: [] },
+      additionalMounts: [],
+      skills: [],
+      idleExitMs: 1500.9,
+    });
+
+    expect(readContainerConfig('idle').idleExitMs).toBe(1500);
+  });
+
+  it('drops invalid idleExitMs values', () => {
+    const groupDir = path.join(tmpState.root, 'groups', 'idle-invalid');
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(path.join(groupDir, 'container.json'), JSON.stringify({ idleExitMs: -1 }));
+
+    expect(readContainerConfig('idle-invalid').idleExitMs).toBeUndefined();
+  });
+});

@@ -73,10 +73,10 @@ describe('Web conversation service', () => {
     outbound
       .prepare(
         `INSERT INTO messages_out
-           (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
-         VALUES (?, ?, ?, 'chat', ?, 'web', NULL, ?)`,
+           (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content, in_reply_to)
+         VALUES (?, ?, ?, 'chat', NULL, NULL, NULL, ?, ?)`,
       )
-      .run('out-1', 3, '2026-01-01T00:00:02.000Z', binding.platform_id, JSON.stringify({ text: 'answer' }));
+      .run('out-1', 3, '2026-01-01T00:00:02.000Z', JSON.stringify({ text: 'answer' }), 'in-1');
     outbound.close();
     writeSessionMessage('ag-1', resolved.session.id, {
       id: 'in-2',
@@ -102,6 +102,11 @@ describe('Web conversation service', () => {
     const latest = getWebConversationHistory({ userId: 'alice', laneId: lane.id, limit: 2 });
     expect(latest.messages.map((message) => message.id)).toEqual(['out-1', 'in-2']);
     expect(latest.messages.map((message) => message.text)).not.toContain('private Bob text');
+    expect(latest.messages[0]!.channel).toEqual({
+      type: 'web',
+      platformId: binding.platform_id,
+      threadId: null,
+    });
     expect(latest.nextCursor).toBeTruthy();
 
     const older = getWebConversationHistory({

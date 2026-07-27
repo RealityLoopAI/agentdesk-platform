@@ -154,6 +154,11 @@ export interface ContainerConfig {
   /** Max messages per prompt. Falls back to code default if unset. */
   maxMessagesPerPrompt?: number;
   /**
+   * Cleanly exit the runner after this many idle milliseconds.
+   * `0`/unset preserves the legacy host-sweep-only lifecycle.
+   */
+  idleExitMs?: number;
+  /**
    * Optional per-container resource caps. Unset fields default to Docker's
    * unlimited. Strongly recommended in multi-user deployments.
    */
@@ -415,6 +420,10 @@ function normalizeResources(value: unknown): ContainerResourceLimits | undefined
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function normalizeIdleExitMs(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+}
+
 function configPath(folder: string): string {
   return path.join(GROUPS_DIR, folder, 'container.json');
 }
@@ -513,6 +522,7 @@ export function readContainerConfig(folder: string): ContainerConfig {
     ociRuntime: normalizeOciRuntime(raw.ociRuntime),
     agentGroupId: raw.agentGroupId,
     maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
+    idleExitMs: normalizeIdleExitMs(raw.idleExitMs),
     resources: normalizeResources(raw.resources),
     network: normalizeNetwork(raw.network),
     env: raw.env,
