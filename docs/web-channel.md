@@ -136,3 +136,9 @@ Web Listener 默认关闭。启用时至少需要配置 `WEB_ENABLED=true`、精
 `WEB_PUBLIC_ORIGIN`、强随机 `WEB_SESSION_SECRET` 和飞书 SSO 应用参数。完整配置项与校验规则见
 `src/web/config.ts`。本机开发如果使用 HTTP，必须显式开启仅限回环地址的
 `WEB_ALLOW_INSECURE_HTTP`。
+
+生产发布先运行 `pnpm build`，它会同时生成 Host `dist/` 与前端 `web/dist/`。Host 从该固定相对
+目录提供静态文件：带 Vite 内容 Hash 的 Asset 使用一年不可变缓存，HTML 使用 `no-cache`，品牌
+文件使用一小时缓存。`/login`、`/conversations` 和 `/conversations/:laneId` 支持 SPA 回退；
+`/api`、`/auth`、`/healthz` 与未知路径保持自己的 HTTP 语义，不会返回 HTML。Source Map 不进入
+生产构建，真实路径越过 `web/dist/` 的软链接会被拒绝。

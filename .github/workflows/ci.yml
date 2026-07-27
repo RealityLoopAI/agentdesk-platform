@@ -41,7 +41,7 @@ jobs:
         run: pnpm run audit
 
       - name: Format check
-        run: pnpm run format:check
+        run: pnpm run format:check && pnpm run web:format:check
 
       # Errors only. The tree carries ~171 pre-existing `no-catch-all` warnings,
       # which eslint does not fail on without --max-warnings, so this gate is
@@ -53,8 +53,14 @@ jobs:
       - name: Host typecheck
         run: pnpm exec tsc --noEmit
 
+      - name: Web typecheck
+        run: pnpm run web:typecheck
+
       - name: Agent-runner typecheck
         run: pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+
+      - name: Web tests and production build
+        run: pnpm run web:test && pnpm run web:build
 
       - name: Host tests
         run: pnpm exec vitest run

@@ -1,4 +1,7 @@
+import fs from 'node:fs';
 import http, { type Server } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,9 +42,15 @@ const CONFIG: WebConfig = {
 };
 
 const servers: Server[] = [];
+const temporaryDirectories: string[] = [];
 
-async function serve(config: WebConfig, fetchImpl?: typeof fetch, submitInbound?: SubmitWebInbound): Promise<string> {
-  const server = http.createServer(createWebRequestHandler(config, { fetchImpl, submitInbound }));
+async function serve(
+  config: WebConfig,
+  fetchImpl?: typeof fetch,
+  submitInbound?: SubmitWebInbound,
+  staticDir?: string,
+): Promise<string> {
+  const server = http.createServer(createWebRequestHandler(config, { fetchImpl, submitInbound, staticDir }));
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -114,6 +123,9 @@ afterEach(async () => {
     ),
   );
   closeDb();
+  for (const directory of temporaryDirectories.splice(0)) {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 describe('Web HTTP authentication boundary', () => {
@@ -130,6 +142,54 @@ describe('Web HTTP authentication boundary', () => {
       },
     });
     expect(JSON.stringify(body)).not.toMatch(/secret|namespace|token|cookie/i);
+  });
+
+  it('serves versioned Web assets with safe cache rules and explicit SPA fallbacks', async () => {
+    const staticDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-web-static-'));
+    temporaryDirectories.push(staticDir);
+    fs.mkdirSync(path.join(staticDir, 'assets'), { recursive: true });
+    fs.mkdirSync(path.join(staticDir, 'brand'), { recursive: true });
+    fs.writeFileSync(path.join(staticDir, 'index.html'), '<!doctype html><title>Web fixture</title>');
+    fs.writeFileSync(path.join(staticDir, 'assets', 'app-AbCd1234.js'), 'globalThis.__fixture = true;');
+    fs.writeFileSync(path.join(staticDir, 'assets', 'app-AbCd1234.js.map'), '{"sources":["private.ts"]}');
+    fs.writeFileSync(path.join(staticDir, 'brand', 'logo.svg'), '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-web-outside-'));
+    temporaryDirectories.push(outsideDir);
+    const outsideFile = path.join(outsideDir, 'outside.js');
+    fs.writeFileSync(outsideFile, 'must not be served');
+    fs.symlinkSync(outsideFile, path.join(staticDir, 'assets', 'escape-AbCd1234.js'));
+
+    const base = await serve(CONFIG, undefined, undefined, staticDir);
+    for (const route of ['/', '/login', '/conversations', '/conversations/lane-1']) {
+      const page = await fetch(`${base}${route}`);
+      expect(page.status).toBe(200);
+      expect(page.headers.get('content-type')).toContain('text/html');
+      expect(page.headers.get('cache-control')).toBe('no-cache');
+      expect(await page.text()).toContain('Web fixture');
+    }
+
+    const asset = await fetch(`${base}/assets/app-AbCd1234.js`);
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get('content-type')).toContain('text/javascript');
+    expect(asset.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(await asset.text()).toContain('__fixture');
+
+    const logo = await fetch(`${base}/brand/logo.svg`);
+    expect(logo.status).toBe(200);
+    expect(logo.headers.get('cache-control')).toBe('public, max-age=3600');
+    const head = await fetch(`${base}/assets/app-AbCd1234.js`, { method: 'HEAD' });
+    expect(head.status).toBe(200);
+    expect(head.headers.get('content-length')).toBe(String(Buffer.byteLength('globalThis.__fixture = true;')));
+    expect(await head.text()).toBe('');
+
+    const api = await fetch(`${base}/api/not-a-route`);
+    expect(api.status).toBe(401);
+    expect(api.headers.get('content-type')).toContain('application/json');
+    const unknown = await fetch(`${base}/not-a-spa-route`);
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers.get('content-type')).toContain('application/json');
+    expect((await fetch(`${base}/assets/app-AbCd1234.js.map`)).status).toBe(404);
+    expect((await fetch(`${base}/assets/escape-AbCd1234.js`)).status).toBe(404);
   });
 
   it('sets hardened cookies, exposes /api/me and revokes the server session on logout', async () => {

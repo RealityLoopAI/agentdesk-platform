@@ -122,15 +122,15 @@ Origin，且会从标准 `Last-Event-ID` 之后继续发送。
 
 验证日期：2026-07-27
 
-| 范围                         | 命令                                                                                             | 结果                                                         |
-| ---------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
-| Host 类型检查                | `pnpm typecheck`                                                                                 | 通过                                                         |
-| 公开品牌配置与真实 HTTP 接口 | `pnpm vitest run src/branding.test.ts src/web/server.test.ts`                                    | 通过，2 个测试文件、9 个测试                                 |
-| 前端类型检查                 | `pnpm web:typecheck`                                                                             | 通过                                                         |
-| 登录页与品牌回退组件测试     | `pnpm web:test`                                                                                  | 通过，1 个测试文件、2 个测试                                 |
-| 前端生产构建                 | `pnpm web:build`                                                                                 | 通过，生成 Hash CSS/JavaScript Asset 与 Source Map           |
-| 新增文件格式                 | `pnpm exec prettier --check ...`                                                                 | 通过                                                         |
-| Host 新增代码 Lint           | `pnpm exec eslint src/branding.ts src/branding.test.ts src/web/server.ts src/web/server.test.ts` | 通过，无错误；保留 `readBrandVar` 原有的 1 条 catch-all 警告 |
+| 范围                         | 命令                                                                                             | 结果                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| Host 类型检查                | `pnpm typecheck`                                                                                 | 通过                                                          |
+| 公开品牌配置与真实 HTTP 接口 | `pnpm vitest run src/branding.test.ts src/web/server.test.ts`                                    | 通过，2 个测试文件、9 个测试                                  |
+| 前端类型检查                 | `pnpm web:typecheck`                                                                             | 通过                                                          |
+| 登录页与品牌回退组件测试     | `pnpm web:test`                                                                                  | 通过，1 个测试文件、2 个测试                                  |
+| 前端生产构建                 | `pnpm web:build`                                                                                 | 通过，生成 Hash CSS/JavaScript Asset；生产包不包含 Source Map |
+| 新增文件格式                 | `pnpm exec prettier --check ...`                                                                 | 通过                                                          |
+| Host 新增代码 Lint           | `pnpm exec eslint src/branding.ts src/branding.test.ts src/web/server.ts src/web/server.test.ts` | 通过，无错误；保留 `readBrandVar` 原有的 1 条 catch-all 警告  |
 
 品牌接口测试验证登录前只暴露经过校验的显示名、同源 Logo 路径和主题颜色，不返回 Secret、
 Namespace、Token 或 Cookie。前端只允许 `VITE_WEB_PROXY_TARGET` 进入公开环境变量，API Client
@@ -138,6 +138,23 @@ Namespace、Token 或 Cookie。前端只允许 `VITE_WEB_PROXY_TARGET` 进入公
 
 组件测试验证登录页会先读取公开品牌配置，飞书 SSO 使用浏览器顶层导航；认证失败页面只显示通用
 错误，不泄露 Provider Code、Token 或 OAuth State。生产构建成功生成可发布的 `web/dist/`。
+
+## Web 生产静态资源发布
+
+验证日期：2026-07-27
+
+| 范围                               | 命令                                                                          | 结果                              |
+| ---------------------------------- | ----------------------------------------------------------------------------- | --------------------------------- |
+| Host 与 Web 同版本生产构建         | `pnpm build`                                                                  | 通过，生成 `dist/` 与 `web/dist/` |
+| 静态资源真实 HTTP 契约             | `pnpm vitest run src/web/server.test.ts`                                      | 通过，1 个测试文件、7 个测试      |
+| 前端格式、类型、组件回归           | `pnpm web:format:check && pnpm web:typecheck && pnpm web:test`                | 通过，5 个测试文件、10 个测试     |
+| 静态服务、Web Server 新增代码 Lint | `pnpm exec eslint src/web/static.ts src/web/server.ts src/web/server.test.ts` | 通过，无警告                      |
+| Host 全量回归                      | `pnpm test`                                                                   | 通过，93 个测试文件、926 个测试   |
+
+静态服务测试使用临时生产目录和真实回环 HTTP Server，验证 `/login`、会话列表和 Lane 页面都只
+回退到短缓存的 `index.html`；带内容 Hash 的 JavaScript 使用一年不可变缓存，品牌资源使用一小时
+缓存，并正确支持 `HEAD`。API 保持 JSON 身份边界，未知路由不会返回 HTML；Source Map 和指向
+`web/dist/` 外部的软链接均返回 `404`。
 
 ## Web 会话交互、安全 Markdown 与实时客户端
 

@@ -21,6 +21,7 @@ import {
 } from './conversations.js';
 import { createWebEventStreamManager, WebEventStreamError } from './events.js';
 import { completeFeishuSso, startFeishuSso } from './feishu-sso.js';
+import { createWebStaticFiles } from './static.js';
 
 const OAUTH_BROWSER_COOKIE_SUFFIX = '_oauth';
 
@@ -254,11 +255,17 @@ function enforceRateLimit(limiter: FixedWindowLimiter, key: string, res: ServerR
 
 export function createWebRequestHandler(
   config: WebConfig,
-  options: { fetchImpl?: typeof fetch; submitInbound?: SubmitWebInbound; sseHeartbeatMs?: number } = {},
+  options: {
+    fetchImpl?: typeof fetch;
+    submitInbound?: SubmitWebInbound;
+    sseHeartbeatMs?: number;
+    staticDir?: string;
+  } = {},
 ): RequestListener & { closeEventStreams(): void } {
   const loginLimiter = createFixedWindowLimiter(config.loginRateLimit, config.rateWindowMs);
   const apiLimiter = createFixedWindowLimiter(config.apiRateLimit, config.rateWindowMs);
   const eventStreams = createWebEventStreamManager(config, { heartbeatMs: options.sseHeartbeatMs });
+  const staticFiles = createWebStaticFiles(options.staticDir);
 
   const handler: RequestListener = async (req, res) => {
     applySecurityHeaders(res, config);
@@ -441,6 +448,7 @@ export function createWebRequestHandler(
         json(res, 200, { status: 'ok' });
         return;
       }
+      if (await staticFiles.serve(req, res, url.pathname)) return;
       throw new WebRequestError(404, 'not_found');
       // This is the HTTP trust boundary: unexpected failures must become a
       // generic response instead of escaping as an unhandled rejection.
