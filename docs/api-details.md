@@ -54,6 +54,11 @@ interface InboundMessage {
 interface OutboundMessage {
   kind: 'chat' | 'chat-sdk';
   content: unknown;       // JSON blob — matches the kind
+  files?: OutboundFile[];
+  source?: {
+    messageId: string;    // Host-attested persisted messages_out id
+    sessionId: string;    // Host-attested source Session; not user identity
+  };
 }
 ```
 

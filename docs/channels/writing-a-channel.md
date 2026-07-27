@@ -40,6 +40,11 @@ Optional methods (`setTyping`, `syncConversations`, `resolveChannelName`,
 `isMember`, `subscribe`, `openDM`) — if you implement them, they must be
 functions. Omit the ones you don't support.
 
+`message.source` 是可选的 Host 可信持久化引用，形如
+`{ messageId, sessionId }`。普通第三方 Channel 可以完全忽略它；需要以服务端消息 ID 做投递去重
+或通知的 Adapter 可以读取，但不得把它当作用户身份或业务授权输入。该字段只说明“哪个已持久化
+出站行触发本次投递”。
+
 Inbound flows in via the `ChannelSetup` callbacks the host passes to `setup()`:
 `onInbound` (normal chat), `onInboundEvent` (admin transport), `onMetadata`,
 `onAction`. See the in-tree `cli` adapter (`src/channels/cli.ts`) for a small,

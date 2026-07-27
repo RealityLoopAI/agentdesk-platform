@@ -131,6 +131,15 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /**
+   * Host-attested reference to the already-persisted outbound row. Adapters
+   * may use this for durable notification/idempotency, but never as a source
+   * of user identity or authorization.
+   */
+  source?: {
+    messageId: string;
+    sessionId: string;
+  };
 }
 
 /** Discovered conversation info (from syncConversations). */

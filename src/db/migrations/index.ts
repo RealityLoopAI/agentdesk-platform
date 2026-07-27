@@ -37,6 +37,7 @@ import { migration037 } from './037-user-identities.js';
 import { migration038 } from './038-web-auth.js';
 import { migration039 } from './039-conversation-lanes.js';
 import { migration040 } from './040-web-message-receipts.js';
+import { migration041 } from './041-web-events.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 
@@ -85,6 +86,7 @@ const migrations: Migration[] = [
   migration038,
   migration039,
   migration040,
+  migration041,
 ];
 
 export function runMigrations(db: Database.Database): void {

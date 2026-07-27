@@ -42,7 +42,7 @@
 - [x] 5.2 实现 `/api/me` 和用户自有 Conversation List/Create API，逐请求执行 Agent Group 与 Organization 访问门
 - [x] 5.3 实现 Conversation History API，从授权 Session 的 inbound/outbound DB 生成确定性分页 Cursor
 - [x] 5.4 实现带客户端消息 ID 去重的 Web Message POST，并复用 Persist-before-route 主链路
-- [ ] 5.5 实现基于持久化 Event 和 Last Seen Cursor 的 SSE 连接、断线重放、连接上限和 Backpressure
+- [x] 5.5 实现基于持久化 Event 和 Last Seen Cursor 的 SSE 连接、断线重放、连接上限和 Backpressure
 - [ ] 5.6 在仓库顶层建立 `web/` React + Vite + TypeScript 工程，配置 Tailwind CSS、shadcn/ui、Radix UI、React Router、TanStack Query、Vitest、React Testing Library、网络 Mock 和根级 `pnpm` 开发/检查/构建脚本
 - [ ] 5.7 扩展 `src/branding.ts` 的公开 UI 品牌配置并实现只读 `/api/branding`，动态提供 `PLATFORM_BRAND`、经过批准的同源 Logo 路径和校验后的主题 Token，禁止返回 Secret 或机器内部路径
 - [ ] 5.8 建立语义化 CSS Token、4px 间距网格、系统字体栈、6/10/14/20px 圆角层级和深青色/暖白色推荐主题，并为缺失或非法品牌配置提供可访问回退

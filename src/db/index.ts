@@ -45,6 +45,17 @@ export {
   type WebMessageReceiptStatus,
 } from './web-message-receipts.js';
 export {
+  appendWebEvent,
+  clearWebEventSubscribersForTests,
+  decodeWebEventCursor,
+  encodeWebEventCursor,
+  listWebEventsAfter,
+  subscribeWebEvents,
+  type WebEvent,
+  type WebEventCursor,
+  type WebEventType,
+} from './web-events.js';
+export {
   backfillLegacyFeishuOpenIds,
   createUserIdentity,
   getUserIdentitiesForUser,

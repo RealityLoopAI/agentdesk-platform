@@ -302,6 +302,29 @@ CREATE TABLE web_message_receipts (
 `inbound.db` / `outbound.db`。**访问层：** `src/db/web-message-receipts.ts`；
 **结构迁移：** `src/db/migrations/039-web-message-receipts.ts`。
 
+### 1.8c `web_events`
+
+Web SSE 的持久化通知日志。`sequence` 是中央数据库内的单调排序键，只通过不透明 Cursor 暴露；
+`resource_id` 指向已经写入 Session DB 的服务端消息。唯一约束让同一出站消息的 Delivery 重试
+收敛到同一事件。
+
+```sql
+CREATE TABLE web_events (
+  sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id    TEXT NOT NULL UNIQUE,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  lane_id     TEXT NOT NULL REFERENCES conversation_lanes(id),
+  event_type  TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  UNIQUE(user_id, lane_id, event_type, resource_id)
+);
+```
+
+该表不包含消息正文、Token、Cookie、Organization 或授权快照。SSE 重放时仍需按当前 Lane
+Owner 和 Host 访问门重新授权。**访问层：** `src/db/web-events.ts`；**结构迁移：**
+`src/db/migrations/040-web-events.ts`。
+
 ### 1.9 `pending_questions`
 
 The `ask_user_question` MCP tool parks an interactive question here, and the container matches incoming `system` messages back to it by `questionId`.

@@ -283,6 +283,21 @@ CREATE TABLE web_message_receipts (
 CREATE INDEX idx_web_message_receipts_lane
   ON web_message_receipts(user_id, lane_id, created_at);
 
+-- Durable notification references for Web SSE replay. Message bodies remain in
+-- the per-Session databases; this table is not a second transcript.
+CREATE TABLE web_events (
+  sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id    TEXT NOT NULL UNIQUE,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  lane_id     TEXT NOT NULL REFERENCES conversation_lanes(id),
+  event_type  TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  UNIQUE(user_id, lane_id, event_type, resource_id)
+);
+CREATE INDEX idx_web_events_user_sequence
+  ON web_events(user_id, sequence);
+
 -- Pending interactive questions
 CREATE TABLE pending_questions (
   question_id    TEXT PRIMARY KEY,

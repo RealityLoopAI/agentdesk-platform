@@ -166,6 +166,7 @@ export interface ChannelDeliveryAdapter {
     kind: string,
     content: string,
     files?: OutboundFile[],
+    source?: { messageId: string; sessionId: string },
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
   /**
@@ -746,6 +747,7 @@ async function deliverMessage(
             msg.kind,
             outboundContent,
             files,
+            { messageId: msg.id, sessionId: session.id },
           ),
           DELIVERY_TIMEOUT_MS,
         );
@@ -1068,6 +1070,7 @@ async function deliverRosterMessage(
             msg.kind,
             outboundContent,
             undefined,
+            { messageId: msg.id, sessionId: session.id },
           ),
           DELIVERY_TIMEOUT_MS,
         );

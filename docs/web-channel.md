@@ -17,8 +17,10 @@ Web Channel 是与飞书 Channel 并列的浏览器入口。它不是第二套 A
 
 - `src/web/server.ts`：HTTP 信任边界，不与 Webhook 或 Metrics Listener 共用路由。
 - `src/web/conversations.ts`：会话列表/创建、分页历史和消息幂等接入。
+- `src/web/events.ts`：SSE 连接、断线重放、连接上限、背压和 Session 撤销检测。
 - `src/channels/web.ts`：把服务器已经认证的消息转成通用 `InboundEvent`。
 - `src/db/web-message-receipts.ts`：只保存客户端重试键和服务端消息 ID，不保存消息正文。
+- `src/db/web-events.ts`：只保存已持久化资源的通知引用和顺序，不复制聊天正文。
 
 ## 身份与授权
 
@@ -41,6 +43,7 @@ GET  /api/conversations
 POST /api/conversations
 GET  /api/conversations/:laneId/messages
 POST /api/conversations/:laneId/messages
+GET  /api/events
 POST /api/logout
 ```
 
@@ -55,6 +58,29 @@ Web History 也会 Fail Closed 地过滤掉。
 消息 POST 只读取 `text` 和稳定的 `clientMessageId`。中央
 `web_message_receipts` 通过 `(user_id, lane_id, client_message_id)` 唯一约束让并发重试收敛到
 同一服务端消息 ID；正文仍只写入 Session DB，不在中央数据库复制 Transcript。
+
+## SSE 实时事件
+
+`GET /api/events` 建立一个用户级 Server-Sent Events（SSE）连接。SSE 是服务器持续向浏览器发送
+通知的标准 HTTP 流；浏览器发消息仍使用普通 POST。该接口同时要求有效 Cookie 和精确
+`Origin`，不接受跨站凭证流。
+
+中央 `web_events` 表持久化 `event_id`、规范用户、Lane、事件类型、服务端资源 ID 和顺序号，
+不保存消息正文。浏览器收到事件后根据 `laneId` 重新校验相应 History Query，所以 Session
+`inbound.db` / `outbound.db` 仍是唯一消息真相源。
+
+重连时浏览器通过标准 `Last-Event-ID` Header（首连也可使用 `cursor` 查询参数）提交最后看到的
+不透明 Cursor。Host 只按该规范用户读取后续事件，并对每条事件重新执行 Lane Owner、
+Agent Group 与 Organization 访问门；撤权后未发送的事件不会因为旧 Cursor 泄露。
+
+每个用户最多建立 `WEB_SSE_MAX_CONNECTIONS_PER_USER` 条连接。`ServerResponse.write()` 报告
+Backpressure 时，Host 会立即关闭慢连接，由浏览器带 Cursor 重连；不会让慢标签页持续占用 Host
+内存。心跳会检查绑定的 Web Session，过期或撤销时发送不含敏感信息的 `session-revoked` 通知并
+关闭连接。Host 停机时也会先关闭所有 SSE 流，避免 Listener 无法优雅退出。
+
+Web Agent 回复只有在 `messages_out` 已存在后才进入 Web Adapter；Host 会附带可信的
+`messageId/sessionId` 投递引用，Adapter 用它校验 Lane 根 Session 并写入
+`conversation.message.available` 事件。重复投递由事件唯一键收敛，不会产生多条通知。
 
 ## 运行配置
 

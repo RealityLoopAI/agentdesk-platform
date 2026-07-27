@@ -156,7 +156,13 @@ Channel adapters are responsible for:
    - **Platform thread ID** — optional sub-context (Slack thread, GitHub PR comment thread)
 4. Outbound delivery — sending responses back to the platform
 
-The channel adapter does NOT know about agent group IDs or session IDs. It returns platform-level identifiers. The host maps those to the entity model.
+Channel adapters do not receive Agent Group IDs as routing or authorization
+inputs. Most adapters only handle platform-level identifiers. Outbound delivery
+may additionally carry an optional Host-attested `source` reference
+(`messageId`/`sessionId`) for durable delivery deduplication or notification;
+adapters must not reinterpret it as user identity or business authorization.
+The Web adapter uses it only to verify that a persisted outbound row belongs to
+the active Lane root before publishing an SSE event.
 
 The two-level ID scheme (channel ID + thread ID) gives flexibility:
 - Want every Slack thread to be a separate session? Return unique thread IDs.

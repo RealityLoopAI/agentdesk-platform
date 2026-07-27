@@ -97,3 +97,23 @@ Adapter，并返回同一个服务端消息 ID。
 History 从根 Session 的 `inbound.db` / `outbound.db` 合并，使用确定性不透明 Cursor；测试额外
 注入了 Bob 的底层入站行，Alice 的 Web History 不会返回该内容。撤销 Alice 的 Agent Group
 Membership 后，下一次 List 与 History 请求立即隐藏/拒绝该 Lane。
+
+## Web SSE 持久化事件与断线重放
+
+验证日期：2026-07-27
+
+| 范围 | 命令 | 结果 |
+|---|---|---|
+| Host 类型检查 | `pnpm typecheck` | 通过 |
+| Event Migration/DB、Web Adapter 出站引用、SSE 重放/授权/连接上限/Backpressure/Session 撤销 | `pnpm exec vitest run src/web/events.test.ts src/db/web-events.test.ts src/db/migrations/040-web-events.test.ts src/channels/web.test.ts src/web/conversations.test.ts` | 通过，5 个测试文件、13 个测试 |
+| 真实 HTTP SSE、Cookie、精确 Origin、非法 Cursor 与 `Last-Event-ID` | `pnpm exec vitest run src/web/server.test.ts src/web/events.test.ts src/db/web-events.test.ts src/db/migrations/040-web-events.test.ts src/channels/web.test.ts src/web/conversations.test.ts` | 通过，6 个测试文件、18 个测试 |
+| Host 全量回归 | `pnpm test` | 通过，92 个测试文件、920 个测试 |
+
+测试证明 SSE Event 只引用已经持久化的服务端消息，不复制正文、Token 或 Organization。重放只
+查询当前规范用户的事件，每条事件还会重新执行 Lane Owner 与当前 Agent Group/Organization
+访问门；测试中的无权 Lane、Bob Lane 和撤权后 Event 均不会发给 Alice。
+
+同一资源的重复 Delivery 只生成一个 Event。连接达到每用户上限时返回拒绝，慢客户端触发
+`ServerResponse` Backpressure 后立即关闭，Web Session 被撤销后在心跳检查中收到
+`session-revoked` 并断开。真实回环 HTTP 测试验证 `/api/events` 同时要求有效 Cookie 和精确
+Origin，且会从标准 `Last-Event-ID` 之后继续发送。

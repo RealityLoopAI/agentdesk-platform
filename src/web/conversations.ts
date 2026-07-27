@@ -20,6 +20,7 @@ import {
   reserveWebMessageReceipt,
   type WebMessageReceipt,
 } from '../db/web-message-receipts.js';
+import { appendWebEvent } from '../db/web-events.js';
 import { canAccessAgentGroup } from '../modules/permissions/access.js';
 import { inboundDbPath, openInboundDb, openOutboundDb, outboundDbPath } from '../session-manager.js';
 import type { ConversationLane } from '../types.js';
@@ -433,10 +434,18 @@ export async function submitWebConversationMessage(args: {
         isGroup: false,
       },
     });
-    return receiptResponse(completeWebMessageReceipt(reserved.receipt.id, 'accepted'), false);
   } catch (error) {
     completeWebMessageReceipt(reserved.receipt.id, 'failed', 'route_failed');
     if (error instanceof WebConversationError) throw error;
     throw new WebConversationError(503, 'message_route_failed');
   }
+
+  const accepted = completeWebMessageReceipt(reserved.receipt.id, 'accepted');
+  appendWebEvent({
+    userId: args.userId,
+    laneId: lane.id,
+    eventType: 'conversation.message.accepted',
+    resourceId: accepted.server_message_id,
+  });
+  return receiptResponse(accepted, false);
 }

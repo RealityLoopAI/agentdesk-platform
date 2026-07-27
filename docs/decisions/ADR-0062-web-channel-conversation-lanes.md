@@ -51,6 +51,15 @@ Web Server 在单一 Host 进程中使用独立 `WEB_PORT`，与 Webhook/Metrics
 Lane 根 Session 的 DB Pair。Web SSO 得到的规范用户通过 Host-only
 `InboundEvent.authenticatedUserId` 传给 Router，不从 Agent 可见的浏览器 JSON 推导。
 
+SSE 使用中央 `web_events` 作为只含引用的持久化通知日志：保存规范用户、Lane、事件类型、
+服务端资源 ID 与单调 Sequence，但不复制正文。Cursor 是 Sequence 的不透明编码。重放和实时
+发送都逐事件重新检查 Lane Owner 与当前 Host 访问门；权限撤销后不继续发送旧授权下的事件。
+每用户连接数有上限，慢客户端触发 Backpressure 时关闭并依靠 Cursor 重连。
+
+普通 Channel Adapter 无需理解 Session；只有 Host Delivery 可以在 `OutboundMessage.source`
+中附带已经持久化的 `messageId/sessionId` 引用。Web Adapter 用该引用核对活跃 Web Binding 与
+Lane 根 Session 后写事件，它不能把该引用作为用户身份或业务授权输入。
+
 ## Consequences
 
 - **Positive**: 同一用户可在飞书与 Web 继续一个 Agent 上下文，同时保持 Alice/Bob、群聊和
@@ -64,6 +73,7 @@ Lane 根 Session 的 DB Pair。Web SSO 得到的规范用户通过 Host-only
 
 - 新增 Lane/Binding 表、Partial Unique Index 和 `sessions.conversation_lane_id`。
 - 新增不含正文的 Web 消息回执表，使并发重试返回同一个服务端消息。
+- 新增不含正文的 Web Event 表，支持 Last-Event-ID 重放和投递事件去重。
 - Web Adapter 必须先认证并由服务端解析用户/Lane，浏览器字段不能覆盖上下文。
 - 回复路由从触发入站行读取来源，不再把 `sessions.messaging_group_id` 当作唯一地址。
 - SSE 只通知已持久化事件，支持授权后 Cursor 重放、连接上限和 Backpressure。

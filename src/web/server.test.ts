@@ -3,6 +3,7 @@ import http, { type Server } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, getDb, initTestDb } from '../db/connection.js';
+import { appendWebEvent, encodeWebEventCursor } from '../db/web-events.js';
 import { authenticateWebSession, createWebAuthSession } from '../db/web-auth.js';
 import { runMigrations } from '../db/migrations/index.js';
 import type { WebConfig } from './config.js';
@@ -297,6 +298,68 @@ describe('Web HTTP authentication boundary', () => {
     });
     expect(hidden.status).toBe(403);
     expect(await hidden.json()).toEqual({ error: 'conversation_unavailable' });
+  });
+
+  it('protects the SSE route with authentication and exact Origin, then honors Last-Event-ID replay', async () => {
+    const now = new Date().toISOString();
+    getDb().exec(`
+      INSERT INTO users (id, kind, display_name, created_at)
+        VALUES ('alice', 'feishu', 'Alice', '${now}');
+      INSERT INTO agent_groups (id, name, folder, agent_provider, created_at, organization_id)
+        VALUES ('ag-1', 'Agent', 'agent', NULL, '${now}', NULL);
+      INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+        VALUES ('alice', 'ag-1', NULL, '${now}');
+      INSERT INTO conversation_lanes
+        (id, agent_group_id, owner_user_id, root_session_id, status, created_at, archived_at)
+        VALUES ('lane-1', 'ag-1', 'alice', NULL, 'active', '${now}', NULL);
+    `);
+    const session = createWebAuthSession({
+      userId: 'alice',
+      secret: SECRET,
+      policy: CONFIG.sessionPolicy,
+    });
+    const first = appendWebEvent({
+      userId: 'alice',
+      laneId: 'lane-1',
+      eventType: 'conversation.message.accepted',
+      resourceId: 'message-1',
+    }).event;
+    const second = appendWebEvent({
+      userId: 'alice',
+      laneId: 'lane-1',
+      eventType: 'conversation.message.available',
+      resourceId: 'message-2',
+    }).event;
+    const base = await serve(CONFIG);
+    const cookie = `${CONFIG.cookieName}=${session.token}`;
+
+    const unauthenticated = await fetch(`${base}/api/events`, { headers: { origin: CONFIG.publicOrigin } });
+    expect(unauthenticated.status).toBe(401);
+    const wrongOrigin = await fetch(`${base}/api/events`, {
+      headers: { cookie, origin: 'https://attacker.example' },
+    });
+    expect(wrongOrigin.status).toBe(403);
+    const malformed = await fetch(`${base}/api/events?cursor=forged`, {
+      headers: { cookie, origin: CONFIG.publicOrigin },
+    });
+    expect(malformed.status).toBe(400);
+
+    const stream = await fetch(`${base}/api/events`, {
+      headers: {
+        cookie,
+        origin: CONFIG.publicOrigin,
+        'last-event-id': encodeWebEventCursor(first.sequence),
+      },
+    });
+    expect(stream.status).toBe(200);
+    expect(stream.headers.get('content-type')).toContain('text/event-stream');
+    const reader = stream.body!.getReader();
+    const chunk = await reader.read();
+    const text = new TextDecoder().decode(chunk.value);
+    expect(text).toContain(second.event_id);
+    expect(text).toContain('message-2');
+    expect(text).not.toContain('message-1');
+    await reader.cancel();
   });
 });
 

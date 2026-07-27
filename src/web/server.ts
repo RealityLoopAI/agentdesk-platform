@@ -18,6 +18,7 @@ import {
   WebConversationError,
   type SubmitWebInbound,
 } from './conversations.js';
+import { createWebEventStreamManager, WebEventStreamError } from './events.js';
 import { completeFeishuSso, startFeishuSso } from './feishu-sso.js';
 
 const OAUTH_BROWSER_COOKIE_SUFFIX = '_oauth';
@@ -252,12 +253,13 @@ function enforceRateLimit(limiter: FixedWindowLimiter, key: string, res: ServerR
 
 export function createWebRequestHandler(
   config: WebConfig,
-  options: { fetchImpl?: typeof fetch; submitInbound?: SubmitWebInbound } = {},
-): RequestListener {
+  options: { fetchImpl?: typeof fetch; submitInbound?: SubmitWebInbound; sseHeartbeatMs?: number } = {},
+): RequestListener & { closeEventStreams(): void } {
   const loginLimiter = createFixedWindowLimiter(config.loginRateLimit, config.rateWindowMs);
   const apiLimiter = createFixedWindowLimiter(config.apiRateLimit, config.rateWindowMs);
+  const eventStreams = createWebEventStreamManager(config, { heartbeatMs: options.sseHeartbeatMs });
 
-  return async (req, res) => {
+  const handler: RequestListener = async (req, res) => {
     applySecurityHeaders(res, config);
     const timeout = setTimeout(() => {
       if (!res.headersSent) json(res, 408, { error: 'request_timeout' });
@@ -325,6 +327,22 @@ export function createWebRequestHandler(
             user: { id: user.id, kind: user.kind, displayName: user.display_name },
             csrfToken: authenticated.csrfToken,
             sessionExpiresAt: authenticated.session.absolute_expires_at,
+          });
+          return;
+        }
+
+        if (method === 'GET' && url.pathname === '/api/events') {
+          if (!exactOriginAllowed(req, config)) throw new WebRequestError(403, 'request_forbidden');
+          const lastEventId =
+            typeof req.headers['last-event-id'] === 'string'
+              ? req.headers['last-event-id']
+              : url.searchParams.get('cursor');
+          eventStreams.open({
+            req,
+            res,
+            token,
+            authenticated,
+            cursor: lastEventId,
           });
           return;
         }
@@ -427,6 +445,8 @@ export function createWebRequestHandler(
         json(res, error.status, { error: error.code });
       } else if (error instanceof WebConversationError) {
         json(res, error.status, { error: error.code });
+      } else if (error instanceof WebEventStreamError) {
+        json(res, error.status, { error: error.code });
       } else {
         log.error('Web request failed', {
           method: req.method,
@@ -439,14 +459,21 @@ export function createWebRequestHandler(
       clearTimeout(timeout);
     }
   };
+  return Object.assign(handler, {
+    closeEventStreams(): void {
+      eventStreams.closeAll();
+    },
+  });
 }
 
 let webServer: Server | null = null;
+let closeWebEventStreams: (() => void) | null = null;
 
 export async function startWebServer(): Promise<void> {
   const config = readWebConfig();
   if (!config || webServer) return;
-  const server = http.createServer(createWebRequestHandler(config));
+  const handler = createWebRequestHandler(config);
+  const server = http.createServer(handler);
   server.requestTimeout = config.requestTimeoutMs;
   server.headersTimeout = config.requestTimeoutMs + 1_000;
   server.keepAliveTimeout = 5_000;
@@ -458,6 +485,7 @@ export async function startWebServer(): Promise<void> {
     });
   });
   webServer = server;
+  closeWebEventStreams = handler.closeEventStreams;
   log.info('Web listener started', { port: config.port, publicOrigin: config.publicOrigin });
 }
 
@@ -465,6 +493,8 @@ export async function stopWebServer(): Promise<void> {
   const server = webServer;
   webServer = null;
   if (!server) return;
+  closeWebEventStreams?.();
+  closeWebEventStreams = null;
   await new Promise<void>((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
   });
