@@ -53,16 +53,57 @@ export interface MessagingGroup {
 // ── Identity & privilege ──
 
 /**
- * User = a messaging-platform identifier. Namespaced so distinct channels
- * with numeric IDs don't collide: "phone:+1555...", "tg:123", "discord:456",
- * "email:a@x.com". A single human with a phone AND a telegram handle has
- * two separate users — no cross-channel linking (yet).
+ * Canonical platform user (ADR-0054).
+ *
+ * Legacy installations commonly use a namespaced channel handle such as
+ * `feishu:ou_...` as the id. That remains supported so existing roles,
+ * memberships, sessions and audit references never need a risky rewrite.
+ * `UserIdentity` maps one or more provider-verified external subjects onto
+ * this canonical authorization subject.
  */
 export interface User {
   id: string;
   kind: string; // 'phone' | 'email' | 'discord' | 'telegram' | 'matrix' | ...
   display_name: string | null;
   created_at: string;
+}
+
+/** A provider-verified external login or channel identity (ADR-0054). */
+export interface UserIdentity {
+  id: string;
+  user_id: string;
+  provider: string;
+  provider_scope: string;
+  identifier_type: string;
+  external_subject: string;
+  verified_at: string;
+  created_at: string;
+  last_seen_at: string;
+}
+
+/** Server-side Web login session; browser tokens are stored only as hashes. */
+export interface WebAuthSession {
+  id_hash: string;
+  user_id: string;
+  csrf_hash: string;
+  created_at: string;
+  last_seen_at: string;
+  idle_expires_at: string;
+  absolute_expires_at: string;
+  revoked_at: string | null;
+  auth_context_hash: string | null;
+}
+
+/** One-time Feishu OAuth state transaction. */
+export interface WebAuthTransaction {
+  state_hash: string;
+  browser_nonce_hash: string;
+  pkce_verifier_ciphertext: string | null;
+  redirect_uri: string;
+  created_at: string;
+  expires_at: string;
+  used_at: string | null;
+  authorization_code_hash: string | null;
 }
 
 export type UserRoleKind = 'owner' | 'admin' | 'org-admin' | 'operator' | 'viewer';

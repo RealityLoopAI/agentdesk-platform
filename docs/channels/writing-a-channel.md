@@ -45,6 +45,25 @@ Inbound flows in via the `ChannelSetup` callbacks the host passes to `setup()`:
 `onAction`. See the in-tree `cli` adapter (`src/channels/cli.ts`) for a small,
 complete reference.
 
+### 可信发送者身份（ADR-0054）
+
+如果平台回调已经以签名、长连接 SDK 或等价协议验证了发送者，适配器可以在
+`InboundMessage.senderIdentity` 中附带：
+
+```ts
+{
+  provider: 'feishu',
+  providerScope: configuredAppId,
+  identifierType: 'open_id',
+  externalSubject: verifiedOpenId,
+}
+```
+
+该字段属于 Host Envelope，不会进入 Agent Prompt。只能从 Provider 已验证的事件字段构造，
+绝不能从消息正文、浏览器请求体或 Agent 输出复制。`providerScope` 必须反映真实身份命名空间；
+例如飞书 `open_id` 必须带产生它的 App Scope。没有可靠身份协议时请省略该字段，Host 会继续
+使用兼容的旧 Sender 解析路径。
+
 ## 2. Self-register on import
 
 Your entry module must call `registerChannelAdapter` **on import** — the loader

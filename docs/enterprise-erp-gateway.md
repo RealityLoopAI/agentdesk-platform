@@ -158,6 +158,10 @@ The agent cannot set this field — it's set by the container runtime based on
 what it could resolve at the start of the batch. See
 `container/agent-runner/src/request-identity.ts` for the resolution rules.
 
+`requester.userId` 是 Host 解析出的规范 `users.id`，调用方必须把它当作不透明授权主体，不能
+重新按 `feishu:<open_id>` 拆解或推导。飞书 Channel 与飞书 SSO 的外部 Subject 在 Host 侧通过
+`user_identities` 关联；Organization 仍是 Host 访问门，不加入 Gateway 业务授权输入。
+
 ## Identity propagation across agent-to-agent hops
 
 When frontdesk delegates to a worker (`messages_out.channel_type = 'agent'`),

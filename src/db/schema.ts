@@ -92,14 +92,54 @@ CREATE TABLE messaging_group_agents (
   UNIQUE(messaging_group_id, agent_group_id)
 );
 
--- Users are messaging-platform identifiers, namespaced: "phone:+1555...",
--- "tg:123", "discord:456", "email:a@x.com". A single human can own multiple
--- user rows if they have identifiers on unrelated channels (no linking yet).
+-- Canonical authorization subjects. Legacy ids remain namespaced channel
+-- handles; new external identities link through user_identities (ADR-0054).
 CREATE TABLE users (
   id           TEXT PRIMARY KEY,
   kind         TEXT NOT NULL,
   display_name TEXT,
   created_at   TEXT NOT NULL
+);
+
+-- Provider-verified external identities. Scope is part of the key because
+-- Feishu open_id is app-scoped. Credentials/tokens are never stored here.
+CREATE TABLE user_identities (
+  id               TEXT PRIMARY KEY,
+  user_id          TEXT NOT NULL REFERENCES users(id),
+  provider         TEXT NOT NULL,
+  provider_scope   TEXT NOT NULL,
+  identifier_type  TEXT NOT NULL,
+  external_subject TEXT NOT NULL,
+  verified_at      TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  last_seen_at     TEXT NOT NULL,
+  UNIQUE(provider, provider_scope, identifier_type, external_subject)
+);
+CREATE INDEX idx_user_identities_user ON user_identities(user_id);
+
+-- Hash-only, expiring and revocable browser sessions (ADR-0054/0055).
+CREATE TABLE web_auth_sessions (
+  id_hash             TEXT PRIMARY KEY,
+  user_id             TEXT NOT NULL REFERENCES users(id),
+  csrf_hash           TEXT NOT NULL,
+  created_at          TEXT NOT NULL,
+  last_seen_at        TEXT NOT NULL,
+  idle_expires_at     TEXT NOT NULL,
+  absolute_expires_at TEXT NOT NULL,
+  revoked_at          TEXT,
+  auth_context_hash   TEXT
+);
+
+-- One-use OAuth state; codes and provider tokens are never persisted.
+CREATE TABLE web_auth_transactions (
+  state_hash               TEXT PRIMARY KEY,
+  browser_nonce_hash       TEXT NOT NULL,
+  pkce_verifier_ciphertext TEXT,
+  redirect_uri             TEXT NOT NULL,
+  created_at               TEXT NOT NULL,
+  expires_at               TEXT NOT NULL,
+  used_at                  TEXT,
+  authorization_code_hash  TEXT UNIQUE
 );
 
 -- Role grants on users. Privilege is user-level, not group-level.

@@ -467,10 +467,20 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
   async function handleMessageReceive(event: FeishuMessageEvent): Promise<void> {
     if (!setupConfig) return;
 
-    const senderId =
-      readString(event.sender.sender_id.open_id) ||
-      readString(event.sender.sender_id.user_id) ||
-      readString(event.sender.sender_id.union_id);
+    const senderIdentity =
+      ([
+        ['open_id', readString(event.sender.sender_id.open_id)],
+        ['user_id', readString(event.sender.sender_id.user_id)],
+        ['union_id', readString(event.sender.sender_id.union_id)],
+      ] as const)
+        .filter((entry): entry is readonly ['open_id' | 'user_id' | 'union_id', string] => Boolean(entry[1]))
+        .map(([identifierType, externalSubject]) => ({
+          provider: 'feishu',
+          providerScope: config.appId,
+          identifierType,
+          externalSubject,
+        }))[0] ?? undefined;
+    const senderId = senderIdentity?.externalSubject;
 
     // Build span attributes (only include non-undefined values)
     const spanAttributes: Record<string, unknown> = {
@@ -572,6 +582,7 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
           },
           isMention,
           isGroup,
+          senderIdentity,
         });
       }),
     );

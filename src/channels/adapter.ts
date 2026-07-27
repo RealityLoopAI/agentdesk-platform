@@ -33,6 +33,20 @@ export interface DeliveryAddress {
 }
 
 /**
+ * External identity verified by a channel adapter (ADR-0054).
+ *
+ * This metadata lives on the Host envelope, outside `message.content`, so it
+ * is not exposed to the Agent as prompt data. Only adapter/server code may
+ * construct it; browser or chat message text must never be copied into it.
+ */
+export interface TrustedChannelIdentity {
+  provider: string;
+  providerScope: string;
+  identifierType: string;
+  externalSubject: string;
+}
+
+/**
  * Full inbound event handed to the router.
  *
  * `channelType` + `platformId` + `threadId` identify which messaging group /
@@ -59,6 +73,8 @@ export interface InboundEvent {
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
   };
+  /** Provider-confirmed sender identity; never derived from message text. */
+  senderIdentity?: TrustedChannelIdentity;
   replyTo?: DeliveryAddress;
 }
 
@@ -85,6 +101,8 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /** Provider-confirmed sender identity; never derived from message text. */
+  senderIdentity?: TrustedChannelIdentity;
 }
 
 /** A file attachment to deliver alongside a message. */

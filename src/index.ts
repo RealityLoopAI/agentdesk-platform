@@ -152,6 +152,7 @@ async function main(): Promise<void> {
             isMention: message.isMention,
             isGroup: message.isGroup,
           },
+          senderIdentity: message.senderIdentity,
         }).catch((err) => {
           log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
         });

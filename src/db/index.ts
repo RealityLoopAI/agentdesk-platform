@@ -1,6 +1,36 @@
 export { initDb, initTestDb, getDb, closeDb } from './connection.js';
 export { runMigrations } from './migrations/index.js';
 export { markInboundSeen, pruneInboundDedup } from './inbound-dedup.js';
+export {
+  authenticateWebSession,
+  consumeWebAuthTransaction,
+  createWebAuthSession,
+  createWebAuthTransaction,
+  getWebAuthSessionByHash,
+  purgeExpiredWebAuthTransactions,
+  revokeAllWebAuthSessionsForUser,
+  revokeWebAuthSessionByToken,
+  rotateWebAuthSession,
+  verifyWebCsrf,
+  WebAuthStateError,
+  type AuthenticatedWebSession,
+  type WebAuthSessionPolicy,
+  type WebAuthStateErrorReason,
+} from './web-auth.js';
+export {
+  backfillLegacyFeishuOpenIds,
+  createUserIdentity,
+  getUserIdentitiesForUser,
+  getUserIdentity,
+  getUserIdentityById,
+  relinkUserIdentity,
+  resolveOrCreateCanonicalUser,
+  touchUserIdentity,
+  UserIdentityConflictError,
+  type CreateUserIdentityInput,
+  type ResolveUserIdentityInput,
+  type UserIdentityKey,
+} from './user-identities.js';
 export { listSessions, traceRequest, type SessionFilter, type RequestTrace } from './operator-queries.js';
 export {
   createAgentGroup,

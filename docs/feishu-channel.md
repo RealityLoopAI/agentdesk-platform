@@ -91,6 +91,17 @@ re-check below — the events only tighten the window).
 - group chat inbound -> `platform_id = feishu:<chat_id>`
 - p2p inbound -> `platform_id = feishu:p2p:<open_id>`
 
+发送者身份与聊天地址是两件事。原生飞书适配器从已验证事件的
+`sender.sender_id` 选择 `open_id`、`user_id` 或 `union_id`，并在 Host Envelope 上写入
+`senderIdentity`。其中 `provider_scope = FEISHU_APP_ID`，因为同一字符串形式的 `open_id`
+不能跨飞书应用直接比较。权限模块随后通过中央表 `user_identities` 得到规范 `users.id`，
+再执行既有成员、角色和 Organization 门控。此元数据不会进入 Agent Prompt，数据库也不保存
+飞书 Token。
+
+旧部署的 `users.id = feishu:ou_*` 保持不变；安全回填只增加 `(App Scope, open_id) ->
+users.id` 的关联，不重写 Role、Membership、Session 或 Audit 外键。身份冲突会拒绝处理，
+不会自动合并两个用户的权限。
+
 That synthetic p2p mapping is intentional. It keeps host-initiated DM delivery
 and user-initiated DM replies on the same AgentDesk messaging-group/session key.
 

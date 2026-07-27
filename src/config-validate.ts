@@ -32,6 +32,7 @@
 import { readEnvFile } from './env.js';
 import { log } from './log.js';
 import { assertSecretNotKnownWeak } from './security/known-weak-secrets.js';
+import { parseWebConfig, WEB_CONFIG_KEYS } from './web/config.js';
 
 /**
  * Security-critical secrets that get the known-weak check IF they are set.
@@ -47,6 +48,7 @@ const SECURITY_CRITICAL_SECRET_KEYS = [
   'FEISHU_ENCRYPT_KEY',
   'FEISHU_VERIFICATION_TOKEN',
   'OPENAI_API_KEY',
+  'WEB_SESSION_SECRET',
 ] as const;
 
 /** All keys this validator inspects (so we read `.env` once). */
@@ -64,6 +66,7 @@ const INSPECTED_KEYS = [
   // ADR-0035: in vault mode the host needs ONECLI_URL (not OPENAI_API_KEY).
   'AGENTDESK_OPENAI_VIA_ONECLI',
   'ONECLI_URL',
+  ...WEB_CONFIG_KEYS,
 ] as const;
 
 /**
@@ -179,6 +182,15 @@ export function validateStartupConfig(): void {
       'ONECLI_API_KEY is required when ONECLI_URL is set ' +
         '(the OneCLI control plane rejects unauthenticated calls — the gateway/credential proxy would fail at runtime).',
     );
+  }
+
+  // 2e. Web/SSO is opt-in. When enabled, parse the complete schema so port,
+  // exact origin, cookie policy, TTLs, body limits and Feishu OAuth endpoints
+  // fail fast before a listener opens.
+  try {
+    parseWebConfig(get);
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
   }
 
   // --- 3. Soft warnings (degrade gracefully, never block startup) ---

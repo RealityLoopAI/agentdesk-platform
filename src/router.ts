@@ -714,6 +714,11 @@ async function deliverToAgent(
             threadId: deliveryAddr.threadId,
             content: event.message.content,
             trigger: wake ? 1 : 0,
+            // Host-established canonical identity (ADR-0054). This takes
+            // precedence over message.content.senderId in A2A propagation,
+            // which is essential when an external id maps to a non-legacy
+            // canonical user.
+            originUserId: userId,
             // Stamp the conversation thread id onto the channel-inbound row so it
             // joins to the classification_log row + propagates to a2a hops
             // (ADR-0039). Minted on the root session; NULL until then.

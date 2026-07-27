@@ -70,7 +70,9 @@ CREATE TABLE messaging_group_agents (
 
 ### 1.4 `users`
 
-Platform user identities. ID is namespaced: `tg:123456`, `discord:abc`, `phone:+1555...`, `email:a@x.com`. One human may own several rows — no cross-channel linking yet.
+规范用户，也就是角色、成员关系、Session Owner 和审计共同引用的授权主体。旧部署的 ID
+通常仍是带渠道前缀的形式，例如 `feishu:ou_xxx`；迁移不会重写这些主键。新代码必须把
+`users.id` 当作不透明值，通过 `user_identities` 连接外部身份（ADR-0054）。
 
 ```sql
 CREATE TABLE users (
@@ -81,7 +83,33 @@ CREATE TABLE users (
 );
 ```
 
-- **Writers/readers:** `src/modules/permissions/db/users.ts`; channel auth flows
+- **Writers/readers:** `src/modules/permissions/db/users.ts`、`src/db/user-identities.ts`、认证流程
+
+### 1.4a `user_identities`（ADR-0054）
+
+把一个经过 Provider 协议验证的外部 Subject 连接到规范用户。该表不保存 OAuth Token、
+飞书 App Secret 或任何可用于调用 Provider 的凭证。
+
+```sql
+CREATE TABLE user_identities (
+  id               TEXT PRIMARY KEY,
+  user_id          TEXT NOT NULL REFERENCES users(id),
+  provider         TEXT NOT NULL,
+  provider_scope   TEXT NOT NULL,
+  identifier_type  TEXT NOT NULL,
+  external_subject TEXT NOT NULL,
+  verified_at      TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  last_seen_at     TEXT NOT NULL,
+  UNIQUE(provider, provider_scope, identifier_type, external_subject)
+);
+CREATE INDEX idx_user_identities_user ON user_identities(user_id);
+```
+
+- `provider_scope` 是身份命名空间的一部分。飞书 `open_id` 按应用隔离，不能跨 App 直接比较。
+- 同一个外部身份只能属于一个规范用户；冲突时 Fail Closed，不自动合并授权状态。
+- 重新关联只能走受审计的 `relinkUserIdentity()`。
+- 旧 `feishu:ou_*` 回填只增加映射，不修改任何既有外键。
 
 ### 1.5 `user_roles`
 

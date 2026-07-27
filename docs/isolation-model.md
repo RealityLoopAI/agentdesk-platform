@@ -104,6 +104,11 @@ AgentDesk supports two user-scoped `session_mode` values for that case:
 - `per-user` — one session per `(agent_group, messaging_group, user)`
 - `per-user-per-thread` — one session per `(agent_group, messaging_group, user, thread)`
 
+这里的 `user` 是权限模块解析出的规范 `users.id`，不是浏览器或消息正文自报的字符串。
+原生 Channel 的可信外部身份先经 `user_identities`（包含 Provider Scope）解析，再进入
+Session Key 和访问门。Organization 仍只在 Host 侧按规范用户检查，既不会写进外部身份唯一键，
+也不会成为 Backend Gateway 的业务授权输入。
+
 Use these when:
 
 - many employees share one entry bot

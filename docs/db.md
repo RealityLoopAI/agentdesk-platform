@@ -52,7 +52,7 @@ Path helpers: `sessionDir()`, `inboundDbPath()`, `outboundDbPath()`, `heartbeatP
 
 | Kind of data | Where | Why |
 |--------------|-------|-----|
-| Identities, roles, memberships | central | Stable, cross-session, rarely written |
+| 规范用户、外部身份映射、角色、成员关系 | central | 跨 Session 的授权主体；外部身份可多对一关联 |
 | Channel wiring, routing rules | central | Admin plane |
 | Destination ACL | central (+ projection per session) | Source of truth centrally; fast local lookup per session |
 | Session registry (ids, status) | central | Host orchestrates lifecycle |
@@ -100,6 +100,7 @@ These rules are enforced by convention in `src/session-manager.ts` and `containe
 | `messaging_groups` | central | `src/db/messaging-groups.ts`, channel setup | router, delivery, session resolver |
 | `messaging_group_agents` | central | `src/db/messaging-groups.ts` | router |
 | `users` | central | `src/modules/permissions/db/users.ts`, auth flows | permission checks |
+| `user_identities` | central | `src/db/user-identities.ts`、可信 Channel/SSO 流程 | Sender Resolver、Web Auth |
 | `user_roles` | central | `src/modules/permissions/db/user-roles.ts` | `src/modules/permissions/access.ts` + `operability.ts`, all permission gates |
 | `organizations` | central | `src/modules/permissions/db/organizations.ts`, `scripts/org.ts` | access gate (ADR-0052 multi-tenant) |
 | `organization_members` | central | `src/modules/permissions/db/organizations.ts` | access gate org prerequisite (reachability, not privilege) |

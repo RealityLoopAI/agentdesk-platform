@@ -318,6 +318,12 @@ describe('③ webhook handler dispatch (real handleWebhook end-to-end)', () => {
     const content = got.message.content as Record<string, unknown>;
     expect(content.text).toBe('hi there');
     expect(content.senderId).toBe('ou_alice');
+    expect(got.message.senderIdentity).toEqual({
+      provider: 'feishu',
+      providerScope: 'cli_app',
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
     expect(got.message.isGroup).toBe(true);
     expect(got.message.id).toBe('om_a');
   });

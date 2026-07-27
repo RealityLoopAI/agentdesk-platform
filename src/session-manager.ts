@@ -333,7 +333,9 @@ export function writeSessionMessage(
      * For agent-to-agent inbound: the namespaced user id of the employee
      * who ultimately triggered the chain. Propagates identity into worker
      * sessions so downstream ERP calls don't fall back to agent-asserted.
-     * NULL on channel-side inbound (senderId already embedded in content).
+     * On channel-side inbound, the Host stamps the canonical user resolved by
+     * the permissions module (ADR-0054). Legacy rows may still be NULL and fall
+     * back to senderId embedded in content.
      */
     originUserId?: string | null;
     /**

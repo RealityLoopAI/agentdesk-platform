@@ -99,8 +99,10 @@ Two concrete mechanisms enforce this:
    "most recent message" under the tool call.
 
 2. **origin_user_id traversal (host side).** `messages_in` has an
-   `origin_user_id` column. Channel-side inbound leaves it NULL (senderId
-   in the content payload is authoritative). The agent-to-agent module
+   `origin_user_id` column. For new channel-side inbound, the Host writes the
+   canonical user resolved by the Sender Resolver; legacy rows may leave it
+   NULL and fall back to the namespaced `senderId` in content. The
+   agent-to-agent module
    (`src/modules/agent-to-agent/agent-route.ts`) copies it from the source
    session when writing the target row, so worker sessions see the real
    employee id even N hops down the delegation chain.
@@ -122,6 +124,14 @@ writes when the source is agent-asserted).
    the container never supplies it (no forgeable emit path). Routing stays bound
    to `platform_id` / `source_session_id` / `root_session_id`; identity stays the
    host-validated `origin_user_id`. NULL on pre-migration / channel-only rows.
+
+Before `origin_user_id` is stamped, provider identities are normalized through
+`user_identities` (ADR-0054). A native adapter may attach
+`InboundEvent.senderIdentity` as Host-envelope metadata containing
+`provider/providerScope/identifierType/externalSubject`. It is intentionally
+outside `message.content`: the Agent sees content, but only trusted adapter or
+authentication code may establish identity metadata. The unique mapping lets
+Feishu chat and Feishu SSO resolve to the same opaque `users.id`.
 
 ## Channel Adapters
 
@@ -794,12 +804,26 @@ CREATE TABLE messaging_groups (
   UNIQUE(channel_type, platform_id)
 );
 
--- Users (messaging platform identities, namespaced "<channel_type>:<handle>")
+-- Canonical users. Legacy ids may remain namespaced channel handles.
 CREATE TABLE users (
   id           TEXT PRIMARY KEY,   -- e.g. 'telegram:123456', 'discord:1470...'
   kind         TEXT NOT NULL,      -- mirrors the channel_type prefix
   display_name TEXT,
   created_at   TEXT NOT NULL
+);
+
+-- Provider-verified external identities (ADR-0054); no tokens/credentials.
+CREATE TABLE user_identities (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  provider TEXT NOT NULL,
+  provider_scope TEXT NOT NULL,
+  identifier_type TEXT NOT NULL,
+  external_subject TEXT NOT NULL,
+  verified_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  UNIQUE(provider, provider_scope, identifier_type, external_subject)
 );
 
 -- Roles (ADR-0051 added operator/viewer; ADR-0052 added org-admin + the org scope).
