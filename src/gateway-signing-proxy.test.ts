@@ -115,6 +115,25 @@ describe('processSigningProxyRequest (ADR-0034 security core)', () => {
     );
   });
 
+  it('derives Bitable logical-resource audit metadata from the canonical request body', async () => {
+    const cap = makeDeps();
+    const raw = JSON.stringify({
+      agent: { agentGroupId: 'ag1' },
+      requesterSource: 'session',
+      requester: { userId: 'u1' },
+      operation: 'feishu.bitable.record.list',
+      input: { resource: 'sales-orders' },
+    });
+    const result = await processSigningProxyRequest(
+      { method: 'POST', pathname: '/execute', token: 'good', sourceIp: 'x', rawBody: raw },
+      cap.deps,
+    );
+    expect(result.httpStatus).toBe(200);
+    expect(cap.intents[0]!.logicalResource).toBe('sales-orders');
+    expect(JSON.stringify(cap.intents[0])).not.toContain('app_token');
+    expect(JSON.stringify(cap.intents[0])).not.toContain('table_id');
+  });
+
   it('refuses to sign when the body claims a different group (409, audited, never forwarded)', async () => {
     const cap = makeDeps();
     const r = await processSigningProxyRequest(

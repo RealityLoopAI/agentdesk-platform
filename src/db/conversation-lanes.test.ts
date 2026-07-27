@@ -180,6 +180,22 @@ describe('conversation lane ownership and bindings', () => {
         deliveryMode: 'source-reply',
       }),
     ).not.toThrow();
+
+    const auditRows = getDb()
+      .prepare(
+        `SELECT event_type, details FROM enterprise_audit
+         WHERE event_type LIKE 'conversation_lane_%' OR event_type LIKE 'conversation_binding_%'
+         ORDER BY rowid`,
+      )
+      .all() as Array<{ event_type: string; details: string }>;
+    expect(auditRows.map((row) => row.event_type)).toEqual([
+      'conversation_lane_created',
+      'conversation_lane_created',
+      'conversation_binding_created',
+      'conversation_binding_revoked',
+      'conversation_binding_created',
+    ]);
+    expect(JSON.stringify(auditRows)).not.toContain('web:alice');
   });
 
   it('links one exact verified legacy Feishu user session deterministically without merging users', () => {

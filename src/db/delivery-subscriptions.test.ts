@@ -93,15 +93,19 @@ describe('Feishu DM delivery subscriptions', () => {
     ).toMatchObject({ enabled: true, available: true, subscriptionId: enabled.id });
 
     expect(disableFeishuDeliverySubscription({ userId: 'alice', laneId: lane.id })).toBe(true);
-    expect(
-      getDb()
-        .prepare(
-          `SELECT event_type FROM enterprise_audit
+    const subscriptionAudit = getDb()
+      .prepare(
+        `SELECT event_type, details FROM enterprise_audit
            WHERE event_type LIKE 'delivery_subscription_%'
            ORDER BY occurred_at, rowid`,
-        )
-        .all(),
-    ).toEqual([{ event_type: 'delivery_subscription_enabled' }, { event_type: 'delivery_subscription_disabled' }]);
+      )
+      .all() as Array<{ event_type: string; details: string }>;
+    expect(subscriptionAudit.map(({ event_type }) => ({ event_type }))).toEqual([
+      { event_type: 'delivery_subscription_enabled' },
+      { event_type: 'delivery_subscription_disabled' },
+    ]);
+    expect(JSON.stringify(subscriptionAudit)).not.toContain('ou_alice');
+    expect(JSON.stringify(subscriptionAudit)).not.toContain('feishu:p2p:');
   });
 
   it('rejects cross-user lanes and never accepts a browser-supplied destination', () => {

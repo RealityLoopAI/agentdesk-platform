@@ -67,7 +67,8 @@ describe('gateway_audit delivery action', () => {
       {
         action: 'gateway_audit',
         path: '/execute',
-        operation: 'finance.invoice.approve',
+        operation: 'feishu.bitable.record.update',
+        logicalResource: 'sales-orders',
         userId: 'feishu:ou_1',
         requesterSource: 'session',
         status: 'ok',
@@ -88,7 +89,8 @@ describe('gateway_audit delivery action', () => {
       agent_group_id: 'ag-1',
       user_id: 'feishu:ou_1',
       path: '/execute',
-      operation: 'finance.invoice.approve',
+      operation: 'feishu.bitable.record.update',
+      logical_resource: 'sales-orders',
       requester_source: 'session',
       status: 'ok',
       http_status: 200,
@@ -146,5 +148,34 @@ describe('gateway_audit delivery action', () => {
       {} as never,
     );
     expect(queryGatewayAudit()[0]!.status).toBe('error');
+  });
+
+  it('drops logical resource metadata for non-Bitable operations or malformed aliases', async () => {
+    const handler = captured.get('gateway_audit')!;
+    await handler(
+      {
+        action: 'gateway_audit',
+        path: '/execute',
+        operation: 'sales.order.read',
+        logicalResource: 'orders',
+        requesterSource: 'session',
+        status: 'ok',
+      },
+      session(),
+      {} as never,
+    );
+    await handler(
+      {
+        action: 'gateway_audit',
+        path: '/execute',
+        operation: 'feishu.bitable.record.list',
+        logicalResource: '../raw-token',
+        requesterSource: 'session',
+        status: 'ok',
+      },
+      session(),
+      {} as never,
+    );
+    expect(queryGatewayAudit().map((row) => row.logical_resource)).toEqual([null, null]);
   });
 });

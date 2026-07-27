@@ -86,8 +86,8 @@
 
 ## 8. 审计、可观测性与诚实能力声明
 
-- [ ] 8.1 为身份关联、Web Session、Lane/Binding 和 Delivery Subscription 增加不含凭证的 Enterprise Audit Event
-- [ ] 8.2 扩展 Gateway Audit，使多维表格调用记录规范用户、Operation、逻辑资源、结果、耗时、Input Hash 和写幂等键
+- [x] 8.1 为身份关联、Web Session、Lane/Binding 和 Delivery Subscription 增加不含凭证的 Enterprise Audit Event
+- [x] 8.2 扩展 Gateway Audit，使多维表格调用记录规范用户、Operation、逻辑资源、结果、耗时、Input Hash 和写幂等键
 - [ ] 8.3 增加登录、活动 Web Session、API 拒绝、SSE 重放、Binding 失败、多维表格结果/限流和回环抑制指标
 - [ ] 8.4 更新 Prometheus Alert、Grafana Dashboard、Runbook 和 Observability Coverage Gate
 - [ ] 8.5 修正 `examples/lab-frontdesk`，删除“飞书 Channel 直接维护多维表格”的不真实声明

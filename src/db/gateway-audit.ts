@@ -6,6 +6,7 @@ export interface GatewayAuditEntry {
   userId?: string | null;
   path: string;
   operation?: string | null;
+  logicalResource?: string | null;
   requesterSource: string;
   status: 'ok' | 'error';
   httpStatus?: number | null;
@@ -19,9 +20,9 @@ export function recordGatewayAudit(entry: GatewayAuditEntry, now: Date = new Dat
   getDb()
     .prepare(
       `INSERT INTO gateway_audit
-         (occurred_at, session_id, agent_group_id, user_id, path, operation, requester_source,
+         (occurred_at, session_id, agent_group_id, user_id, path, operation, logical_resource, requester_source,
           status, http_status, duration_ms, idempotency_key, input_hash, error_msg)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       now.toISOString(),
@@ -30,6 +31,7 @@ export function recordGatewayAudit(entry: GatewayAuditEntry, now: Date = new Dat
       entry.userId ?? null,
       entry.path,
       entry.operation ?? null,
+      entry.logicalResource ?? null,
       entry.requesterSource,
       entry.status,
       entry.httpStatus ?? null,
@@ -65,6 +67,7 @@ export interface GatewayProxyIntent {
   tokenJti?: string | null;
   path: string;
   operation?: string | null;
+  logicalResource?: string | null;
   userId?: string | null;
   requesterSource: string;
   requesterSourceCoerced?: boolean;
@@ -78,10 +81,10 @@ export function recordGatewayProxyIntent(intent: GatewayProxyIntent, now: Date =
   getDb()
     .prepare(
       `INSERT INTO gateway_audit
-         (occurred_at, session_id, agent_group_id, user_id, path, operation, requester_source,
+         (occurred_at, session_id, agent_group_id, user_id, path, operation, logical_resource, requester_source,
           status, http_status, duration_ms, idempotency_key, input_hash, error_msg,
           signed_as_group, token_jti, proxy_request_id, identity_mismatch, requester_source_coerced, audit_phase)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'intent')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'intent')`,
     )
     .run(
       now.toISOString(),
@@ -90,6 +93,7 @@ export function recordGatewayProxyIntent(intent: GatewayProxyIntent, now: Date =
       intent.userId ?? null,
       intent.path,
       intent.operation ?? null,
+      intent.logicalResource ?? null,
       intent.requesterSource,
       intent.idempotencyKey ?? null,
       intent.inputHash ?? null,
@@ -161,6 +165,7 @@ export interface GatewayAuditQueryOptions {
   limit?: number;
   userId?: string;
   operation?: string;
+  logicalResource?: string;
   since?: string;
   /**
    * Include non-final proxy rows (audit_phase='intent', status='pending').
@@ -188,6 +193,10 @@ export function queryGatewayAudit(options: GatewayAuditQueryOptions = {}): Array
   if (options.operation) {
     where.push('operation = ?');
     params.push(options.operation);
+  }
+  if (options.logicalResource) {
+    where.push('logical_resource = ?');
+    params.push(options.logicalResource);
   }
   if (options.since) {
     where.push('occurred_at >= ?');

@@ -13,6 +13,7 @@ import type Database from 'better-sqlite3';
 
 import { registerDeliveryAction } from '../../delivery.js';
 import { recordGatewayAudit, type GatewayAuditEntry } from '../../db/gateway-audit.js';
+import { validateGatewayLogicalResourceForOperation } from '../../gateway-audit-resource.js';
 import { log } from '../../log.js';
 import { resolveTrustedActor } from '../../trusted-actor.js';
 import type { Session } from '../../types.js';
@@ -47,6 +48,7 @@ async function handleGatewayAudit(
     return;
   }
 
+  const operation = readString(content, 'operation') ?? null;
   const entry: GatewayAuditEntry = {
     sessionId: session.id,
     agentGroupId: session.agent_group_id,
@@ -56,7 +58,8 @@ async function handleGatewayAudit(
     // resolveTrustedActor + ADR-0046.
     userId: resolveTrustedActor('gateway_audit', session, readString(content, 'userId') ?? null, inDb),
     path,
-    operation: readString(content, 'operation') ?? null,
+    operation,
+    logicalResource: validateGatewayLogicalResourceForOperation(operation, content.logicalResource),
     requesterSource,
     status: toStatus(content.status),
     httpStatus: readNumber(content, 'httpStatus') ?? null,

@@ -64,6 +64,10 @@ describe('user identities', () => {
     });
 
     expect(getUserIdentitiesForUser('feishu:ou_alice')).toHaveLength(4);
+    const audit = JSON.stringify(
+      getDb().prepare("SELECT event_type, details FROM enterprise_audit WHERE event_type = 'user_identity_linked'").all(),
+    );
+    expect(audit).not.toContain('externalSubject');
   });
 
   it('is idempotent for the same user, updates last seen and rejects cross-user conflicts', () => {

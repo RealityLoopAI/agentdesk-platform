@@ -26,7 +26,8 @@ describe('gateway_audit', () => {
       agentGroupId: 'ag-frontdesk',
       userId: 'feishu:ou_1',
       path: '/execute',
-      operation: 'sales.order.create',
+      operation: 'feishu.bitable.record.create',
+      logicalResource: 'sales-orders',
       requesterSource: 'session',
       status: 'ok',
       httpStatus: 200,
@@ -42,7 +43,8 @@ describe('gateway_audit', () => {
       agent_group_id: 'ag-frontdesk',
       user_id: 'feishu:ou_1',
       path: '/execute',
-      operation: 'sales.order.create',
+      operation: 'feishu.bitable.record.create',
+      logical_resource: 'sales-orders',
       requester_source: 'session',
       status: 'ok',
       http_status: 200,
@@ -53,14 +55,36 @@ describe('gateway_audit', () => {
     });
   });
 
-  it('filters by userId and operation', () => {
-    recordGatewayAudit({ path: '/execute', operation: 'a', requesterSource: 'session', status: 'ok', userId: 'u1' });
-    recordGatewayAudit({ path: '/execute', operation: 'b', requesterSource: 'session', status: 'ok', userId: 'u1' });
-    recordGatewayAudit({ path: '/execute', operation: 'a', requesterSource: 'session', status: 'ok', userId: 'u2' });
+  it('filters by userId, operation and logical resource', () => {
+    recordGatewayAudit({
+      path: '/execute',
+      operation: 'a',
+      logicalResource: 'orders',
+      requesterSource: 'session',
+      status: 'ok',
+      userId: 'u1',
+    });
+    recordGatewayAudit({
+      path: '/execute',
+      operation: 'b',
+      logicalResource: 'customers',
+      requesterSource: 'session',
+      status: 'ok',
+      userId: 'u1',
+    });
+    recordGatewayAudit({
+      path: '/execute',
+      operation: 'a',
+      logicalResource: 'orders',
+      requesterSource: 'session',
+      status: 'ok',
+      userId: 'u2',
+    });
 
     expect(queryGatewayAudit({ userId: 'u1' })).toHaveLength(2);
     expect(queryGatewayAudit({ operation: 'a' })).toHaveLength(2);
     expect(queryGatewayAudit({ userId: 'u1', operation: 'a' })).toHaveLength(1);
+    expect(queryGatewayAudit({ logicalResource: 'orders' })).toHaveLength(2);
   });
 
   it('respects the limit parameter and returns most recent first', () => {
@@ -102,6 +126,7 @@ describe('gateway_audit proxy two-phase (ADR-0034)', () => {
       tokenJti: 'j1',
       path: '/execute',
       operation: 'op',
+      logicalResource: 'orders',
       userId: 'u1',
       requesterSource: 'session',
     });
@@ -118,6 +143,7 @@ describe('gateway_audit proxy two-phase (ADR-0034)', () => {
     const rows = queryGatewayAudit();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: 'ok', http_status: 200, audit_phase: 'final', signed_as_group: 'ag1' });
+    expect(rows[0]!.logical_resource).toBe('orders');
   });
 
   it('container-driven rows (audit_phase NULL) always appear in the default query', () => {

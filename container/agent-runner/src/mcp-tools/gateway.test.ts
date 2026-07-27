@@ -615,8 +615,8 @@ describe('erp gateway mcp tools', () => {
     // And an /execute call to make sure cross-path collisions don't happen
     // either.
     await handleGatewayExecute(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
-      operation: 'sales.order.create',
-      input: { customerId: 'C-1' },
+      operation: 'feishu.bitable.record.create',
+      input: { resource: 'sales-orders', fields: { customerId: 'C-1' } },
     });
 
     const rows = getOutboundDb()
@@ -640,6 +640,7 @@ describe('erp gateway mcp tools', () => {
     expect(new Set(hashes).size).toBe(3);
     expect(auditPayloads[0]!.path).toBe('/memory/get');
     expect(auditPayloads[2]!.path).toBe('/execute');
+    expect(auditPayloads[2]!.logicalResource).toBe('sales-orders');
   });
 
   it('honors signingHeaders overrides', async () => {

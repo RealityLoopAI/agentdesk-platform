@@ -276,6 +276,9 @@ Recorded fields:
 - `occurred_at`, `session_id`, `agent_group_id`, `user_id`
 - `path` — `/describe` / `/authorize` / `/execute` / `/memory/get` / `/memory/upsert` / `/memory/search`
 - `operation` — for authorize/execute calls
+- `logical_resource` — 仅对 `feishu.bitable.*` 保存经过格式校验的运营者逻辑资源别名；不会保存
+  `app_token`、`table_id` 或其映射。`/bulk_execute` 只有在所有 Operation 都指向同一别名时才记录，
+  混合资源保持 `NULL`
 - `requester_source` — same `'session'` / `'agent-asserted'` value the
   gateway saw
 - `status` — `ok` / `error`
@@ -293,16 +296,16 @@ Typical queries:
 
 ```bash
 pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT occurred_at, user_id, path, operation, status, http_status
+  "SELECT occurred_at, user_id, path, operation, logical_resource, status, http_status
      FROM gateway_audit
      WHERE occurred_at > datetime('now', '-1 hour')
      ORDER BY id DESC LIMIT 50"
 ```
 
-The audit write is best-effort (container → host → DB); if the DB write
-itself fails, the row is dropped. For environments where the gateway side
-needs to reconcile the full trail even when that happens, run audit on
-the gateway as well and match by `idempotencyKey` / returned audit id.
+容器经 Outbound Message 上报的审计行仍是 Best-effort。启用 Host Signing Proxy 时，Proxy 会从其实际
+签名的规范化请求体重新提取 `logical_resource`，并在转发前写入两阶段权威审计 Intent；该写入失败
+会拒绝签名和转发。Gateway 仍须保留自己的后端审计，并可通过写幂等键、Input Hash 或返回的
+`auditId` 与 Host 侧记录核对。
 
 ### Execution attestation (user-visible trust signal)
 

@@ -37,6 +37,7 @@ import {
   reconcileOrphanedProxyAudit,
   type GatewayProxyOutcome,
 } from './db/gateway-audit.js';
+import { extractGatewayLogicalResource } from './gateway-audit-resource.js';
 import {
   mintProxyToken,
   verifyProxyToken,
@@ -295,6 +296,7 @@ export async function processSigningProxyRequest(
   // not on this field. (Red-teamed 2026-06: confirmed in-scope of accepted R5.)
   const userId = typeof requester?.userId === 'string' ? requester.userId : null;
   const operation = typeof parsed.operation === 'string' ? parsed.operation : null;
+  const logicalResource = extractGatewayLogicalResource(parsed);
   const idempotencyKey = typeof parsed.idempotencyKey === 'string' ? parsed.idempotencyKey : null;
   const proxyRequestId = crypto.randomUUID();
   const inputHash = sha256(canonicalBody);
@@ -311,6 +313,7 @@ export async function processSigningProxyRequest(
       tokenJti: record.jti,
       path: input.pathname,
       operation,
+      logicalResource,
       userId,
       requesterSource,
       requesterSourceCoerced,
@@ -338,6 +341,7 @@ export async function processSigningProxyRequest(
       tokenJti: record.jti,
       path: input.pathname,
       operation,
+      logicalResource,
       userId,
       requesterSource,
       requesterSourceCoerced,
@@ -380,6 +384,7 @@ export async function processSigningProxyRequest(
       tokenJti: record.jti,
       path: input.pathname,
       operation,
+      logicalResource,
       userId,
       requesterSource,
       requesterSourceCoerced,

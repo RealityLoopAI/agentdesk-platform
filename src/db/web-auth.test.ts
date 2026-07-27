@@ -113,6 +113,19 @@ describe('web auth sessions', () => {
     createWebAuthSession({ userId: 'u-1', secret: SECRET, policy: POLICY });
     createWebAuthSession({ userId: 'u-1', secret: SECRET, policy: POLICY });
     expect(revokeAllWebAuthSessionsForUser({ userId: 'u-1', actor: 'operator', reason: 'offboarding' })).toBe(2);
+
+    const audit = JSON.stringify(
+      getDb()
+        .prepare("SELECT event_type, details FROM enterprise_audit WHERE event_type LIKE 'web_session_%'")
+        .all(),
+    );
+    expect(audit).toContain('web_session_created');
+    expect(audit).toContain('web_session_logout');
+    expect(audit).toContain('web_sessions_revoked');
+    expect(audit).not.toContain(first.token);
+    expect(audit).not.toContain(first.csrfToken);
+    expect(audit).not.toContain(next.token);
+    expect(audit).not.toContain(next.csrfToken);
   });
 });
 

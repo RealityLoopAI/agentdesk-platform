@@ -519,6 +519,7 @@ function emitAuditMessage(params: {
       action: 'gateway_audit',
       path: params.path,
       operation: typeof body.operation === 'string' ? body.operation : null,
+      logicalResource: extractLogicalResource(body),
       userId: requester?.userId ?? null,
       requesterSource: typeof body.requesterSource === 'string' ? body.requesterSource : 'agent-asserted',
       status: params.status,
@@ -537,6 +538,26 @@ function emitAuditMessage(params: {
   } catch (err) {
     console.error(`[mcp-tools] warn: gateway_audit emit failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+const LOGICAL_RESOURCE_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function extractLogicalResourceFromOperation(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const operation = value as { operation?: unknown; input?: unknown };
+  if (typeof operation.operation !== 'string' || !operation.operation.startsWith('feishu.bitable.')) return null;
+  if (typeof operation.input !== 'object' || operation.input === null || Array.isArray(operation.input)) return null;
+  const resource = (operation.input as { resource?: unknown }).resource;
+  return typeof resource === 'string' && LOGICAL_RESOURCE_ALIAS.test(resource) ? resource : null;
+}
+
+function extractLogicalResource(body: Record<string, unknown>): string | null {
+  const direct = extractLogicalResourceFromOperation(body);
+  if (direct) return direct;
+  if (!Array.isArray(body.operations) || body.operations.length === 0) return null;
+  const resources = body.operations.map(extractLogicalResourceFromOperation);
+  if (resources.some((resource) => resource === null)) return null;
+  return new Set(resources).size === 1 ? resources[0]! : null;
 }
 
 interface GatewayCallError {
