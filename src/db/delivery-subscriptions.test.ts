@@ -8,11 +8,13 @@ import {
   enableFeishuDeliverySubscription,
   getFeishuDeliverySubscriptionState,
   reserveCrossChannelDelivery,
+  suppressCrossChannelDelivery,
   validateCrossChannelDeliveryTarget,
 } from './delivery-subscriptions.js';
 import { runMigrations } from './migrations/index.js';
 import { createSession } from './sessions.js';
 import { createUserIdentity } from './user-identities.js';
+import { crossChannelLoopSuppressedTotal } from '../metrics.js';
 import type { Session } from '../types.js';
 
 const NOW = '2026-07-27T00:00:00.000Z';
@@ -127,7 +129,7 @@ describe('Feishu DM delivery subscriptions', () => {
     expect(getDb().prepare('SELECT COUNT(*) AS count FROM delivery_subscriptions').get()).toEqual({ count: 0 });
   });
 
-  it('assigns stable origin/delivery ids and invalidates pending sends after revocation', () => {
+  it('assigns stable origin/delivery ids and invalidates pending sends after revocation', async () => {
     const lane = createConversationLane({ id: 'lane-alice', agentGroupId: 'ag-1', ownerUserId: 'alice' });
     createUserIdentity({
       userId: 'alice',
@@ -160,6 +162,16 @@ describe('Feishu DM delivery subscriptions', () => {
     expect(first.id).toMatch(/^xcd-[A-Za-z0-9_-]{43}$/);
     expect(first.origin_id).toMatch(/^xco-[A-Za-z0-9_-]{43}$/);
     expect(validateCrossChannelDeliveryTarget(first)?.id).toBe(subscription.id);
+    const metricBefore =
+      (await crossChannelLoopSuppressedTotal.get()).values.find(
+        (value) => value.labels.reason === 'source_not_eligible',
+      )?.value ?? 0;
+    expect(suppressCrossChannelDelivery({ id: first.id, reason: 'source_not_eligible' })).toBe(true);
+    expect(
+      (await crossChannelLoopSuppressedTotal.get()).values.find(
+        (value) => value.labels.reason === 'source_not_eligible',
+      )?.value,
+    ).toBe(metricBefore + 1);
 
     disableFeishuDeliverySubscription({ userId: 'alice', laneId: lane.id });
     expect(validateCrossChannelDeliveryTarget(first)).toBeUndefined();

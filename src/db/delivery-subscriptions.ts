@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { getDb } from './connection.js';
 import { getConversationLane } from './conversation-lanes.js';
 import { recordEnterpriseAudit } from './enterprise-audit.js';
+import { crossChannelLoopSuppressedTotal } from '../metrics.js';
 import { getUserIdentityById } from './user-identities.js';
 
 const FEISHU_OPEN_ID = /^ou_[A-Za-z0-9_-]+$/;
@@ -350,6 +351,19 @@ export function suppressCrossChannelDelivery(args: {
         reason: args.reason,
       },
     });
+    const metricReason = new Set([
+      'source_message_unavailable',
+      'source_route_untrusted',
+      'source_not_eligible',
+      'subscription_unavailable',
+    ]).has(args.reason)
+      ? args.reason
+      : 'other';
+    try {
+      crossChannelLoopSuppressedTotal.labels(metricReason).inc();
+    } catch {
+      // Metrics are best-effort and never affect persisted suppression.
+    }
   }
   return changed > 0;
 }

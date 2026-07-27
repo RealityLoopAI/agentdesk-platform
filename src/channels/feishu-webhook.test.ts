@@ -48,6 +48,7 @@ vi.mock('../webhook-server.js', () => ({
 
 // In-memory central DB so markInboundSeen (real dedup) has a table to write.
 import { initTestDb, closeDb, getDb, runMigrations } from '../db/index.js';
+import { crossChannelLoopSuppressedTotal } from '../metrics.js';
 
 const ENCRYPT_KEY = 'unit_test_encrypt_key';
 const VERIFICATION_TOKEN = 'verif_token_xyz';
@@ -367,6 +368,9 @@ describe('③ webhook handler dispatch (real handleWebhook end-to-end)', () => {
   });
 
   it('suppresses app-authored messages before ingress and records a loop-prevention audit', async () => {
+    const metricBefore =
+      (await crossChannelLoopSuppressedTotal.get()).values.find((value) => value.labels.reason === 'sender_type_app')
+        ?.value ?? 0;
     const { setup, handler } = await setupAdapter();
     const inner = messageEvent({
       messageId: 'om_bot_echo',
@@ -399,6 +403,10 @@ describe('③ webhook handler dispatch (real handleWebhook end-to-end)', () => {
       providerScope: 'cli_app',
       reason: 'sender_type_app',
     });
+    expect(
+      (await crossChannelLoopSuppressedTotal.get()).values.find((value) => value.labels.reason === 'sender_type_app')
+        ?.value,
+    ).toBe(metricBefore + 1);
   });
 
   it('rejects an event whose verification token does not match with 403', async () => {

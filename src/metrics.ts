@@ -438,6 +438,66 @@ export const gatewaySigningProxyTotal = new client.Counter({
   registers: [registry],
 });
 
+export const webLoginTotal = new client.Counter({
+  name: `${METRIC_PREFIX}_web_login_total`,
+  help: 'Feishu Web SSO lifecycle outcomes; labels are bounded and never contain provider subjects or credentials',
+  // `outcome`: started | succeeded | rejected | identity_conflict
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+});
+
+export const webActiveSessions = new client.Gauge({
+  name: `${METRIC_PREFIX}_web_active_sessions`,
+  help: 'Non-revoked Web sessions whose idle and absolute expiry are both still in the future',
+  registers: [registry],
+});
+
+export const webApiRejectedTotal = new client.Counter({
+  name: `${METRIC_PREFIX}_web_api_rejected_total`,
+  help: 'Web API requests rejected at the authenticated HTTP boundary by bounded reason',
+  // `reason`: authentication_required | forbidden | rate_limited |
+  // invalid_request | not_found | internal_error
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});
+
+export const webSseConnections = new client.Gauge({
+  name: `${METRIC_PREFIX}_web_sse_connections`,
+  help: 'Currently open authenticated Web SSE connections across all users',
+  registers: [registry],
+});
+
+export const webSseEventsTotal = new client.Counter({
+  name: `${METRIC_PREFIX}_web_sse_events_total`,
+  help: 'Web SSE events successfully written by delivery source',
+  // `delivery`: replay | live
+  labelNames: ['delivery'] as const,
+  registers: [registry],
+});
+
+export const conversationBindingFailuresTotal = new client.Counter({
+  name: `${METRIC_PREFIX}_conversation_binding_failures_total`,
+  help: 'Conversation Binding creation failures by bounded trust/integrity reason',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});
+
+export const feishuBitableOperationsTotal = new client.Counter({
+  name: `${METRIC_PREFIX}_feishu_bitable_operations_total`,
+  help: 'Known Feishu Bitable Gateway operations by terminal result, derived from credential-free audit messages',
+  // `operation`: one of the closed feishu.bitable.* catalog.
+  // `outcome`: ok | error | rate_limited.
+  labelNames: ['operation', 'outcome'] as const,
+  registers: [registry],
+});
+
+export const crossChannelLoopSuppressedTotal = new client.Counter({
+  name: `${METRIC_PREFIX}_cross_channel_loop_suppressed_total`,
+  help: 'Cross-channel message callbacks or mirror deliveries suppressed before they can form a routing loop',
+  labelNames: ['reason'] as const,
+  registers: [registry],
+});
+
 export function renderMetrics(): Promise<string> {
   return registry.metrics();
 }

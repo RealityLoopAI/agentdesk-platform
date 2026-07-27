@@ -1,5 +1,22 @@
 const LOGICAL_RESOURCE_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const FEISHU_BITABLE_PREFIX = 'feishu.bitable.';
+export const FEISHU_BITABLE_AUDIT_OPERATIONS = [
+  'feishu.bitable.app.get',
+  'feishu.bitable.table.list',
+  'feishu.bitable.field.list',
+  'feishu.bitable.record.list',
+  'feishu.bitable.record.get',
+  'feishu.bitable.record.create',
+  'feishu.bitable.record.update',
+  'feishu.bitable.record.delete',
+  'feishu.bitable.record.batch_create',
+  'feishu.bitable.record.batch_update',
+  'feishu.bitable.record.batch_delete',
+] as const;
+const FEISHU_BITABLE_OPERATION_SET = new Set<string>(FEISHU_BITABLE_AUDIT_OPERATIONS);
+
+export function normalizeFeishuBitableAuditOperation(value: unknown): string | null {
+  return typeof value === 'string' && FEISHU_BITABLE_OPERATION_SET.has(value) ? value : null;
+}
 
 export function validateGatewayLogicalResource(value: unknown): string | null {
   return typeof value === 'string' && LOGICAL_RESOURCE_ALIAS.test(value) ? value : null;
@@ -8,7 +25,7 @@ export function validateGatewayLogicalResource(value: unknown): string | null {
 function extractFromOperation(value: unknown): string | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const operation = value as { operation?: unknown; input?: unknown };
-  if (typeof operation.operation !== 'string' || !operation.operation.startsWith(FEISHU_BITABLE_PREFIX)) return null;
+  if (!normalizeFeishuBitableAuditOperation(operation.operation)) return null;
   if (typeof operation.input !== 'object' || operation.input === null || Array.isArray(operation.input)) return null;
   return validateGatewayLogicalResource((operation.input as { resource?: unknown }).resource);
 }
@@ -31,6 +48,6 @@ export function extractGatewayLogicalResource(body: Record<string, unknown>): st
 }
 
 export function validateGatewayLogicalResourceForOperation(operation: unknown, value: unknown): string | null {
-  if (typeof operation !== 'string' || !operation.startsWith(FEISHU_BITABLE_PREFIX)) return null;
+  if (!normalizeFeishuBitableAuditOperation(operation)) return null;
   return validateGatewayLogicalResource(value);
 }

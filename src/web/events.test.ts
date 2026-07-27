@@ -7,6 +7,7 @@ import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { appendWebEvent, encodeWebEventCursor } from '../db/web-events.js';
 import { createWebAuthSession, revokeWebAuthSessionByToken } from '../db/web-auth.js';
 import { runMigrations } from '../db/migrations/index.js';
+import { webSseConnections, webSseEventsTotal } from '../metrics.js';
 import type { WebConfig } from './config.js';
 import { createWebEventStreamManager, WebEventStreamError } from './events.js';
 
@@ -117,7 +118,12 @@ function session() {
 }
 
 describe('Web SSE event stream', () => {
-  it('replays after the opaque cursor and filters lanes through the current Host access gate', () => {
+  it('replays after the opaque cursor and filters lanes through the current Host access gate', async () => {
+    const replayBefore =
+      (await webSseEventsTotal.get()).values.find((value) => value.labels.delivery === 'replay')?.value ?? 0;
+    const liveBefore =
+      (await webSseEventsTotal.get()).values.find((value) => value.labels.delivery === 'live')?.value ?? 0;
+    const connectionsBefore = (await webSseConnections.get()).values[0]?.value ?? 0;
     const auth = session();
     const first = appendWebEvent({
       userId: 'alice',
@@ -166,6 +172,13 @@ describe('Web SSE event stream', () => {
       resourceId: 'message-live',
     });
     expect(response.chunks.join('')).toContain('message-live');
+    expect((await webSseEventsTotal.get()).values.find((value) => value.labels.delivery === 'replay')?.value).toBe(
+      replayBefore + 1,
+    );
+    expect((await webSseEventsTotal.get()).values.find((value) => value.labels.delivery === 'live')?.value).toBe(
+      liveBefore + 1,
+    );
+    expect((await webSseConnections.get()).values[0]?.value).toBe(connectionsBefore + 1);
 
     getDb()
       .prepare('DELETE FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
@@ -178,6 +191,7 @@ describe('Web SSE event stream', () => {
     });
     expect(response.chunks.join('')).not.toContain('message-after-revoke');
     manager.closeAll();
+    expect((await webSseConnections.get()).values[0]?.value).toBe(connectionsBefore);
   });
 
   it('rejects malformed cursors and enforces a per-user connection ceiling', () => {

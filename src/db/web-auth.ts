@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import type { WebAuthSession, WebAuthTransaction } from '../types.js';
+import { webActiveSessions } from '../metrics.js';
 import { getDb } from './connection.js';
 import { recordEnterpriseAudit } from './enterprise-audit.js';
 
@@ -63,6 +64,29 @@ function assertPolicy(policy: WebAuthSessionPolicy): void {
   }
 }
 
+export function countActiveWebAuthSessions(now: Date = new Date()): number {
+  const timestamp = now.toISOString();
+  return (
+    getDb()
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM web_auth_sessions
+         WHERE revoked_at IS NULL
+           AND idle_expires_at > ?
+           AND absolute_expires_at > ?`,
+      )
+      .get(timestamp, timestamp) as { count: number }
+  ).count;
+}
+
+export function refreshActiveWebSessionMetric(now: Date = new Date()): void {
+  try {
+    webActiveSessions.set(countActiveWebAuthSessions(now));
+  } catch {
+    // Metrics are read-only observability and must never affect auth/session state.
+  }
+}
+
 export function createWebAuthSession(args: {
   userId: string;
   secret: string;
@@ -108,14 +132,13 @@ export function createWebAuthSession(args: {
       },
     });
   })();
+  refreshActiveWebSessionMetric(now);
 
   return { token, csrfToken, session };
 }
 
 export function getWebAuthSessionByHash(idHash: string): WebAuthSession | undefined {
-  return getDb().prepare('SELECT * FROM web_auth_sessions WHERE id_hash = ?').get(idHash) as
-    | WebAuthSession
-    | undefined;
+  return getDb().prepare('SELECT * FROM web_auth_sessions WHERE id_hash = ?').get(idHash) as WebAuthSession | undefined;
 }
 
 export function authenticateWebSession(args: {
@@ -145,6 +168,7 @@ export function authenticateWebSession(args: {
         details: { userId: session.user_id, sessionRef: idHash.slice(0, 16) },
       });
     }
+    refreshActiveWebSessionMetric(now);
     return undefined;
   }
 
@@ -204,6 +228,7 @@ export function revokeWebAuthSessionByToken(args: {
       },
     });
   }
+  refreshActiveWebSessionMetric(new Date(now));
   return result.changes > 0;
 }
 
@@ -224,6 +249,7 @@ export function revokeAllWebAuthSessionsForUser(args: {
       details: { userId: args.userId, reason: args.reason, revokedCount: result.changes },
     });
   }
+  refreshActiveWebSessionMetric(new Date(now));
   return result.changes;
 }
 
@@ -298,9 +324,9 @@ export function consumeWebAuthTransaction(args: {
   const stateHash = keyedHash(args.secret, 'oauth-state', args.state);
 
   return db.transaction(() => {
-    const transaction = db
-      .prepare('SELECT * FROM web_auth_transactions WHERE state_hash = ?')
-      .get(stateHash) as WebAuthTransaction | undefined;
+    const transaction = db.prepare('SELECT * FROM web_auth_transactions WHERE state_hash = ?').get(stateHash) as
+      | WebAuthTransaction
+      | undefined;
     if (!transaction) throw new WebAuthStateError('state_missing');
     if (transaction.used_at) throw new WebAuthStateError('state_used');
     if (now >= new Date(transaction.expires_at)) throw new WebAuthStateError('state_expired');

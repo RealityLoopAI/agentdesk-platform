@@ -10,6 +10,7 @@ import {
 } from '../db/web-events.js';
 import { authenticateWebSession, type AuthenticatedWebSession } from '../db/web-auth.js';
 import { log } from '../log.js';
+import { webSseConnections, webSseEventsTotal } from '../metrics.js';
 import { canAccessAgentGroup } from '../modules/permissions/access.js';
 import type { WebConfig } from './config.js';
 
@@ -114,6 +115,7 @@ export function createWebEventStreamManager(
     args.req.socket.setTimeout(0);
 
     let closed = false;
+    let registered = false;
     let lastSequence = afterSequence;
     const timers: { heartbeat?: NodeJS.Timeout } = {};
     let unsubscribe = () => {};
@@ -128,6 +130,14 @@ export function createWebEventStreamManager(
       const userConnections = connections.get(userId);
       userConnections?.delete(close);
       if (userConnections?.size === 0) connections.delete(userId);
+      if (registered) {
+        registered = false;
+        try {
+          webSseConnections.dec();
+        } catch {
+          // Observability must not affect stream cleanup.
+        }
+      }
       if (!args.res.writableEnded) args.res.end();
     };
 
@@ -156,27 +166,39 @@ export function createWebEventStreamManager(
       return true;
     };
 
-    const send = (event: WebEvent): void => {
+    const send = (event: WebEvent, delivery: 'replay' | 'live'): void => {
       if (event.sequence <= lastSequence) return;
       lastSequence = event.sequence;
-      if (accessibleToUser(event, userId)) write(eventFrame(event));
+      if (accessibleToUser(event, userId) && write(eventFrame(event))) {
+        try {
+          webSseEventsTotal.labels(delivery).inc();
+        } catch {
+          // Observability must not affect stream delivery.
+        }
+      }
     };
 
     const userConnections = connections.get(userId) ?? new Set<() => void>();
     userConnections.add(close);
     connections.set(userId, userConnections);
+    registered = true;
+    try {
+      webSseConnections.inc();
+    } catch {
+      // Observability must not affect stream establishment.
+    }
     args.req.on('aborted', close);
     args.res.on('close', close);
 
     // Subscribe before replay. Both replay reads and append notifications are
     // synchronous in this single Host process, so no event can fall into a gap
     // between the two operations.
-    unsubscribe = subscribeWebEvents(userId, send);
+    unsubscribe = subscribeWebEvents(userId, (event) => send(event, 'live'));
     while (!closed) {
       const replay = listWebEventsAfter(userId, lastSequence, REPLAY_PAGE_SIZE);
       if (replay.length === 0) break;
       for (const event of replay) {
-        send(event);
+        send(event, 'replay');
         if (closed) break;
       }
       if (replay.length < REPLAY_PAGE_SIZE) break;

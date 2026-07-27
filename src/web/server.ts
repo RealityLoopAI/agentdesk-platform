@@ -4,12 +4,14 @@ import { buildPublicBranding } from '../branding.js';
 import { getDb } from '../db/connection.js';
 import {
   authenticateWebSession,
+  refreshActiveWebSessionMetric,
   revokeWebAuthSessionByToken,
   verifyWebCsrf,
   type AuthenticatedWebSession,
 } from '../db/web-auth.js';
 import { recordEnterpriseAudit } from '../db/enterprise-audit.js';
 import { log } from '../log.js';
+import { webApiRejectedTotal, webLoginTotal } from '../metrics.js';
 import { readWebConfig, type WebConfig } from './config.js';
 import {
   createWebConversation,
@@ -255,6 +257,15 @@ function enforceRateLimit(limiter: FixedWindowLimiter, key: string, res: ServerR
   throw new WebRequestError(429, 'rate_limited');
 }
 
+function apiRejectionReason(status: number): string {
+  if (status === 401) return 'authentication_required';
+  if (status === 403) return 'forbidden';
+  if (status === 429) return 'rate_limited';
+  if (status === 404) return 'not_found';
+  if (status >= 500) return 'internal_error';
+  return 'invalid_request';
+}
+
 export function createWebRequestHandler(
   config: WebConfig,
   options: {
@@ -299,6 +310,11 @@ export function createWebRequestHandler(
             eventType: 'web_sso_rejected',
             details: { provider: 'feishu', providerScope: config.feishu.appId, reason: 'callback_invalid' },
           });
+          try {
+            webLoginTotal.labels('rejected').inc();
+          } catch {
+            // Metrics are best-effort and never alter authentication.
+          }
           redirect(res, '/login?error=authentication_failed', clearOauthCookie(config));
           return;
         }
@@ -491,6 +507,20 @@ export function createWebRequestHandler(
       // eslint-disable-next-line no-catch-all/no-catch-all
     } catch (error) {
       if (res.writableEnded) return;
+      const requestPath = new URL(req.url ?? '/', config.publicOrigin).pathname;
+      const status =
+        error instanceof WebRequestError ||
+        error instanceof WebConversationError ||
+        error instanceof WebEventStreamError
+          ? error.status
+          : 500;
+      if (requestPath.startsWith('/api/')) {
+        try {
+          webApiRejectedTotal.labels(apiRejectionReason(status)).inc();
+        } catch {
+          // Metrics are best-effort and never alter the HTTP decision.
+        }
+      }
       if (error instanceof WebRequestError) {
         json(res, error.status, { error: error.code });
       } else if (error instanceof WebConversationError) {
@@ -522,6 +552,7 @@ let closeWebEventStreams: (() => void) | null = null;
 export async function startWebServer(): Promise<void> {
   const config = readWebConfig();
   if (!config || webServer) return;
+  refreshActiveWebSessionMetric();
   const handler = createWebRequestHandler(config);
   const server = http.createServer(handler);
   server.requestTimeout = config.requestTimeoutMs;

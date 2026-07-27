@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+import { conversationBindingFailuresTotal } from '../metrics.js';
 import type { ConversationBinding, ConversationDeliveryMode, ConversationLane, Session } from '../types.js';
 import { getDb } from './connection.js';
 import { recordEnterpriseAudit } from './enterprise-audit.js';
@@ -22,6 +23,15 @@ export class ConversationBindingConflictError extends Error {
     super('The verified channel address is already bound to another active conversation lane');
     this.name = 'ConversationBindingConflictError';
   }
+}
+
+function bindingFailure(reason: string): ConversationLaneConflictError {
+  try {
+    conversationBindingFailuresTotal.labels(reason).inc();
+  } catch {
+    // Metrics are read-only observability and must never affect the rejection.
+  }
+  return new ConversationLaneConflictError(reason);
 }
 
 function requireText(name: string, value: string): string {
@@ -177,7 +187,7 @@ function validateBindingOwnership(lane: ConversationLane, externalIdentityId: st
   if (!externalIdentityId) return;
   const identity = getUserIdentityById(externalIdentityId);
   if (!identity || identity.user_id !== lane.owner_user_id) {
-    throw new ConversationLaneConflictError('external_identity_owner_mismatch');
+    throw bindingFailure('external_identity_owner_mismatch');
   }
 }
 
@@ -194,7 +204,7 @@ export function createConversationBinding(args: {
 }): ConversationBinding {
   const lane = getConversationLane(args.laneId);
   if (!lane || lane.status !== 'active') {
-    throw new ConversationLaneConflictError('lane_unavailable');
+    throw bindingFailure('lane_unavailable');
   }
   const channelType = requireText('channelType', args.channelType);
   const platformId = requireText('platformId', args.platformId);
@@ -206,14 +216,14 @@ export function createConversationBinding(args: {
   if (messagingGroupId) {
     const group = getMessagingGroup(messagingGroupId);
     if (!group || group.channel_type !== channelType || group.platform_id !== platformId) {
-      throw new ConversationLaneConflictError('messaging_group_address_mismatch');
+      throw bindingFailure('messaging_group_address_mismatch');
     }
   }
   if (
     args.deliveryMode === 'mirror-dm' &&
     (channelType !== 'feishu' || !/^feishu:p2p:ou_/.test(platformId) || !externalIdentityId)
   ) {
-    throw new ConversationLaneConflictError('unsafe_mirror_destination');
+    throw bindingFailure('unsafe_mirror_destination');
   }
 
   const binding: ConversationBinding = {
@@ -258,6 +268,11 @@ export function createConversationBinding(args: {
   } catch (error) {
     if (error instanceof ConversationLaneConflictError) throw error;
     if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
+      try {
+        conversationBindingFailuresTotal.labels('active_address_conflict').inc();
+      } catch {
+        // Metrics are read-only observability and must never affect the rejection.
+      }
       throw new ConversationBindingConflictError();
     }
     throw error;

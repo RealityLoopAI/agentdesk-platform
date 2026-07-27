@@ -1,10 +1,4 @@
-import {
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  randomBytes,
-  timingSafeEqual,
-} from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import {
   authenticateWebSession,
@@ -16,6 +10,7 @@ import {
 } from '../db/web-auth.js';
 import { recordEnterpriseAudit } from '../db/enterprise-audit.js';
 import { getUserIdentity, resolveOrCreateCanonicalUser } from '../db/user-identities.js';
+import { webLoginTotal } from '../metrics.js';
 import type { WebConfig } from './config.js';
 
 const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
@@ -84,16 +79,9 @@ function decryptEphemeral(secret: string, encoded: string): string {
     throw new FeishuSsoError('provider_response_invalid');
   }
   try {
-    const decipher = createDecipheriv(
-      'aes-256-gcm',
-      encryptionKey(secret),
-      Buffer.from(ivRaw, 'base64url'),
-    );
+    const decipher = createDecipheriv('aes-256-gcm', encryptionKey(secret), Buffer.from(ivRaw, 'base64url'));
     decipher.setAuthTag(Buffer.from(tagRaw, 'base64url'));
-    return Buffer.concat([
-      decipher.update(Buffer.from(ciphertextRaw, 'base64url')),
-      decipher.final(),
-    ]).toString('utf8');
+    return Buffer.concat([decipher.update(Buffer.from(ciphertextRaw, 'base64url')), decipher.final()]).toString('utf8');
   } catch {
     throw new FeishuSsoError('provider_response_invalid');
   }
@@ -197,9 +185,7 @@ async function fetchFeishuProfile(args: {
   const body = await readProviderJson(response);
   if (body.code !== 0) throw new FeishuSsoError('provider_rejected');
   const data =
-    body.data && typeof body.data === 'object' && !Array.isArray(body.data)
-      ? (body.data as ProviderResponse)
-      : body;
+    body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? (body.data as ProviderResponse) : body;
   const openId = safeString(data.open_id);
   if (!openId?.startsWith('ou_')) throw new FeishuSsoError('identity_missing');
   return { openId, displayName: safeString(data.name) ?? null };
@@ -211,18 +197,13 @@ function sameUser(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function startFeishuSso(
-  config: WebConfig,
-  now: Date = new Date(),
-): FeishuSsoStart {
+export function startFeishuSso(config: WebConfig, now: Date = new Date()): FeishuSsoStart {
   const verifier = config.feishu.pkce ? pkceVerifier() : undefined;
   const created = createWebAuthTransaction({
     secret: config.sessionSecret,
     redirectUri: config.redirectUri,
     ttlMs: config.authTransactionTtlMs,
-    pkceVerifierCiphertext: verifier
-      ? encryptEphemeral(config.sessionSecret, verifier)
-      : null,
+    pkceVerifierCiphertext: verifier ? encryptEphemeral(config.sessionSecret, verifier) : null,
     now,
   });
   const url = new URL(config.feishu.authorizeUrl);
@@ -235,15 +216,23 @@ export function startFeishuSso(
     url.searchParams.set('code_challenge', pkceChallenge(verifier));
     url.searchParams.set('code_challenge_method', 'S256');
   }
-  recordEnterpriseAudit({
-    eventType: 'web_sso_started',
-    details: {
-      provider: 'feishu',
-      providerScope: config.feishu.appId,
-      expiresAt: created.transaction.expires_at,
-      pkce: Boolean(verifier),
+  recordEnterpriseAudit(
+    {
+      eventType: 'web_sso_started',
+      details: {
+        provider: 'feishu',
+        providerScope: config.feishu.appId,
+        expiresAt: created.transaction.expires_at,
+        pkce: Boolean(verifier),
+      },
     },
-  }, now);
+    now,
+  );
+  try {
+    webLoginTotal.labels('started').inc();
+  } catch {
+    // Metrics are best-effort and never alter authentication.
+  }
   return {
     authorizationUrl: url.toString(),
     browserNonce: created.browserNonce,
@@ -304,11 +293,7 @@ export async function completeFeishuSso(args: {
       externalSubject: profile.openId,
     };
     const existing = getUserIdentity(identityKey);
-    if (
-      currentSession &&
-      existing &&
-      !sameUser(currentSession.session.user_id, existing.user_id)
-    ) {
+    if (currentSession && existing && !sameUser(currentSession.session.user_id, existing.user_id)) {
       throw new FeishuSsoError('identity_conflict');
     }
 
@@ -327,32 +312,41 @@ export async function completeFeishuSso(args: {
     const authContextHash = createHash('sha256')
       .update(`feishu\0${args.config.feishu.appId}\0${profile.openId}`)
       .digest('hex');
-    const session = args.currentSessionToken && currentSession
-      ? rotateWebAuthSession({
-          currentToken: args.currentSessionToken,
+    const session =
+      args.currentSessionToken && currentSession
+        ? rotateWebAuthSession({
+            currentToken: args.currentSessionToken,
+            userId,
+            secret: args.config.sessionSecret,
+            policy: args.config.sessionPolicy,
+            authContextHash,
+            now,
+          })
+        : createWebAuthSession({
+            userId,
+            secret: args.config.sessionSecret,
+            policy: args.config.sessionPolicy,
+            authContextHash,
+            now,
+          });
+    recordEnterpriseAudit(
+      {
+        eventType: 'web_sso_succeeded',
+        actor: userId,
+        details: {
+          provider: 'feishu',
+          providerScope: args.config.feishu.appId,
           userId,
-          secret: args.config.sessionSecret,
-          policy: args.config.sessionPolicy,
-          authContextHash,
-          now,
-        })
-      : createWebAuthSession({
-          userId,
-          secret: args.config.sessionSecret,
-          policy: args.config.sessionPolicy,
-          authContextHash,
-          now,
-        });
-    recordEnterpriseAudit({
-      eventType: 'web_sso_succeeded',
-      actor: userId,
-      details: {
-        provider: 'feishu',
-        providerScope: args.config.feishu.appId,
-        userId,
-        sessionRotated: Boolean(args.currentSessionToken && currentSession),
+          sessionRotated: Boolean(args.currentSessionToken && currentSession),
+        },
       },
-    }, now);
+      now,
+    );
+    try {
+      webLoginTotal.labels('succeeded').inc();
+    } catch {
+      // Metrics are best-effort and never alter authentication.
+    }
     return {
       userId,
       sessionToken: session.token,
@@ -360,22 +354,25 @@ export async function completeFeishuSso(args: {
       sessionExpiresAt: session.session.absolute_expires_at,
     };
   } catch (error) {
-    recordEnterpriseAudit({
-      eventType: error instanceof FeishuSsoError && error.reason === 'identity_conflict'
-        ? 'web_sso_identity_conflict'
-        : 'web_sso_rejected',
-      actor: currentSession?.session.user_id ?? null,
-      details: {
-        provider: 'feishu',
-        providerScope: args.config.feishu.appId,
-        reason:
-          error instanceof FeishuSsoError
-            ? error.reason
-            : error instanceof Error
-              ? error.name
-              : 'unknown',
+    const metricOutcome =
+      error instanceof FeishuSsoError && error.reason === 'identity_conflict' ? 'identity_conflict' : 'rejected';
+    recordEnterpriseAudit(
+      {
+        eventType: metricOutcome === 'identity_conflict' ? 'web_sso_identity_conflict' : 'web_sso_rejected',
+        actor: currentSession?.session.user_id ?? null,
+        details: {
+          provider: 'feishu',
+          providerScope: args.config.feishu.appId,
+          reason: error instanceof FeishuSsoError ? error.reason : error instanceof Error ? error.name : 'unknown',
+        },
       },
-    }, now);
+      now,
+    );
+    try {
+      webLoginTotal.labels(metricOutcome).inc();
+    } catch {
+      // Metrics are best-effort and never alter authentication.
+    }
     throw error;
   }
 }

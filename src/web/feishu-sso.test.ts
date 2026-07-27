@@ -6,12 +6,9 @@ import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { authenticateWebSession, createWebAuthSession, WebAuthStateError } from '../db/web-auth.js';
 import { runMigrations } from '../db/migrations/index.js';
 import { createUserIdentity, getUserIdentity } from '../db/user-identities.js';
+import { webLoginTotal } from '../metrics.js';
 import type { WebConfig } from './config.js';
-import {
-  completeFeishuSso,
-  FeishuSsoError,
-  startFeishuSso,
-} from './feishu-sso.js';
+import { completeFeishuSso, FeishuSsoError, startFeishuSso } from './feishu-sso.js';
 
 const NOW = new Date('2026-01-01T00:00:00.000Z');
 const CALLBACK_NOW = new Date('2026-01-01T00:01:00.000Z');
@@ -97,6 +94,10 @@ describe('Feishu Web SSO', () => {
   });
 
   it('maps verified open_id to one canonical user and creates an opaque Web session', async () => {
+    const startedBefore =
+      (await webLoginTotal.get()).values.find((value) => value.labels.outcome === 'started')?.value ?? 0;
+    const succeededBefore =
+      (await webLoginTotal.get()).values.find((value) => value.labels.outcome === 'succeeded')?.value ?? 0;
     const started = startFeishuSso(CONFIG, NOW);
     const authorizationUrl = new URL(started.authorizationUrl);
     const fetchImpl = providerFetch();
@@ -131,9 +132,9 @@ describe('Feishu Web SSO', () => {
     const tokenRequest = fetchImpl.mock.calls[0]!;
     const tokenBody = JSON.parse(String(tokenRequest[1]?.body)) as { code_verifier: string };
     expect(tokenBody.code_verifier).toBeTruthy();
-    expect(
-      createHash('sha256').update(tokenBody.code_verifier).digest('base64url'),
-    ).toBe(authorizationUrl.searchParams.get('code_challenge'));
+    expect(createHash('sha256').update(tokenBody.code_verifier).digest('base64url')).toBe(
+      authorizationUrl.searchParams.get('code_challenge'),
+    );
 
     const persisted = JSON.stringify({
       transactions: getDb().prepare('SELECT * FROM web_auth_transactions').all(),
@@ -146,6 +147,12 @@ describe('Feishu Web SSO', () => {
     expect(persisted).not.toContain(CONFIG.feishu.appSecret);
     expect(persisted).not.toContain(completed.sessionToken);
     expect(persisted).not.toContain(completed.csrfToken);
+    expect((await webLoginTotal.get()).values.find((value) => value.labels.outcome === 'started')?.value).toBe(
+      startedBefore + 1,
+    );
+    expect((await webLoginTotal.get()).values.find((value) => value.labels.outcome === 'succeeded')?.value).toBe(
+      succeededBefore + 1,
+    );
   });
 
   it('rejects forged state before contacting Feishu or creating a session', async () => {
@@ -218,9 +225,11 @@ describe('Feishu Web SSO', () => {
         fetchImpl: providerFetch('ou_bob', 'Bob'),
         now: CALLBACK_NOW,
       }),
-    ).rejects.toEqual(expect.objectContaining<Partial<FeishuSsoError>>({
-      reason: 'identity_conflict',
-    }));
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<FeishuSsoError>>({
+        reason: 'identity_conflict',
+      }),
+    );
     expect(
       authenticateWebSession({
         token: current.token,

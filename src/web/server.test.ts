@@ -10,6 +10,7 @@ import { appendWebEvent, encodeWebEventCursor } from '../db/web-events.js';
 import { authenticateWebSession, createWebAuthSession } from '../db/web-auth.js';
 import { runMigrations } from '../db/migrations/index.js';
 import { createUserIdentity } from '../db/user-identities.js';
+import { webApiRejectedTotal } from '../metrics.js';
 import type { WebConfig } from './config.js';
 import type { SubmitWebInbound } from './conversations.js';
 import { createWebRequestHandler } from './server.js';
@@ -146,6 +147,9 @@ describe('Web HTTP authentication boundary', () => {
   });
 
   it('serves versioned Web assets with safe cache rules and explicit SPA fallbacks', async () => {
+    const rejectedBefore =
+      (await webApiRejectedTotal.get()).values.find((value) => value.labels.reason === 'authentication_required')
+        ?.value ?? 0;
     const staticDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-web-static-'));
     temporaryDirectories.push(staticDir);
     fs.mkdirSync(path.join(staticDir, 'assets'), { recursive: true });
@@ -185,6 +189,10 @@ describe('Web HTTP authentication boundary', () => {
 
     const api = await fetch(`${base}/api/not-a-route`);
     expect(api.status).toBe(401);
+    expect(
+      (await webApiRejectedTotal.get()).values.find((value) => value.labels.reason === 'authentication_required')
+        ?.value,
+    ).toBe(rejectedBefore + 1);
     expect(api.headers.get('content-type')).toContain('application/json');
     const unknown = await fetch(`${base}/not-a-spa-route`);
     expect(unknown.status).toBe(404);

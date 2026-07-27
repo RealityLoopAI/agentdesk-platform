@@ -20,7 +20,7 @@ import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { chainAttrs, runInDetachedRoot } from '../observability/openinference.js';
 import { withSpan } from '../observability/with-span.js';
-import { inboundTotal, policyCheckFailedTotal } from '../metrics.js';
+import { crossChannelLoopSuppressedTotal, inboundTotal, policyCheckFailedTotal } from '../metrics.js';
 import { registerWebhookHandler } from '../webhook-server.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -529,6 +529,11 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
           // Defense in depth: Feishu normally avoids echoing a bot's own
           // messages, but a provider event must never turn a mirrored reply
           // back into fresh user input.
+          try {
+            crossChannelLoopSuppressedTotal.labels(loopSuppressionReason).inc();
+          } catch {
+            // Metrics are best-effort; the loop guard decision already stands.
+          }
           try {
             recordEnterpriseAudit({
               eventType: 'cross_channel_loop_suppressed',

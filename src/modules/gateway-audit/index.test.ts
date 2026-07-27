@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDb, initTestDb, runMigrations } from '../../db/index.js';
 import { queryGatewayAudit } from '../../db/gateway-audit.js';
 import type { DeliveryActionHandler } from '../../delivery.js';
+import { feishuBitableOperationsTotal } from '../../metrics.js';
 import type { Session } from '../../types.js';
 
 /** A minimal host-written inbound.db carrying the given namespaced origins —
@@ -58,6 +59,10 @@ afterEach(() => {
 
 describe('gateway_audit delivery action', () => {
   it('persists a well-formed audit payload', async () => {
+    const metricBefore =
+      (await feishuBitableOperationsTotal.get()).values.find(
+        (value) => value.labels.operation === 'feishu.bitable.record.update' && value.labels.outcome === 'ok',
+      )?.value ?? 0;
     const handler = captured.get('gateway_audit');
     expect(handler).toBeDefined();
     // Owner-less (shared) session: the claimed actor is honored because ou_1
@@ -98,6 +103,37 @@ describe('gateway_audit delivery action', () => {
       idempotency_key: 'idem-xyz',
       input_hash: 'deadbeef',
     });
+    expect(
+      (await feishuBitableOperationsTotal.get()).values.find(
+        (value) => value.labels.operation === 'feishu.bitable.record.update' && value.labels.outcome === 'ok',
+      )?.value,
+    ).toBe(metricBefore + 1);
+  });
+
+  it('labels Bitable HTTP 429 outcomes as rate_limited', async () => {
+    const before =
+      (await feishuBitableOperationsTotal.get()).values.find(
+        (value) => value.labels.operation === 'feishu.bitable.record.list' && value.labels.outcome === 'rate_limited',
+      )?.value ?? 0;
+    const handler = captured.get('gateway_audit')!;
+    await handler(
+      {
+        action: 'gateway_audit',
+        path: '/execute',
+        operation: 'feishu.bitable.record.list',
+        logicalResource: 'orders',
+        requesterSource: 'session',
+        status: 'error',
+        httpStatus: 429,
+      },
+      session(),
+      {} as never,
+    );
+    expect(
+      (await feishuBitableOperationsTotal.get()).values.find(
+        (value) => value.labels.operation === 'feishu.bitable.record.list' && value.labels.outcome === 'rate_limited',
+      )?.value,
+    ).toBe(before + 1);
   });
 
   it('owner-less session: DROPS a forged actor not in the session identity set (audit-only attribution)', async () => {

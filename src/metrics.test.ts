@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
-import { policyCheckFailedTotal, recordingActorRejectedTotal, rosterDmRejectedTotal } from './metrics.js';
+import {
+  conversationBindingFailuresTotal,
+  crossChannelLoopSuppressedTotal,
+  feishuBitableOperationsTotal,
+  policyCheckFailedTotal,
+  recordingActorRejectedTotal,
+  rosterDmRejectedTotal,
+  webActiveSessions,
+  webApiRejectedTotal,
+  webLoginTotal,
+  webSseConnections,
+  webSseEventsTotal,
+} from './metrics.js';
 
 // The fail-closed metric (roadmap 5.8) is load-bearing for observability: its
 // name and {policy,reason} labels are referenced verbatim by the
@@ -50,5 +62,25 @@ describe('rosterDmRejectedTotal (ADR-0045 forged opt-in card alert depends on re
     expect(m.type).toBe('counter');
     // The alert keys on reason="forged_optin_card"; make sure that exact label fires.
     expect(m.values.some((s) => s.labels.reason === 'forged_optin_card')).toBe(true);
+  });
+});
+
+describe('Web, cross-channel and Bitable metric contracts', () => {
+  it('exports every bounded operational signal with the expected metric type', async () => {
+    const expected = [
+      [webLoginTotal, /_web_login_total$/, 'counter'],
+      [webActiveSessions, /_web_active_sessions$/, 'gauge'],
+      [webApiRejectedTotal, /_web_api_rejected_total$/, 'counter'],
+      [webSseConnections, /_web_sse_connections$/, 'gauge'],
+      [webSseEventsTotal, /_web_sse_events_total$/, 'counter'],
+      [conversationBindingFailuresTotal, /_conversation_binding_failures_total$/, 'counter'],
+      [feishuBitableOperationsTotal, /_feishu_bitable_operations_total$/, 'counter'],
+      [crossChannelLoopSuppressedTotal, /_cross_channel_loop_suppressed_total$/, 'counter'],
+    ] as const;
+    for (const [metric, name, type] of expected) {
+      const value = await metric.get();
+      expect(value.name).toMatch(name);
+      expect(value.type).toBe(type);
+    }
   });
 });

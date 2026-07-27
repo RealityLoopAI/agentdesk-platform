@@ -4,6 +4,7 @@ import { closeDb, getDb, initTestDb } from './connection.js';
 import { runMigrations } from './migrations/index.js';
 import {
   authenticateWebSession,
+  countActiveWebAuthSessions,
   consumeWebAuthTransaction,
   createWebAuthSession,
   createWebAuthTransaction,
@@ -13,6 +14,7 @@ import {
   verifyWebCsrf,
   WebAuthStateError,
 } from './web-auth.js';
+import { webActiveSessions } from '../metrics.js';
 
 const SECRET = '3bb44a7b3ab94621be6d3cba8b5f6679ed4de7bf1750d5c787ae5f26ce9439c6';
 const POLICY = { idleTtlMs: 60_000, absoluteTtlMs: 3_600_000 };
@@ -35,6 +37,23 @@ afterEach(() => {
 });
 
 describe('web auth sessions', () => {
+  it('publishes the current non-expired, non-revoked Web session count', async () => {
+    const now = new Date('2026-01-01T00:00:00.000Z');
+    const first = createWebAuthSession({ userId: 'u-1', secret: SECRET, policy: POLICY, now });
+    createWebAuthSession({ userId: 'u-1', secret: SECRET, policy: POLICY, now });
+    expect(countActiveWebAuthSessions(now)).toBe(2);
+
+    const revokedAt = new Date('2026-01-01T00:00:01.000Z');
+    revokeWebAuthSessionByToken({
+      token: first.token,
+      secret: SECRET,
+      reason: 'test',
+      now: revokedAt,
+    });
+    expect(countActiveWebAuthSessions(revokedAt)).toBe(1);
+    expect((await webActiveSessions.get()).values[0]?.value).toBe(1);
+  });
+
   it('stores only keyed hashes and authenticates with idle sliding bounded by absolute expiry', () => {
     const created = createWebAuthSession({
       userId: 'u-1',
@@ -115,9 +134,7 @@ describe('web auth sessions', () => {
     expect(revokeAllWebAuthSessionsForUser({ userId: 'u-1', actor: 'operator', reason: 'offboarding' })).toBe(2);
 
     const audit = JSON.stringify(
-      getDb()
-        .prepare("SELECT event_type, details FROM enterprise_audit WHERE event_type LIKE 'web_session_%'")
-        .all(),
+      getDb().prepare("SELECT event_type, details FROM enterprise_audit WHERE event_type LIKE 'web_session_%'").all(),
     );
     expect(audit).toContain('web_session_created');
     expect(audit).toContain('web_session_logout');

@@ -15,6 +15,7 @@ import {
 import { runMigrations } from './migrations/index.js';
 import { createSession } from './sessions.js';
 import { createUserIdentity } from './user-identities.js';
+import { conversationBindingFailuresTotal } from '../metrics.js';
 import type { Session } from '../types.js';
 
 const NOW = '2026-01-01T00:00:00.000Z';
@@ -148,7 +149,7 @@ describe('conversation lane ownership and bindings', () => {
     expect(getConversationLane(lane.id)?.root_session_id).toBe('session-alice');
   });
 
-  it('uses NULL-safe active uniqueness, but allows a verified address after revocation', () => {
+  it('uses NULL-safe active uniqueness, but allows a verified address after revocation', async () => {
     const lane = createConversationLane({ agentGroupId: 'ag-1', ownerUserId: 'alice' });
     const otherLane = createConversationLane({ agentGroupId: 'ag-1', ownerUserId: 'alice' });
     const binding = createConversationBinding({
@@ -157,6 +158,10 @@ describe('conversation lane ownership and bindings', () => {
       platformId: 'web:alice',
       deliveryMode: 'source-reply',
     });
+    const conflictBefore =
+      (await conversationBindingFailuresTotal.get()).values.find(
+        (value) => value.labels.reason === 'active_address_conflict',
+      )?.value ?? 0;
     expect(() =>
       createConversationBinding({
         laneId: otherLane.id,
@@ -165,6 +170,11 @@ describe('conversation lane ownership and bindings', () => {
         deliveryMode: 'source-reply',
       }),
     ).toThrow(ConversationBindingConflictError);
+    expect(
+      (await conversationBindingFailuresTotal.get()).values.find(
+        (value) => value.labels.reason === 'active_address_conflict',
+      )?.value,
+    ).toBe(conflictBefore + 1);
     expect(
       revokeConversationBinding({
         bindingId: binding.id,

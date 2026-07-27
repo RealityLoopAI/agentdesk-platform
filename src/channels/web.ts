@@ -7,6 +7,8 @@
  */
 import { getDb } from '../db/connection.js';
 import { appendWebEvent } from '../db/web-events.js';
+import { chainAttrs, runInDetachedRoot } from '../observability/openinference.js';
+import { withSpan } from '../observability/with-span.js';
 import { readWebConfig } from '../web/config.js';
 import type { ChannelAdapter, ChannelSetup, InboundEvent } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -17,8 +19,19 @@ let connected = false;
 export async function submitAuthenticatedWebInbound(
   event: Omit<InboundEvent, 'channelType'> & { authenticatedUserId: string; conversationLaneId: string },
 ): Promise<void> {
-  if (!hostSetup || !connected) throw new Error('web channel adapter is not connected');
-  await hostSetup.onInboundEvent({ ...event, channelType: 'web' });
+  const setup = hostSetup;
+  if (!setup || !connected) throw new Error('web channel adapter is not connected');
+  await runInDetachedRoot(() =>
+    withSpan(
+      'channel.web.receive',
+      chainAttrs({
+        'channel.type': 'web',
+        'message.kind': event.message.kind,
+        'user.id': event.authenticatedUserId,
+      }),
+      async () => setup.onInboundEvent({ ...event, channelType: 'web' }),
+    ),
+  );
 }
 
 export function createWebAdapter(): ChannelAdapter {
