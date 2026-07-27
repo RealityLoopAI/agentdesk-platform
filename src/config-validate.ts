@@ -30,6 +30,7 @@
  * taking precedence — mirroring how the rest of the host resolves config.
  */
 import { readEnvFile } from './env.js';
+import { HOST_FEATURE_FLAG_KEYS, parseHostFeatureFlags } from './feature-flags.js';
 import { log } from './log.js';
 import { assertSecretNotKnownWeak } from './security/known-weak-secrets.js';
 import { parseWebConfig, WEB_CONFIG_KEYS } from './web/config.js';
@@ -66,6 +67,7 @@ const INSPECTED_KEYS = [
   // ADR-0035: in vault mode the host needs ONECLI_URL (not OPENAI_API_KEY).
   'AGENTDESK_OPENAI_VIA_ONECLI',
   'ONECLI_URL',
+  ...HOST_FEATURE_FLAG_KEYS,
   ...WEB_CONFIG_KEYS,
 ] as const;
 
@@ -189,6 +191,14 @@ export function validateStartupConfig(): void {
   // fail fast before a listener opens.
   try {
     parseWebConfig(get);
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
+  }
+
+  // 2f. Release gates are security boundaries, not permissive string toggles.
+  // Reject typos such as "enabled" at startup instead of guessing.
+  try {
+    parseHostFeatureFlags(get);
   } catch (err) {
     errors.push(err instanceof Error ? err.message : String(err));
   }

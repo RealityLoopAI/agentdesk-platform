@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createFeishuBitableAdapter } from './feishu-bitable-adapter.mjs';
+import {
+  createFeishuBitableAdapter,
+  loadFeishuBitableConfigFromEnv,
+} from './feishu-bitable-adapter.mjs';
 
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
@@ -58,6 +61,8 @@ function makeHarness(providerHandler, overrides = {}) {
     appSecret: 'gateway-only-app-secret',
     cursorSecret: 'cursor-secret-at-least-32-characters-long',
     confirmationSecret: 'confirmation-secret-at-least-32-characters',
+    readEnabled: true,
+    writeEnabled: true,
     fetchImpl,
     baseUrl: 'https://mock.feishu.local/open-apis',
     audit: async (event) => audits.push(event),
@@ -126,6 +131,75 @@ test('credentials and raw resource ids stay inside the Gateway boundary', async 
   );
   assert.equal(rejected.body.code, 'VALIDATION_FAILED');
   assert.equal(calls.length, 2, 'raw identifiers must be rejected before another Feishu call');
+});
+
+test('read and write release gates independently control discovery and execution', async () => {
+  const { adapter, calls } = makeHarness(
+    () => {
+      throw new Error('disabled operation must not reach Feishu');
+    },
+    { readEnabled: true, writeEnabled: false },
+  );
+
+  const descriptors = adapter.describeOperations();
+  assert.equal(descriptors.length, 5);
+  assert.ok(descriptors.every((descriptor) => descriptor.mutating === false));
+  assert.equal(adapter.isOperation('feishu.bitable.record.list'), true);
+  assert.equal(adapter.isOperation('feishu.bitable.record.create'), false);
+
+  const disabledWrite = await adapter.execute(
+    request('feishu.bitable.record.create', {
+      resource: 'sales.pipeline',
+      fields: { Name: 'must stay disabled' },
+    }),
+  );
+  assert.equal(disabledWrite.status, 404);
+  assert.equal(disabledWrite.body.code, 'OPERATION_NOT_FOUND');
+  assert.equal(calls.length, 0);
+
+  const writeOnly = makeHarness(
+    () => {
+      throw new Error('test only inspects discovery');
+    },
+    { readEnabled: false, writeEnabled: true },
+  ).adapter;
+  assert.ok(writeOnly.describeOperations().every((descriptor) => descriptor.mutating === true));
+  assert.equal(writeOnly.describeOperations().length, 6);
+});
+
+test('Bitable feature flags are opt-in and fail closed on invalid or missing configuration', () => {
+  const credentials = {
+    FEISHU_BITABLE_APP_ID: 'cli-app-id',
+    FEISHU_BITABLE_APP_SECRET: 'gateway-only-app-secret',
+    FEISHU_BITABLE_RESOURCES_JSON: JSON.stringify({
+      sales: { appToken: APP_TOKEN, readers: [ALICE], writers: [ALICE] },
+    }),
+    FEISHU_BITABLE_CURSOR_SECRET: 'cursor-secret-at-least-32-characters-long',
+    FEISHU_BITABLE_CONFIRMATION_SECRET: 'confirmation-secret-at-least-32-characters',
+  };
+
+  assert.deepEqual(
+    {
+      readEnabled: loadFeishuBitableConfigFromEnv(credentials).readEnabled,
+      writeEnabled: loadFeishuBitableConfigFromEnv(credentials).writeEnabled,
+    },
+    { readEnabled: false, writeEnabled: false },
+  );
+  assert.equal(
+    loadFeishuBitableConfigFromEnv({
+      ...credentials,
+      FEISHU_BITABLE_READ_ENABLED: 'true',
+    }).readEnabled,
+    true,
+  );
+  assert.throws(
+    () => loadFeishuBitableConfigFromEnv({ FEISHU_BITABLE_WRITE_ENABLED: 'true' }),
+    /credentials\/resources/,
+  );
+  assert.throws(
+    () => loadFeishuBitableConfigFromEnv({ FEISHU_BITABLE_READ_ENABLED: 'enabled' }),
+    /FEISHU_BITABLE_READ_ENABLED/,
+  );
 });
 
 test('unknown resources, unauthorized users and agent-asserted writes fail before Feishu', async () => {
@@ -258,6 +332,8 @@ test('field schema cache refreshes once on drift and validates before writing', 
     appSecret: 'gateway-only-app-secret',
     cursorSecret: 'cursor-secret-at-least-32-characters-long',
     confirmationSecret: 'confirmation-secret-at-least-32-characters',
+    readEnabled: true,
+    writeEnabled: true,
     baseUrl: 'https://mock.feishu.local/open-apis',
     resources: {
       'sales.pipeline': {
@@ -438,6 +514,8 @@ test('rate limits and timeouts map to bounded retryable closed errors', async ()
     appSecret: 'gateway-only-app-secret',
     cursorSecret: 'cursor-secret-at-least-32-characters-long',
     confirmationSecret: 'confirmation-secret-at-least-32-characters',
+    readEnabled: true,
+    writeEnabled: true,
     baseUrl: 'https://mock.feishu.local/open-apis',
     timeoutMs: 5,
     resources: {

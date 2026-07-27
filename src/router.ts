@@ -52,6 +52,7 @@ import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getDeliveryAdapter } from './delivery.js';
+import { readHostFeatureFlags } from './feature-flags.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
@@ -545,7 +546,15 @@ export function resolveConversationLaneIdForInbound(
   userId: string | null,
   agentGroupId: string,
 ): string | null {
+  // A Web request may only reach here after the Web server has authenticated
+  // the browser and authorized this exact Lane, so Web-only conversations keep
+  // working independently of the cross-channel rollout gate.
   if (event.conversationLaneId) return event.conversationLaneId;
+
+  // Native-channel auto-association is the privacy-sensitive part: when the
+  // flag is off, existing Feishu-only routing stays on its legacy session key
+  // even if dormant Lane/Binding rows are already present.
+  if (!readHostFeatureFlags().crossChannelLanesEnabled) return null;
   if (!userId || !event.senderIdentity) return null;
 
   const identity = getUserIdentity({

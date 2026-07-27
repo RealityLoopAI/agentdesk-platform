@@ -33,6 +33,9 @@ const WRITE_OPERATIONS = new Set([
   'feishu.bitable.record.batch_update',
   'feishu.bitable.record.batch_delete',
 ]);
+const READ_OPERATIONS = new Set(
+  FEISHU_BITABLE_OPERATION_NAMES.filter((operation) => !WRITE_OPERATIONS.has(operation)),
+);
 const DELETE_OPERATIONS = new Set(['feishu.bitable.record.delete', 'feishu.bitable.record.batch_delete']);
 const COMPUTED_FIELD_TYPES = new Set([19, 20, 1001, 1002, 1003, 1004, 1005, 3001]);
 const DEFAULT_PAGE_SIZE = 20;
@@ -98,16 +101,28 @@ class AdapterError extends Error {
  * fails closed during process startup.
  */
 export function loadFeishuBitableConfigFromEnv(env = process.env) {
-  const keys = [
+  const credentialKeys = [
     'FEISHU_BITABLE_APP_ID',
     'FEISHU_BITABLE_APP_SECRET',
     'FEISHU_BITABLE_RESOURCES_JSON',
     'FEISHU_BITABLE_CURSOR_SECRET',
     'FEISHU_BITABLE_CONFIRMATION_SECRET',
   ];
-  if (!keys.some((key) => typeof env[key] === 'string' && env[key].trim())) return null;
+  const readEnabled = parseOptInFlag('FEISHU_BITABLE_READ_ENABLED', env.FEISHU_BITABLE_READ_ENABLED);
+  const writeEnabled = parseOptInFlag('FEISHU_BITABLE_WRITE_ENABLED', env.FEISHU_BITABLE_WRITE_ENABLED);
+  const hasCredentialConfig = credentialKeys.some(
+    (key) => typeof env[key] === 'string' && env[key].trim(),
+  );
+  if (!hasCredentialConfig) {
+    if (readEnabled || writeEnabled) {
+      throw new Error(
+        'Feishu Bitable feature flag is enabled but Gateway credentials/resources are not configured',
+      );
+    }
+    return null;
+  }
 
-  const missing = keys.filter((key) => !env[key]?.trim());
+  const missing = credentialKeys.filter((key) => !env[key]?.trim());
   if (missing.length > 0) {
     throw new Error(`incomplete Feishu Bitable Gateway configuration: missing ${missing.join(', ')}`);
   }
@@ -126,6 +141,8 @@ export function loadFeishuBitableConfigFromEnv(env = process.env) {
     confirmationSecret: env.FEISHU_BITABLE_CONFIRMATION_SECRET,
     resources,
     baseUrl: env.FEISHU_BITABLE_BASE_URL?.trim() || undefined,
+    readEnabled,
+    writeEnabled,
   };
 }
 
@@ -164,6 +181,8 @@ export function createFeishuBitableAdapter(options) {
     confirmationTtlMs = DEFAULT_CONFIRMATION_TTL_MS,
     maxSchemaPages = 10,
     maxResponseBytes = 256 * 1024,
+    readEnabled = false,
+    writeEnabled = false,
     now = () => Date.now(),
     randomUUID = () => crypto.randomUUID(),
     authorize: authorizeHook,
@@ -181,7 +200,14 @@ export function createFeishuBitableAdapter(options) {
   }
 
   const normalizedResources = normalizeResources(resources);
-  const operationNames = new Set(FEISHU_BITABLE_OPERATION_NAMES);
+  if (typeof readEnabled !== 'boolean' || typeof writeEnabled !== 'boolean') {
+    throw new Error('readEnabled and writeEnabled must be booleans');
+  }
+  const operationNames = new Set(
+    FEISHU_BITABLE_OPERATION_NAMES.filter((operation) =>
+      WRITE_OPERATIONS.has(operation) ? writeEnabled : readEnabled,
+    ),
+  );
   const schemaCache = new Map();
   const confirmationUses = new Map();
 
@@ -197,7 +223,9 @@ export function createFeishuBitableAdapter(options) {
   function describeOperations() {
     const enabled = new Set();
     for (const resource of normalizedResources.values()) {
-      for (const operation of resource.allowedOperations) enabled.add(operation);
+      for (const operation of resource.allowedOperations) {
+        if (operationNames.has(operation)) enabled.add(operation);
+      }
     }
     return OPERATION_DESCRIPTORS.filter((descriptor) => enabled.has(descriptor.name)).map(cloneJson);
   }
@@ -209,6 +237,7 @@ export function createFeishuBitableAdapter(options) {
     let outcome = 'denied';
     let reason = 'authorization failed';
     try {
+      requireEnabledOperation(operation);
       const input = validateOperationInput(operation, req?.input);
       resourceAlias = input.resource;
       const resource = requireAllowedResource(operation, resourceAlias);
@@ -246,6 +275,7 @@ export function createFeishuBitableAdapter(options) {
     let resourceAlias = safeResourceAlias(req?.input?.resource);
     let outcome = 'error';
     try {
+      requireEnabledOperation(operation);
       const input = validateOperationInput(operation, req?.input);
       resourceAlias = input.resource;
       const resource = requireAllowedResource(operation, resourceAlias);
@@ -371,6 +401,14 @@ export function createFeishuBitableAdapter(options) {
       nonce: randomUUID(),
     };
     return signOpaque(payload, confirmationSecret);
+  }
+
+  function requireEnabledOperation(operation) {
+    if (!isOperation(operation)) {
+      throw new AdapterError('OPERATION_NOT_FOUND', `operation is disabled or unknown: ${operation}`, {
+        status: 404,
+      });
+    }
   }
 
   async function decideAuthorization(req, resource, input) {
@@ -833,6 +871,14 @@ function createMemoryStore() {
       values.set(key, value);
     },
   };
+}
+
+function parseOptInFlag(name, value) {
+  if (value === undefined || String(value).trim() === '') return false;
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  throw new Error(`${name} must be a boolean (true/false, 1/0, yes/no, on/off)`);
 }
 
 function normalizeResources(resources) {

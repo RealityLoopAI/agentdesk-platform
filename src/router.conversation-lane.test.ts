@@ -37,6 +37,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  process.env.CROSS_CHANNEL_LANES_ENABLED = 'true';
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
   const db = initTestDb();
   runMigrations(db);
@@ -63,6 +64,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete process.env.CROSS_CHANNEL_LANES_ENABLED;
   closeDb();
   fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
 });
@@ -215,5 +217,69 @@ describe('Router cross-channel Conversation Lane', () => {
         origin_user_id: 'alice',
       },
     ]);
+  });
+
+  it('keeps Feishu on its legacy session key while cross-channel auto-association is disabled', async () => {
+    const aliceIdentity = createUserIdentity({
+      userId: 'alice',
+      provider: 'feishu',
+      providerScope: 'app-a',
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
+    const aliceLane = createConversationLane({
+      id: 'lane-alice',
+      agentGroupId: 'ag-1',
+      ownerUserId: 'alice',
+    });
+    createConversationBinding({
+      laneId: aliceLane.id,
+      channelType: 'feishu',
+      messagingGroupId: 'mg-feishu',
+      platformId: 'feishu:oc_room',
+      externalIdentityId: aliceIdentity.id,
+      deliveryMode: 'source-reply',
+    });
+
+    process.env.CROSS_CHANNEL_LANES_ENABLED = 'false';
+    await routeInbound(
+      event({
+        id: 'feishu-alice-flag-off',
+        channelType: 'feishu',
+        platformId: 'feishu:oc_room',
+        externalSubject: 'ou_alice',
+      }),
+    );
+
+    const session = getDb()
+      .prepare('SELECT owner_user_id, conversation_lane_id FROM sessions')
+      .get() as { owner_user_id: string; conversation_lane_id: string | null };
+    expect(session).toEqual({ owner_user_id: 'alice', conversation_lane_id: null });
+    expect(getDb().prepare('SELECT root_session_id FROM conversation_lanes WHERE id = ?').get(aliceLane.id)).toEqual({
+      root_session_id: null,
+    });
+  });
+
+  it('keeps an authenticated Web Lane usable while native auto-association is disabled', async () => {
+    const aliceLane = createConversationLane({
+      id: 'lane-alice',
+      agentGroupId: 'ag-1',
+      ownerUserId: 'alice',
+    });
+
+    process.env.CROSS_CHANNEL_LANES_ENABLED = 'false';
+    await routeInbound(
+      event({
+        id: 'web-alice-flag-off',
+        channelType: 'web',
+        platformId: 'web:lane-alice',
+        conversationLaneId: aliceLane.id,
+      }),
+    );
+
+    expect(getDb().prepare('SELECT owner_user_id, conversation_lane_id FROM sessions').get()).toEqual({
+      owner_user_id: 'alice',
+      conversation_lane_id: aliceLane.id,
+    });
   });
 });

@@ -48,6 +48,7 @@ const INSPECTED_KEYS = [
   'OTEL_CAPTURE_CONTENT',
   'AGENTDESK_OPENAI_VIA_ONECLI',
   'ONECLI_URL',
+  'CROSS_CHANNEL_LANES_ENABLED',
   'WEB_ENABLED',
   'WEB_PORT',
   'WEB_PUBLIC_ORIGIN',
@@ -242,6 +243,22 @@ describe('validateStartupConfig — Web/Feishu SSO', () => {
       WEB_SESSION_ABSOLUTE_TTL_HOURS: '2',
     });
     expect(() => validateStartupConfig()).toThrow(/cannot exceed/);
+  });
+});
+
+describe('validateStartupConfig — unified messaging release gates', () => {
+  it('keeps an unset cross-channel Lane gate compatible with existing deployments', () => {
+    expect(() => validateStartupConfig()).not.toThrow();
+  });
+
+  it('accepts an explicit cross-channel Lane enablement', () => {
+    setEnv({ CROSS_CHANNEL_LANES_ENABLED: 'true' });
+    expect(() => validateStartupConfig()).not.toThrow();
+  });
+
+  it('rejects an ambiguous cross-channel Lane value', () => {
+    setEnv({ CROSS_CHANNEL_LANES_ENABLED: 'enabled' });
+    expect(() => validateStartupConfig()).toThrow(/CROSS_CHANNEL_LANES_ENABLED/);
   });
 });
 
