@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import http, { type Server } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,9 +10,11 @@ import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { appendWebEvent, encodeWebEventCursor } from '../db/web-events.js';
 import { authenticateWebSession, createWebAuthSession } from '../db/web-auth.js';
 import { runMigrations } from '../db/migrations/index.js';
+import { createSession } from '../db/sessions.js';
 import { createUserIdentity } from '../db/user-identities.js';
 import { webApiRejectedTotal } from '../metrics.js';
 import type { WebConfig } from './config.js';
+import type { Session } from '../types.js';
 import type { SubmitWebInbound } from './conversations.js';
 import { createWebRequestHandler } from './server.js';
 
@@ -455,6 +458,122 @@ describe('Web HTTP authentication boundary', () => {
     });
     expect(hidden.status).toBe(403);
     expect(await hidden.json()).toEqual({ error: 'conversation_unavailable' });
+  });
+
+  it('keeps GET read-only and protects bounded legacy reconciliation with identity, CSRF, Origin and access gates', async () => {
+    const config = { ...CONFIG, maxBodyBytes: 4_096 };
+    const now = new Date().toISOString();
+    getDb().exec(`
+      INSERT INTO users (id, kind, display_name, created_at)
+        VALUES ('alice', 'feishu', 'Alice', '${now}');
+      INSERT INTO agent_groups (id, name, folder, agent_provider, created_at, organization_id)
+        VALUES
+          ('ag-allowed', 'Allowed', 'allowed', NULL, '${now}', NULL),
+          ('ag-denied', 'Denied', 'denied', NULL, '${now}', NULL);
+      INSERT INTO messaging_groups
+        (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
+        VALUES
+          ('mg-allowed', 'feishu', 'feishu:oc_allowed', 'Allowed', 1, 'public', '${now}'),
+          ('mg-denied', 'feishu', 'feishu:oc_denied', 'Denied', 1, 'public', '${now}');
+      INSERT INTO messaging_group_agents
+        (id, messaging_group_id, agent_group_id, engage_mode, engage_pattern,
+         sender_scope, ignored_message_policy, session_mode, priority, created_at)
+        VALUES
+          ('mga-allowed', 'mg-allowed', 'ag-allowed', 'pattern', '.', 'all', 'drop', 'per-user', 0, '${now}'),
+          ('mga-denied', 'mg-denied', 'ag-denied', 'pattern', '.', 'all', 'drop', 'per-user', 0, '${now}');
+      INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+        VALUES ('alice', 'ag-allowed', NULL, '${now}');
+    `);
+    const identity = createUserIdentity({
+      userId: 'alice',
+      provider: 'feishu',
+      providerScope: config.feishu.appId,
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
+    for (const [id, agentGroupId, messagingGroupId] of [
+      ['session-allowed', 'ag-allowed', 'mg-allowed'],
+      ['session-denied', 'ag-denied', 'mg-denied'],
+    ] as const) {
+      createSession({
+        id,
+        agent_group_id: agentGroupId,
+        messaging_group_id: messagingGroupId,
+        thread_id: null,
+        owner_user_id: 'alice',
+        root_session_id: id,
+        conversation_thread_id: null,
+        conversation_lane_id: null,
+        agent_provider: null,
+        status: 'active',
+        container_status: 'stopped',
+        last_active: now,
+        archived_at: null,
+        spawn_depth: 0,
+        created_at: now,
+      } satisfies Session);
+    }
+    const session = createWebAuthSession({
+      userId: 'alice',
+      secret: SECRET,
+      policy: config.sessionPolicy,
+      authContextHash: createHash('sha256')
+        .update(`feishu\0${config.feishu.appId}\0${identity.external_subject}`)
+        .digest('hex'),
+    });
+    const base = await serve(config);
+    const cookie = `${config.cookieName}=${session.token}`;
+
+    const before = await fetch(`${base}/api/conversations`, { headers: { cookie } });
+    expect(before.status).toBe(200);
+    expect(await before.json()).toMatchObject({ conversations: [] });
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(0);
+
+    const missingOrigin = await fetch(`${base}/api/conversations/reconcile`, {
+      method: 'POST',
+      headers: {
+        cookie,
+        'x-csrf-token': session.csrfToken,
+        'content-type': 'application/json',
+      },
+      body: '{}',
+    });
+    expect(missingOrigin.status).toBe(403);
+
+    const missingCsrf = await fetch(`${base}/api/conversations/reconcile`, {
+      method: 'POST',
+      headers: { cookie, origin: config.publicOrigin, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(missingCsrf.status).toBe(403);
+
+    const reconciled = await fetch(`${base}/api/conversations/reconcile`, {
+      method: 'POST',
+      headers: {
+        cookie,
+        origin: config.publicOrigin,
+        'x-csrf-token': session.csrfToken,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ limit: 10 }),
+    });
+    expect(reconciled.status).toBe(200);
+    expect(await reconciled.json()).toMatchObject({
+      scanned: 2,
+      linked: 1,
+      skippedUnauthorized: 1,
+      conflicts: 0,
+    });
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(1);
+    expect(
+      getDb().prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?').pluck().get('session-denied'),
+    ).toBeNull();
+
+    getDb()
+      .prepare('DELETE FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
+      .run('alice', 'ag-allowed');
+    const afterRevocation = await fetch(`${base}/api/conversations`, { headers: { cookie } });
+    expect(await afterRevocation.json()).toMatchObject({ conversations: [] });
   });
 
   it('protects the SSE route with authentication and exact Origin, then honors Last-Event-ID replay', async () => {

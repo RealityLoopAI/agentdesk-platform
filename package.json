@@ -27,6 +27,7 @@
     "obs:runbook:check": "vitest run scripts/runbook-consistency.test.ts",
     "obs:alertmanager:check": "tsx scripts/check-alertmanager.ts",
     "audit:export": "tsx scripts/export-audit.ts",
+    "reconcile:feishu": "tsx scripts/reconcile-feishu-conversations.ts",
     "container:build": "bash container/build.sh",
     "e2e:container": "tsx scripts/e2e-container-roundtrip.ts",
     "e2e:container:a2a-gateway": "tsx scripts/e2e-container-a2a-gateway.ts",

@@ -30,11 +30,17 @@ export interface ConversationReconciliationResult {
   conflicts: number;
   hasMore: boolean;
   nextCursor: string | null;
+  failures: Array<{
+    sessionId: string;
+    reason: 'unsupported_session_mode' | 'agent_group_unauthorized' | 'binding_conflict' | 'lane_conflict';
+  }>;
 }
 
 function metric(trigger: ConversationReconciliationTrigger, outcome: string): void {
   try {
     conversationReconciliationsTotal.inc({ trigger, outcome });
+    // Metrics are deliberately best-effort.
+    // eslint-disable-next-line no-catch-all/no-catch-all
   } catch {
     // Observability must never affect identity or message routing.
   }
@@ -91,11 +97,7 @@ export function ensureFeishuConversationLaneForInbound(args: {
     throw new ConversationLaneConflictError('sender_identity_mismatch');
   }
   const group = getMessagingGroup(args.messagingGroupId);
-  if (
-    !group ||
-    group.channel_type !== 'feishu' ||
-    group.platform_id !== args.platformId
-  ) {
+  if (!group || group.channel_type !== 'feishu' || group.platform_id !== args.platformId) {
     metric('inbound', 'conflict');
     throw new ConversationLaneConflictError('messaging_group_address_mismatch');
   }
@@ -220,6 +222,7 @@ export function reconcileFeishuConversationLanes(args: {
     conflicts: 0,
     hasMore: hasMoreByCount,
     nextCursor: null,
+    failures: [],
   };
 
   for (const candidate of batch) {
@@ -229,16 +232,15 @@ export function reconcileFeishuConversationLanes(args: {
     }
     result.scanned += 1;
     result.nextCursor = candidate.session.id;
-    if (
-      candidate.configuredSessionMode !== 'per-user' &&
-      candidate.configuredSessionMode !== 'per-user-per-thread'
-    ) {
+    if (candidate.configuredSessionMode !== 'per-user' && candidate.configuredSessionMode !== 'per-user-per-thread') {
       result.skippedMode += 1;
+      result.failures.push({ sessionId: candidate.session.id, reason: 'unsupported_session_mode' });
       metric(args.trigger, 'skipped_mode');
       continue;
     }
     if (args.authorizeAgentGroup && !args.authorizeAgentGroup(candidate.session.agent_group_id)) {
       result.skippedUnauthorized += 1;
+      result.failures.push({ sessionId: candidate.session.id, reason: 'agent_group_unauthorized' });
       metric(args.trigger, 'skipped_unauthorized');
       continue;
     }
@@ -265,6 +267,10 @@ export function reconcileFeishuConversationLanes(args: {
     } catch (error) {
       if (error instanceof ConversationLaneConflictError || error instanceof ConversationBindingConflictError) {
         result.conflicts += 1;
+        result.failures.push({
+          sessionId: candidate.session.id,
+          reason: error instanceof ConversationBindingConflictError ? 'binding_conflict' : 'lane_conflict',
+        });
         metric(args.trigger, 'conflict');
         continue;
       }

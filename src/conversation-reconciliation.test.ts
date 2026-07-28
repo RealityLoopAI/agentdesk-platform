@@ -182,7 +182,9 @@ describe('Feishu conversation reconciliation', () => {
       trigger: 'web',
     });
     expect(result).toMatchObject({ scanned: 1, linked: 0, conflicts: 1 });
-    expect(getDb().prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?').pluck().get('session-1')).toBeNull();
+    expect(
+      getDb().prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?').pluck().get('session-1'),
+    ).toBeNull();
   });
 
   it('links an exact existing legacy session during inbound association without reading message history', () => {

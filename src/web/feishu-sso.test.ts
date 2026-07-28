@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { authenticateWebSession, createWebAuthSession, WebAuthStateError } from '../db/web-auth.js';
 import { runMigrations } from '../db/migrations/index.js';
+import { createSession } from '../db/sessions.js';
 import { createUserIdentity, getUserIdentity } from '../db/user-identities.js';
 import { webLoginTotal } from '../metrics.js';
+import type { Session } from '../types.js';
 import type { WebConfig } from './config.js';
 import { completeFeishuSso, FeishuSsoError, startFeishuSso } from './feishu-sso.js';
 
@@ -166,6 +168,57 @@ describe('Feishu Web SSO', () => {
     expect((await webLoginTotal.get()).values.find((value) => value.labels.outcome === 'succeeded')?.value).toBe(
       succeededBefore + 1,
     );
+  });
+
+  it('reconciles an authorized legacy Feishu session immediately after successful SSO', async () => {
+    const userId = 'feishu:ou_alice';
+    seedUser(userId);
+    getDb().exec(`
+      INSERT INTO agent_groups (id, name, folder, agent_provider, created_at, organization_id)
+        VALUES ('ag-1', 'Agent', 'agent', NULL, '${NOW.toISOString()}', NULL);
+      INSERT INTO messaging_groups
+        (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
+        VALUES ('mg-1', 'feishu', 'feishu:oc_room', 'Room', 1, 'public', '${NOW.toISOString()}');
+      INSERT INTO messaging_group_agents
+        (id, messaging_group_id, agent_group_id, engage_mode, engage_pattern,
+         sender_scope, ignored_message_policy, session_mode, priority, created_at)
+        VALUES ('mga-1', 'mg-1', 'ag-1', 'pattern', '.', 'all', 'drop', 'per-user', 0, '${NOW.toISOString()}');
+      INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+        VALUES ('${userId}', 'ag-1', NULL, '${NOW.toISOString()}');
+    `);
+    createSession({
+      id: 'legacy-session',
+      agent_group_id: 'ag-1',
+      messaging_group_id: 'mg-1',
+      thread_id: null,
+      owner_user_id: userId,
+      root_session_id: 'legacy-session',
+      conversation_thread_id: null,
+      conversation_lane_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: NOW.toISOString(),
+      archived_at: null,
+      spawn_depth: 0,
+      created_at: NOW.toISOString(),
+    } satisfies Session);
+    const started = startFeishuSso(CONFIG, NOW);
+
+    await completeFeishuSso({
+      config: CONFIG,
+      state: new URL(started.authorizationUrl).searchParams.get('state')!,
+      browserNonce: started.browserNonce,
+      authorizationCode: 'legacy-code',
+      fetchImpl: providerFetch(),
+      now: CALLBACK_NOW,
+    });
+
+    const linked = getDb().prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?').get('legacy-session') as {
+      conversation_lane_id: string | null;
+    };
+    expect(linked.conversation_lane_id).toMatch(/^lane-legacy-/);
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_bindings').pluck().get()).toBe(1);
   });
 
   it('rejects forged state before contacting Feishu or creating a session', async () => {

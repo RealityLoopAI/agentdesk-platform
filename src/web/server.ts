@@ -1,6 +1,7 @@
 import http, { type IncomingMessage, type RequestListener, type Server, type ServerResponse } from 'node:http';
 
 import { buildPublicBranding } from '../branding.js';
+import { reconcileFeishuConversationLanes } from '../conversation-reconciliation.js';
 import { getDb } from '../db/connection.js';
 import {
   authenticateWebSession,
@@ -12,6 +13,7 @@ import {
 import { recordEnterpriseAudit } from '../db/enterprise-audit.js';
 import { log } from '../log.js';
 import { webApiRejectedTotal, webLoginTotal } from '../metrics.js';
+import { canAccessAgentGroup } from '../modules/permissions/access.js';
 import { readWebConfig, type WebConfig } from './config.js';
 import {
   createWebConversation,
@@ -24,7 +26,7 @@ import {
   type SubmitWebInbound,
 } from './conversations.js';
 import { createWebEventStreamManager, WebEventStreamError } from './events.js';
-import { completeFeishuSso, startFeishuSso } from './feishu-sso.js';
+import { completeFeishuSso, getFeishuIdentityForWebSession, startFeishuSso } from './feishu-sso.js';
 import { createWebStaticFiles } from './static.js';
 
 const OAUTH_BROWSER_COOKIE_SUFFIX = '_oauth';
@@ -409,6 +411,39 @@ export function createWebRequestHandler(
           res.setHeader('cache-control', 'no-store');
           res.setHeader('set-cookie', clearSessionCookie(config));
           res.end();
+          return;
+        }
+
+        if (method === 'POST' && url.pathname === '/api/conversations/reconcile') {
+          const cursor =
+            postBody?.cursor === undefined || postBody.cursor === null
+              ? null
+              : typeof postBody.cursor === 'string' && postBody.cursor.length <= 256
+                ? postBody.cursor
+                : undefined;
+          const limit = postBody?.limit === undefined ? 50 : postBody.limit;
+          if (
+            cursor === undefined ||
+            !Number.isSafeInteger(limit) ||
+            (limit as number) < 1 ||
+            (limit as number) > 100
+          ) {
+            throw new WebRequestError(400, 'invalid_reconciliation_request');
+          }
+          const identity = getFeishuIdentityForWebSession(config, authenticated);
+          if (!identity) throw new WebRequestError(409, 'verified_feishu_identity_required');
+          const userId = authenticated.session.user_id;
+          json(res, 200, {
+            ...reconcileFeishuConversationLanes({
+              userId,
+              externalIdentityId: identity.id,
+              actor: userId,
+              trigger: 'web',
+              cursor,
+              limit: limit as number,
+              authorizeAgentGroup: (agentGroupId) => canAccessAgentGroup(userId, agentGroupId).allowed,
+            }),
+          });
           return;
         }
 

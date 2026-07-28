@@ -8,9 +8,12 @@ import {
   rotateWebAuthSession,
   type AuthenticatedWebSession,
 } from '../db/web-auth.js';
+import { reconcileFeishuConversationLanes } from '../conversation-reconciliation.js';
 import { recordEnterpriseAudit } from '../db/enterprise-audit.js';
-import { getUserIdentity, resolveOrCreateCanonicalUser } from '../db/user-identities.js';
+import { getUserIdentitiesForUser, getUserIdentity, resolveOrCreateCanonicalUser } from '../db/user-identities.js';
+import { canAccessAgentGroup } from '../modules/permissions/access.js';
 import { webLoginTotal } from '../metrics.js';
+import type { UserIdentity } from '../types.js';
 import type { WebConfig } from './config.js';
 
 const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
@@ -197,6 +200,29 @@ function sameUser(left: string, right: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+function feishuAuthContextHash(providerScope: string, externalSubject: string): string {
+  return createHash('sha256').update(`feishu\0${providerScope}\0${externalSubject}`).digest('hex');
+}
+
+/**
+ * Resolve the exact Feishu identity that established an authenticated Web
+ * session. The browser cannot select an external identity; the opaque
+ * auth-context hash is matched against server-side verified mappings.
+ */
+export function getFeishuIdentityForWebSession(
+  config: WebConfig,
+  authenticated: AuthenticatedWebSession,
+): UserIdentity | undefined {
+  return getUserIdentitiesForUser(authenticated.session.user_id).find(
+    (identity) =>
+      identity.provider === 'feishu' &&
+      identity.provider_scope === config.feishu.appId &&
+      identity.identifier_type === 'open_id' &&
+      feishuAuthContextHash(identity.provider_scope, identity.external_subject) ===
+        authenticated.session.auth_context_hash,
+  );
+}
+
 export function startFeishuSso(config: WebConfig, now: Date = new Date()): FeishuSsoStart {
   const verifier = config.feishu.pkce ? pkceVerifier() : undefined;
   const created = createWebAuthTransaction({
@@ -311,9 +337,7 @@ export async function completeFeishuSso(args: {
       throw new FeishuSsoError('identity_conflict');
     }
 
-    const authContextHash = createHash('sha256')
-      .update(`feishu\0${args.config.feishu.appId}\0${profile.openId}`)
-      .digest('hex');
+    const authContextHash = feishuAuthContextHash(args.config.feishu.appId, profile.openId);
     const session =
       args.currentSessionToken && currentSession
         ? rotateWebAuthSession({
@@ -348,6 +372,32 @@ export async function completeFeishuSso(args: {
       webLoginTotal.labels('succeeded').inc();
     } catch {
       // Metrics are best-effort and never alter authentication.
+    }
+    const verifiedIdentity = getUserIdentity(identityKey);
+    if (verifiedIdentity) {
+      try {
+        reconcileFeishuConversationLanes({
+          userId,
+          externalIdentityId: verifiedIdentity.id,
+          actor: userId,
+          trigger: 'sso',
+          limit: 50,
+          authorizeAgentGroup: (agentGroupId) => canAccessAgentGroup(userId, agentGroupId).allowed,
+        });
+        // Reconciliation is additive and retryable, so login remains valid.
+        // eslint-disable-next-line no-catch-all/no-catch-all
+      } catch (error) {
+        // Reconciliation is additive and retryable. An unexpected backfill
+        // failure must not invalidate an otherwise completed SSO login.
+        recordEnterpriseAudit({
+          eventType: 'conversation_reconciliation_failed',
+          actor: userId,
+          details: {
+            trigger: 'sso',
+            reason: error instanceof Error ? error.name : 'unknown',
+          },
+        });
+      }
     }
     return {
       userId,

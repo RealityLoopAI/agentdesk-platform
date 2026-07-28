@@ -110,13 +110,13 @@
 - [x] 10.2 实现统一的飞书会话协调服务：只按规范 Owner 和结构字段查询 `per-user`/`per-user-per-thread` 候选，以旧 Session ID 确定性创建或复用 Lane，且不扫描消息正文
 - [x] 10.3 扩展飞书入站 Router：跨渠道 Flag 开启时，在可信身份、Agent Group、Session Mode 和 Host 访问门确认后自动创建或关联 Lane/Binding，并让重复或并发事件收敛到同一 Lane
 - [x] 10.4 为自动关联实现冲突 Fail Closed、共享模式拒绝、候选数量/时间上限、幂等重试、Enterprise Audit 和不含敏感标识的指标
-- [ ] 10.5 在飞书 SSO 成功后调用有界协调服务，并新增受 CSRF、Origin、限流和逐请求授权保护的 `POST /api/conversations/reconcile`，保持 `GET /api/conversations` 无副作用
-- [ ] 10.6 新增运营者历史协调命令，支持按用户或 Agent Group 限定范围、Dry Run、幂等续跑、结果统计和无消息正文的冲突明细
+- [x] 10.5 在飞书 SSO 成功后调用有界协调服务，并新增受 CSRF、Origin、限流和逐请求授权保护的 `POST /api/conversations/reconcile`，保持 `GET /api/conversations` 无副作用
+- [x] 10.6 新增运营者历史协调命令，支持按用户或 Agent Group 限定范围、Dry Run、幂等续跑、结果统计和无消息正文的冲突明细
 - [ ] 10.7 扩展 Conversation List 契约和前端数据模型，返回并展示助手名称、来源渠道、最后活动时间，且协调完成后自动刷新飞书已有会话
 - [ ] 10.8 将前端空状态和会话入口改为 Feishu-first：查看飞书已有会话不出现选择步骤，“新建 Web 对话”降为次要操作，终端文案不暴露 Agent Group 或 Lane
 - [ ] 10.9 实现辅助新建会话的三种 UI：无可用助手时提示管理员分配权限、一个可用助手时直接创建、多个可用助手时显示“选择助手”
 - [x] 10.10 增加自动关联单元/集成测试，覆盖首条飞书消息、既有精确 Binding、重复 Callback、并发创建、Feature Flag 关闭和身份/地址冲突
-- [ ] 10.11 增加历史协调测试，覆盖首次 SSO、已登录用户升级后 Reconcile、多个旧个人 Session、重复协调、分页续跑、共享模式拒绝和不复制 inbound/outbound 历史
+- [x] 10.11 增加历史协调测试，覆盖首次 SSO、已登录用户升级后 Reconcile、多个旧个人 Session、重复协调、分页续跑、共享模式拒绝和不复制 inbound/outbound 历史
 - [ ] 10.12 增加权限隔离测试，证明自动关联不创建 Role/Membership、公开飞书群不自动授予 Web 权限、撤权即时隐藏 Lane、恢复授权后仍复用原 Lane，且 Organization 不进入 Gateway 授权输入
 - [ ] 10.13 增加 Alice/Bob 同群和多会话隐私测试，证明两人的 Lane/根 Session 分离，同一用户的不同飞书根 Session 不被合并，`shared`/`per-thread`/`agent-shared` 历史不会进入个人 Web
 - [ ] 10.14 使用真实 Host + Mock Feishu/SSO Provider 增加不预置 Lane/Binding 的 E2E：飞书发消息并收到 Agent 回复后，用户登录 Web 自动看到完整会话并可继续发送
