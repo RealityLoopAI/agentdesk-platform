@@ -26,6 +26,7 @@ import { gateCommand } from './command-gate.js';
 import { getTracer } from './observability/tracer.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { ConversationLaneConflictError, findActiveConversationBinding } from './db/conversation-lanes.js';
+import { ensureFeishuConversationLaneForInbound } from './conversation-reconciliation.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import { recordEnterpriseAudit } from './db/enterprise-audit.js';
 import { insertIngress, deleteIngress, markIngressFailed } from './db/inbound-ingress.js';
@@ -545,6 +546,9 @@ export function resolveConversationLaneIdForInbound(
   event: InboundEvent,
   userId: string | null,
   agentGroupId: string,
+  messagingGroupId: string,
+  effectiveSessionMode: MessagingGroupAgent['session_mode'],
+  createIfMissing: boolean,
 ): string | null {
   // A Web request may only reach here after the Web server has authenticated
   // the browser and authorized this exact Lane, so Web-only conversations keep
@@ -568,16 +572,33 @@ export function resolveConversationLaneIdForInbound(
     throw new ConversationLaneConflictError('sender_identity_mismatch');
   }
 
-  return (
-    findActiveConversationBinding({
+  const existing = findActiveConversationBinding({
       channelType: event.channelType,
       platformId: event.platformId,
       threadId: event.threadId,
+      threadFallback: effectiveSessionMode !== 'per-user-per-thread',
       externalIdentityId: identity.id,
       ownerUserId: userId,
       agentGroupId,
-    })?.lane.id ?? null
-  );
+    })?.lane.id;
+  if (existing) return existing;
+  if (
+    event.channelType !== 'feishu' ||
+    (effectiveSessionMode !== 'per-user' && effectiveSessionMode !== 'per-user-per-thread')
+  ) {
+    return null;
+  }
+  return ensureFeishuConversationLaneForInbound({
+    agentGroupId,
+    ownerUserId: userId,
+    messagingGroupId,
+    platformId: event.platformId,
+    threadId: event.threadId,
+    sourceSessionMode: effectiveSessionMode,
+    externalIdentityId: identity.id,
+    actor: userId,
+    createIfMissing,
+  });
 }
 
 /**
@@ -692,7 +713,14 @@ async function deliverToAgent(
             throw new Error(`userId is required for session_mode=${effectiveSessionMode}`);
           }
 
-          const conversationLaneId = resolveConversationLaneIdForInbound(event, userId, agent.agent_group_id);
+          const conversationLaneId = resolveConversationLaneIdForInbound(
+            event,
+            userId,
+            agent.agent_group_id,
+            mg.id,
+            effectiveSessionMode,
+            wake,
+          );
           const { session, created } = resolveSession(
             agent.agent_group_id,
             mg.id,

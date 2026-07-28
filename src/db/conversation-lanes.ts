@@ -1,7 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import { conversationBindingFailuresTotal } from '../metrics.js';
-import type { ConversationBinding, ConversationDeliveryMode, ConversationLane, Session } from '../types.js';
+import type {
+  ConversationBinding,
+  ConversationDeliveryMode,
+  ConversationLane,
+  MessagingGroupAgent,
+  Session,
+} from '../types.js';
 import { getDb } from './connection.js';
 import { recordEnterpriseAudit } from './enterprise-audit.js';
 import { getMessagingGroup } from './messaging-groups.js';
@@ -312,6 +318,7 @@ export function findActiveConversationBinding(args: {
   channelType: string;
   platformId: string;
   threadId?: string | null;
+  threadFallback?: boolean;
   externalIdentityId?: string | null;
   ownerUserId: string;
   agentGroupId: string;
@@ -351,7 +358,9 @@ export function findActiveConversationBinding(args: {
       threadId: args.threadId,
     }) as Joined | undefined;
   }
-  row ??= db.prepare(`${base} AND b.thread_id IS NULL LIMIT 1`).get(params) as Joined | undefined;
+  if (!args.threadId || args.threadFallback !== false) {
+    row ??= db.prepare(`${base} AND b.thread_id IS NULL LIMIT 1`).get(params) as Joined | undefined;
+  }
   if (!row) return undefined;
   return {
     binding: {
@@ -425,10 +434,8 @@ export function linkLegacyFeishuSession(args: {
   if (!session?.owner_user_id || !session.messaging_group_id) {
     throw new ConversationLaneConflictError('legacy_session_not_user_scoped');
   }
-  if (session.conversation_lane_id) {
-    const existing = getConversationLane(session.conversation_lane_id);
-    if (!existing) throw new ConversationLaneConflictError('linked_lane_missing');
-    return existing;
+  if (!isUserScopedMode(args.sourceSessionMode)) {
+    throw new ConversationLaneConflictError('shared_session_mode');
   }
   const identity = getUserIdentityById(args.externalIdentityId);
   if (!identity || identity.provider !== 'feishu' || identity.user_id !== session.owner_user_id) {
@@ -437,6 +444,44 @@ export function linkLegacyFeishuSession(args: {
   const group = getMessagingGroup(session.messaging_group_id);
   if (!group || group.channel_type !== 'feishu') {
     throw new ConversationLaneConflictError('legacy_channel_not_feishu');
+  }
+  if (session.conversation_lane_id) {
+    const existing = getConversationLane(session.conversation_lane_id);
+    if (!existing) throw new ConversationLaneConflictError('linked_lane_missing');
+    if (
+      existing.owner_user_id !== session.owner_user_id ||
+      existing.agent_group_id !== session.agent_group_id ||
+      existing.root_session_id !== session.id
+    ) {
+      throw new ConversationLaneConflictError('linked_lane_structure_mismatch');
+    }
+    const existingBinding = findActiveConversationBinding({
+      channelType: group.channel_type,
+      platformId: group.platform_id,
+      threadId: session.thread_id,
+      threadFallback: false,
+      externalIdentityId: identity.id,
+      ownerUserId: session.owner_user_id,
+      agentGroupId: session.agent_group_id,
+    });
+    if (existingBinding) {
+      if (existingBinding.lane.id !== existing.id) {
+        throw new ConversationBindingConflictError();
+      }
+      return existing;
+    }
+    createConversationBinding({
+      laneId: existing.id,
+      channelType: group.channel_type,
+      messagingGroupId: group.id,
+      platformId: group.platform_id,
+      threadId: session.thread_id,
+      externalIdentityId: identity.id,
+      deliveryMode: 'source-reply',
+      actor: args.actor,
+      verifiedAt: identity.verified_at,
+    });
+    return existing;
   }
   const digest = createHash('sha256').update(`legacy-lane\0${session.id}`).digest('hex').slice(0, 24);
   const laneId = `lane-legacy-${digest}`;
@@ -469,6 +514,56 @@ export function linkLegacyFeishuSession(args: {
     });
     return linked;
   })();
+}
+
+export interface LegacyFeishuSessionCandidate {
+  session: Session;
+  configuredSessionMode: MessagingGroupAgent['session_mode'];
+}
+
+/**
+ * Return structural Feishu reconciliation candidates only.
+ *
+ * This query deliberately never opens or scans a per-session message DB.
+ * Ordering and cursoring are stable so callers can put a hard bound on each
+ * reconciliation pass.
+ */
+export function listLegacyFeishuSessionCandidates(args: {
+  ownerUserId: string;
+  afterSessionId?: string | null;
+  limit: number;
+  agentGroupId?: string | null;
+}): LegacyFeishuSessionCandidate[] {
+  if (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 501) {
+    throw new Error('Legacy Feishu candidate limit must be between 1 and 501');
+  }
+  const rows = getDb()
+    .prepare(
+      `SELECT s.*, mga.session_mode AS configured_session_mode
+         FROM sessions s
+         JOIN messaging_groups mg ON mg.id = s.messaging_group_id
+         JOIN messaging_group_agents mga
+           ON mga.messaging_group_id = s.messaging_group_id
+          AND mga.agent_group_id = s.agent_group_id
+        WHERE s.owner_user_id = @ownerUserId
+          AND s.id = s.root_session_id
+          AND s.status = 'active'
+          AND mg.channel_type = 'feishu'
+          AND (@afterSessionId IS NULL OR s.id > @afterSessionId)
+          AND (@agentGroupId IS NULL OR s.agent_group_id = @agentGroupId)
+        ORDER BY s.id
+        LIMIT @limit`,
+    )
+    .all({
+      ownerUserId: requireText('ownerUserId', args.ownerUserId),
+      afterSessionId: args.afterSessionId ?? null,
+      agentGroupId: args.agentGroupId ?? null,
+      limit: args.limit,
+    }) as Array<Session & { configured_session_mode: MessagingGroupAgent['session_mode'] }>;
+  return rows.map((row) => {
+    const { configured_session_mode, ...session } = row;
+    return { session: session as Session, configuredSessionMode: configured_session_mode };
+  });
 }
 
 export function sessionForConversationLane(lane: ConversationLane): Session | undefined {

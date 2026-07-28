@@ -482,6 +482,16 @@ export const conversationBindingFailuresTotal = new client.Counter({
   registers: [registry],
 });
 
+export const conversationReconciliationsTotal = new client.Counter({
+  name: `${METRIC_PREFIX}_conversation_reconciliations_total`,
+  help: 'Conversation reconciliation decisions by bounded trigger and outcome',
+  // `trigger`: inbound | sso | web | operator
+  // `outcome`: linked | existing | dry_run | skipped_unauthorized |
+  // skipped_mode | conflict | limit_reached
+  labelNames: ['trigger', 'outcome'] as const,
+  registers: [registry],
+});
+
 export const feishuBitableOperationsTotal = new client.Counter({
   name: `${METRIC_PREFIX}_feishu_bitable_operations_total`,
   help: 'Known Feishu Bitable Gateway operations by terminal result, derived from credential-free audit messages',

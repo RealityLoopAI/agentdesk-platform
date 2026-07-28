@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   conversationBindingFailuresTotal,
+  conversationReconciliationsTotal,
   crossChannelLoopSuppressedTotal,
   feishuBitableOperationsTotal,
   policyCheckFailedTotal,
@@ -74,6 +75,7 @@ describe('Web, cross-channel and Bitable metric contracts', () => {
       [webSseConnections, /_web_sse_connections$/, 'gauge'],
       [webSseEventsTotal, /_web_sse_events_total$/, 'counter'],
       [conversationBindingFailuresTotal, /_conversation_binding_failures_total$/, 'counter'],
+      [conversationReconciliationsTotal, /_conversation_reconciliations_total$/, 'counter'],
       [feishuBitableOperationsTotal, /_feishu_bitable_operations_total$/, 'counter'],
       [crossChannelLoopSuppressedTotal, /_cross_channel_loop_suppressed_total$/, 'counter'],
     ] as const;

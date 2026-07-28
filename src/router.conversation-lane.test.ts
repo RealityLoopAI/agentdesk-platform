@@ -104,6 +104,52 @@ function event(args: {
 }
 
 describe('Router cross-channel Conversation Lane', () => {
+  it('automatically creates one deterministic Lane/Binding on the first verified Feishu message', async () => {
+    createUserIdentity({
+      userId: 'alice',
+      provider: 'feishu',
+      providerScope: 'app-a',
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
+
+    await Promise.all([
+      routeInbound(
+        event({
+          id: 'feishu-concurrent-a',
+          channelType: 'feishu',
+          platformId: 'feishu:oc_room',
+          externalSubject: 'ou_alice',
+        }),
+      ),
+      routeInbound(
+        event({
+          id: 'feishu-concurrent-b',
+          channelType: 'feishu',
+          platformId: 'feishu:oc_room',
+          externalSubject: 'ou_alice',
+        }),
+      ),
+    ]);
+
+    const sessions = getDb()
+      .prepare('SELECT id, owner_user_id, conversation_lane_id FROM sessions')
+      .all() as Array<{ id: string; owner_user_id: string; conversation_lane_id: string }>;
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.owner_user_id).toBe('alice');
+    expect(sessions[0]?.conversation_lane_id).toMatch(/^lane-feishu-/);
+    expect(
+      getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get(),
+    ).toBe(1);
+    expect(
+      getDb().prepare('SELECT COUNT(*) FROM conversation_bindings WHERE revoked_at IS NULL').pluck().get(),
+    ).toBe(1);
+
+    const inbound = new Database(inboundDbPath('ag-1', sessions[0]!.id), { readonly: true });
+    expect(inbound.prepare('SELECT COUNT(*) FROM messages_in').pluck().get()).toBe(2);
+    inbound.close();
+  });
+
   it('reuses Alice Lane across Feishu and Web while isolating Bob in the same group', async () => {
     const aliceIdentity = createUserIdentity({
       userId: 'alice',
