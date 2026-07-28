@@ -4,6 +4,8 @@ AgentDesk 当前已有原生飞书 Channel Adapter 和通用 Channel Contract。
 
 当前用户模型把“一个人”和“一个外部身份”混为一体，例如 `users.id = "feishu:ou_..."`。当前 `per-user` Session 查询还包含 `messaging_group_id`，所以即便 Web 和飞书解析出同一个用户，只要属于不同 Messaging Group，就会产生两个不同 Session。`agent-shared` 不能解决这一问题，因为它会在多个用户间共享 Session，削弱平台最重要的隔离保证。
 
+产品主流程是用户先在飞书中与机器人、Agent 或多维表格助手聊天，再通过飞书 SSO 登录 Web 查看和继续这些对话。飞书入站时已经由 Messaging Group Wiring 确定 Agent Group，因此查看既有飞书对话不应要求用户再次选择 Agent。只有用户主动从 Web 发起一段没有飞书上下文的新对话时，才需要由服务端确定一个有权访问的 Agent Group。
+
 原生飞书 Adapter 目前只调用认证、IM、Reaction、Image 和成员查询接口，没有调用多维表格接口。但是 `lab-frontdesk` 示例声称可以维护多维表格，并写明由飞书 Channel 直接处理。该声明没有 Agent Tool 或 Gateway Operation 支撑，也违背“业务操作必须经 Backend Gateway”的平台边界。
 
 本变更涉及公共身份契约、中央数据库 Schema、Channel 形态、Session 解析、投递行为、Web 安全边界、前端构建和 Backend Gateway Operation Catalog。因此实施过程中必须编写 ADR，并同步相关文档。
@@ -14,9 +16,11 @@ AgentDesk 当前已有原生飞书 Channel Adapter 和通用 Channel Contract。
 
 **目标：**
 
-- 提供经过身份认证的浏览器界面，让用户查看并继续自己的 Agent 会话。
+- 提供经过身份认证的浏览器界面，让用户登录后自动看到并继续自己已有且仍有权访问的飞书 Agent 会话。
 - 将飞书消息事件和飞书 SSO 登录解析为同一个规范用户，且不信任浏览器自报身份。
+- 为新的合格飞书入站会话幂等创建或关联 Lane，并为既有用户级飞书 Session 提供确定性、定向且可审计的历史回填。
 - 在批准的飞书/Web Binding 间共享一个用户自有 Agent Session，同时不暴露其他用户的群聊上下文。
+- 将 Web 新建会话保留为辅助流程；查看既有飞书历史不要求选择助手。
 - 保持回复路由确定性，并阻止跨渠道回环和未经许可的群聊发帖。
 - 通过经过授权、幂等和审计的 Backend Gateway Operation 实现多维表格元数据与 Record CRUD。
 - 保持既有身份信任链、Organization 隔离、三 DB 单写者模型和旧飞书部署兼容。
@@ -28,6 +32,7 @@ AgentDesk 当前已有原生飞书 Channel Adapter 和通用 Channel Contract。
 - 多节点 Host、分布式 Session Scheduler 或替换 SQLite。
 - 默认把所有 Web 消息同步到飞书群。
 - 在一个用户的 Web 账号中展示整个飞书群的所有消息。
+- 因为用户曾在公开飞书群中与机器人互动，就自动授予 Agent Group、Organization 或多维表格业务权限。
 - 让 `agent-shared` 适用于互不信任的终端用户。
 - 在 AgentDesk 中央数据库或 Agent 容器中保存飞书 OAuth Token。
 - 用飞书 Adapter 直接访问多维表格来替代 Backend Gateway。
@@ -50,6 +55,7 @@ GET  /auth/feishu/callback
 POST /auth/logout
 GET  /api/me
 GET  /api/conversations
+POST /api/conversations/reconcile
 POST /api/conversations
 GET  /api/conversations/:laneId/messages
 POST /api/conversations/:laneId/messages
@@ -144,6 +150,15 @@ SSE 客户端只建立一个用户级连接。事件至少包含 `eventId`、`cu
 - 标签页进入后台时保留一个有界连接，不为每个 Lane 新建连接；多标签页连接数由服务端上限保护。
 
 用户界面首期采用“左侧会话列表 + 右侧消息工作区”的响应式布局。窄屏下两者切换显示。消息工作区必须包含历史加载、发送中/失败重试状态、Agent 处理中提示、SSE 重连提示和空会话引导。键盘可以完成会话切换、输入和发送；状态变化使用适当的 ARIA Live Region，但不能因每个流式片段频繁打断读屏。
+
+会话产品流程采用 Feishu-first：
+
+1. 飞书 SSO 成功后，Host 在已验证规范用户上下文中执行一次有界、幂等的个人飞书会话协调；已登录用户在新版前端首次加载时通过受 CSRF 保护的 `POST /api/conversations/reconcile` 执行同一操作。
+2. 协调完成后再读取 `GET /api/conversations`，首页优先展示已关联的飞书会话，并显示助手名称、来源渠道和最后活动时间。查看这些会话不出现 Agent 选择步骤。
+3. “新建 Web 对话”作为次要操作。没有可用助手时说明需要管理员分配权限；只有一个可用助手时直接创建；存在多个可用助手时才打开“选择助手”对话框。终端用户文案使用“助手”，不暴露 `Agent Group` 或 `Lane` 等内部名词。
+4. 用户没有历史会话但有可用助手时，空状态同时引导其前往飞书发起对话或从 Web 新建；既没有历史也没有权限时，只显示联系管理员的安全提示，不泄露不可访问的助手或会话。
+
+选择显式 `POST /api/conversations/reconcile` 而不是让 `GET /api/conversations` 隐式写数据库，是为了保持读取接口无副作用，并让历史协调具备 CSRF、限流、审计、重试和错误反馈边界。SSO Callback 中的首次协调与该接口复用同一个服务，必须按用户和已有 Session ID 幂等。
 
 #### UI 视觉规范：企业简洁风与轻量品牌化
 
@@ -317,7 +332,37 @@ conversation_bindings (
 
 给 `sessions` 增加 `conversation_lane_id`。跨渠道解析根据 Lane 和 `root_session_id` 查找，不使用仅用于观测关联的 `conversation_thread_id`。
 
-只有 `per-user` 和 `per-user-per-thread` 来源允许自动关联。`shared`、`per-thread` 和 `agent-shared` 历史不得自动合并，因为其中可能包含多个用户内容。
+Lane 的产品边界不是“一个用户在每个 Agent Group 永远只有一条会话”。一个用户可以在同一 Agent Group 下拥有多条 Lane：每个既有飞书用户级根 Session 确定性映射到一条 Lane，Web 主动新建的会话也创建独立 Lane。这样既保留不同飞书私聊或线程的原始上下文，也避免把多个历史 Session 静默拼接。相同的已验证 Channel Binding 或同一个旧 Session 重试关联时必须返回同一 Lane。
+
+#### 新飞书入站自动关联
+
+`CROSS_CHANNEL_LANES_ENABLED=true` 时，Router 在飞书 Adapter 已验证发送者身份、Messaging Group Wiring 已确定 Agent Group、Host 访问门已通过之后执行以下流程：
+
+1. 使用完整外部身份键解析规范用户，并确定实际 Session Mode、Messaging Group、Platform Address 和 Thread。
+2. 如果存在与该规范用户、Agent Group 和精确飞书地址匹配的活动 Binding，则复用其 Lane。
+3. 如果没有 Binding，但存在由同一结构性 Session Key 定位的合格旧用户 Session，则在中央数据库事务中确定性创建 Lane、关联该 Session 并创建飞书 Binding。
+4. 如果不存在旧 Session，则幂等创建 Lane 和飞书 Binding；本次消息创建的根 Session 随后关联到该 Lane。
+5. 并发或重复飞书事件必须通过唯一索引和确定性查询收敛到同一 Lane，不得产生两份历史。
+
+自动关联只接受 `per-user` 和 `per-user-per-thread`。`shared`、`per-thread` 和 `agent-shared` 历史不得自动合并，因为其中可能包含多个用户内容。外部身份、Session Owner、Agent Group 或 Binding 地址发生冲突时，不得把消息路由到另一用户的 Lane；系统记录不含消息正文的审计事件，并保持旧飞书会话可用或对身份所有权冲突 Fail Closed。
+
+#### 既有飞书历史定向回填
+
+SSO Callback、`POST /api/conversations/reconcile` 和运营者批处理命令复用同一个协调服务。该服务只能查询 `owner_user_id` 等于当前规范用户的候选 Session，不得扫描消息正文、姓名、邮箱或整个租户的会话内容来推断归属。
+
+每个候选 Session 必须同时满足：
+
+- Messaging Group 的 Channel 为 `feishu`；
+- Session Mode 为 `per-user` 或 `per-user-per-thread`；
+- Session Owner 与已验证飞书外部身份指向同一规范用户；
+- Agent Group、Messaging Group、Platform Address 和 Thread 可以确定；
+- 没有绑定到另一条 Lane，且当前不存在身份或地址冲突。
+
+协调服务以旧 Session ID 派生稳定 Lane 标识，保留原始创建时间和根 Session，不复制 inbound/outbound 历史。重复协调返回既有结果；冲突候选被跳过并产生审计记录。用户请求路径必须有候选数量和执行时间上限，超出部分由后续重试或运营批处理完成。运营命令必须支持按用户或 Agent Group 限定范围、Dry Run、结果统计和失败明细，但不得输出消息正文或敏感外部标识。
+
+#### 关联与授权相互独立
+
+自动关联和历史回填只建立身份已验证的会话所有权关系，不创建 `user_roles`、Agent Group Membership 或 Organization Membership。Web 在列出 Lane、读取历史、发送消息、建立 SSE 和执行协调时，都必须重新执行当前 Host 访问门；公开飞书群允许机器人接收消息，不等于用户自动获得 Web 或多维表格权限。撤权后 Lane 可以保留以便审计和未来恢复，但对用户不可见且不可操作。Organization 仍只在 Host 侧执行，不进入 Backend Gateway 业务授权输入。
 
 ### 8. 一个 Session DB Pair 继续作为消息真相源
 
@@ -410,6 +455,9 @@ Agent Prompt 可以把多维表格描述为潜在能力，但在宣称可用前�
 
 - **[不同飞书应用的身份碰撞]** → 唯一键包含 Provider Scope 和 Identifier Type；只自动关联兼容且已验证的身份。
 - **[旧用户 ID 仍带外部平台形态]** → 将 `users.id` 当作不透明规范 Key，暂缓高风险全量重写；新代码不得从中解析业务语义。
+- **[自动关联把旧会话接到错误用户或错误 Lane]** → 只按已验证外部身份、规范 Owner、Agent Group 和精确 Channel 地址等结构字段匹配；不读取消息内容猜测归属；唯一索引冲突时拒绝合并并审计。
+- **[登录时历史回填过多导致延迟]** → 仅按当前用户定向查询，限制单次候选数量和执行时间，支持幂等续跑与运营批处理预热。
+- **[飞书可聊天但 Web 无 Agent Group 权限]** → 将 Channel 接收策略和 Web 资源授权保持分离；不自动提权，前端给出管理员分配权限提示，撤权在下一次请求即时生效。
 - **[跨渠道 Session 泄露群聊上下文]** → 只允许用户级 Session 自动 Binding，拒绝 Shared/Agent-shared 历史。
 - **[Web SSO 被攻破会暴露 Agent 访问]** → 使用 State/PKCE、安全服务端 Session、CSRF/Origin 校验、短有效期、撤销、限流和逐请求授权。
 - **[SSE 断连时丢失事件]** → 只推送已持久化 Event，并在重新授权后按不透明 Cursor 重放。
@@ -435,20 +483,22 @@ Agent Prompt 可以把多维表格描述为潜在能力，但在宣称可用前�
 2. 新增 `user_identities`、`web_auth_sessions`、`conversation_lanes`、`conversation_bindings` 及 `sessions.conversation_lane_id` 的加性中央数据库迁移。
 3. 安全回填旧飞书身份关联，不重写既有 `users.id`、Role、Membership、Audit 或 Session Owner。
 4. 在 Feature Flag 后发布新身份解析，验证关闭 Web 时既有飞书路由逐字节保持不变。
-5. 新增 Web Listener、SSO Callback、Session Store、只读会话列表/历史和授权测试。
-6. 建立 `web/` React + Vite + TypeScript 工程，先交付登录壳、会话列表和只读历史。
-7. 新增 Web 消息接入和 SSE 投递，再启用消息输入、待处理归并和断线重放；默认关闭跨渠道 Lane 自动创建。
-8. 先为已验证旧 `per-user` 飞书 Session 开启显式关联，再允许创建新跨渠道 Lane。
-9. 完成组件测试和浏览器 E2E 后，构建 `web/dist/` 并验证同源静态资源发布及回滚。
-10. 发布 Gateway 多维表格只读 Operation 及一致性测试；写操作保持关闭。
-11. 增加写授权、幂等、确认、审计和限流处理，再按逻辑资源逐个启用。
-12. 修正示例 Prompt，发布运营迁移和配置文档。
-13. 只有在隔离、身份、投递回环、回滚和真实容器测试通过后，才移除 Feature Flag。
+5. 新增 Web Listener、SSO Callback、Session Store、只读会话列表/历史和授权测试，保持 `CROSS_CHANNEL_LANES_ENABLED=false`。
+6. 建立 `web/` React + Vite + TypeScript 工程，先交付登录壳、飞书会话优先的列表和只读历史；Web 新建会话作为辅助入口。
+7. 实现统一的飞书会话协调服务、受保护的 Reconcile API 和带 Dry Run 的运营批处理命令；先在影子模式统计可关联、冲突、共享模式拒绝和超限候选。
+8. 对测试用户启用跨渠道 Flag：新飞书入站自动创建/关联 Lane，SSO 或显式 Reconcile 定向回填已验证旧 `per-user`/`per-user-per-thread` Session；关联不自动授予任何权限。
+9. 新增 Web 消息接入和 SSE 投递，再启用消息输入、待处理归并和断线重放。
+10. 完成不预置 Binding 的飞书到 Web E2E、历史回填、跨用户隔离、撤权和回滚验收后，构建 `web/dist/` 并验证同源静态资源发布。
+11. 发布 Gateway 多维表格只读 Operation 及一致性测试；写操作保持关闭。
+12. 增加写授权、幂等、确认、审计和限流处理，再按逻辑资源逐个启用。
+13. 修正示例 Prompt，发布运营迁移和配置文档。
+14. 只有在隔离、身份、投递回环、回滚和真实容器测试通过后，才移除 Feature Flag。
 
 回滚方案：
 
 - 关闭 Web 与跨渠道 Feature Flag，既有飞书 Session 继续使用旧解析逻辑。
 - 撤销所有 Web Session 并停止 Web Listener。
+- 停止新的自动关联和 Reconcile；保留已经创建的 Lane/Binding 作为加性数据，回滚期间不删除或重写历史。
 - 在 Gateway Discovery 中关闭多维表格 Operation，Agent 随即报告能力不可用。
 - 回滚期间保留加性 Table/Column，避免破坏性降级；不得删除身份关联或会话数据。
 
@@ -456,7 +506,6 @@ Agent Prompt 可以把多维表格描述为潜在能力，但在宣称可用前�
 
 - 生产环境将使用哪个飞书 SSO 应用和 Tenant Scope？能否保证它与产生聊天 `open_id` 的应用兼容？
 - Web 只需展示并继续用户自己的会话，还是 Web 发出的消息也必须同步到飞书私聊？本设计默认不自动发送。
-- 每个用户在每个 Agent Group 下只有一个 Lane，还是允许创建多个命名 Lane？Schema 支持多个，但产品默认行为需确认。
 - 首个生产版本需要开放哪些逻辑多维表格资源和 Operation？
 - 哪个后端服务负责飞书应用凭证、幂等记录和资源白名单？
 - Web Auth Session 和浏览器可见会话历史采用什么保留周期？

@@ -12,15 +12,49 @@ Web Surface 的所有会话、消息和事件流接口 SHALL 要求已经认证�
 - **THEN** 浏览器只能请求该规范用户有权访问的资源
 
 ### Requirement: 用户自有会话列表
-Web API SHALL 只列出由当前规范用户拥有，且当前仍能通过 Agent Group 与 Organization 访问门的活动或归档会话 Lane。
+Web API SHALL 只列出由当前规范用户拥有，且当前仍能通过 Agent Group 与 Organization 访问门的活动或归档会话 Lane。列表必须包含足以区分助手和来源渠道的非敏感元数据，并在历史协调完成后反映该用户合格的飞书已有会话。
 
 #### Scenario: 用户查看会话列表
 - **WHEN** 已认证用户请求自己的会话
-- **THEN** 结果只包含该用户拥有且仍有权访问的 Lane
+- **THEN** 结果只包含该用户拥有且仍有权访问的 Lane，并标识助手名称、来源渠道和最后活动时间
 
 #### Scenario: 登录后权限被撤销
 - **WHEN** 用户建立 Web Session 后，其 Agent Group 或 Organization 权限被撤销
 - **THEN** 下一次会话列表或消息请求必须拒绝访问被撤销的范围
+
+### Requirement: 飞书已有会话作为 Web 主流程
+Web 应用 SHALL 在飞书 SSO 后先协调并展示当前用户合格的飞书已有会话。查看或继续这些会话不得要求用户选择 Agent、Agent Group 或助手；飞书入站 Wiring 已确定的 Agent Group 必须作为服务端权威路由上下文。
+
+#### Scenario: 登录后存在飞书历史
+- **WHEN** 用户通过飞书 SSO 登录，且历史协调找到一条仍有权访问的飞书用户级 Lane
+- **THEN** 会话列表自动显示该对话，用户可以直接打开历史并继续发送消息
+
+#### Scenario: 飞书产生新消息
+- **WHEN** 已登录用户的合格飞书 Lane 收到并持久化一条新消息或 Agent 回复
+- **THEN** Web 实时事件或后续列表刷新显示该变化，无需用户新建会话或重新选择助手
+
+#### Scenario: 查看已有会话
+- **WHEN** 用户从列表打开一条飞书来源 Lane
+- **THEN** Web 直接加载该 Lane 的权威历史，不显示“选择 Agent”前置步骤
+
+### Requirement: Web 新建会话作为辅助流程
+Web 应用 SHALL 将主动新建 Web 对话呈现为会话列表中的次要操作，并在终端用户文案中使用“助手”而不是暴露 `Agent Group` 或 `Lane`。创建操作仍必须使用服务端返回且当前有权访问的 Agent Group。
+
+#### Scenario: 只有一个可用助手
+- **WHEN** 用户主动新建 Web 对话且当前只有一个可用助手
+- **THEN** Web 直接创建该助手的独立 Web Lane，不额外显示选择对话框
+
+#### Scenario: 存在多个可用助手
+- **WHEN** 用户主动新建 Web 对话且当前有多个可用助手
+- **THEN** Web 显示“选择助手”对话框，并只列出服务端确认有权访问的助手
+
+#### Scenario: 没有可用助手
+- **WHEN** 用户没有可用助手且没有可见历史会话
+- **THEN** Web 不提供无效的选择框，提示联系管理员分配权限，且不泄露不可访问的助手信息
+
+#### Scenario: 没有历史但可以新建
+- **WHEN** 用户没有飞书历史会话但至少有一个可用助手
+- **THEN** 空状态同时提供前往飞书开始对话的说明和次要的 Web 新建入口
 
 ### Requirement: Web 消息持久化接入
 Web API 提交的消息 SHALL 经过与其他 Channel Adapter 相同的“先持久化再路由”、访问门、Session 写入、身份盖章和容器唤醒路径。
@@ -74,7 +108,7 @@ Web Channel MUST NOT 为普通终端用户使用 `agent-shared` Session，也不
 - **THEN** 系统忽略或拒绝该值，并继续以已认证的规范用户为权威身份
 
 ### Requirement: 可导航的会话界面
-Web 应用 SHALL 提供登录页、会话列表和可通过不透明 Lane ID 定位的会话工作区。用户刷新页面、使用浏览器前进后退或在窄屏设备切换视图时，不得丢失已经由服务端确认的会话状态。
+Web 应用 SHALL 提供登录页、以飞书已有会话为主的会话列表和可通过不透明 Lane ID 定位的会话工作区。用户刷新页面、使用浏览器前进后退或在窄屏设备切换视图时，不得丢失已经由服务端确认的会话状态。
 
 #### Scenario: 打开指定会话地址
 - **WHEN** 已认证用户打开自己有权访问的 `/conversations/:laneId`

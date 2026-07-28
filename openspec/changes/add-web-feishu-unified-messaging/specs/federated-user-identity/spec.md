@@ -11,6 +11,10 @@
 - **WHEN** 合法飞书 SSO 身份没有任何既有映射
 - **THEN** 平台以原子方式创建一个规范用户和一个唯一的飞书外部身份关联
 
+#### Scenario: 飞书聊天与 SSO 使用同一身份
+- **WHEN** 飞书聊天事件与 SSO 回调提供相同 Provider、Provider Scope、Identifier Type 和经过验证的 `open_id`
+- **THEN** 两条入口解析到同一个规范用户，使该用户可以在 Web 中发现自己的飞书用户级会话
+
 ### Requirement: 飞书身份键
 飞书外部身份 SHALL 由 Provider、飞书应用或租户 Scope、标识类型和标识值共同确定。系统必须优先使用已配置飞书应用下经过验证的 `open_id`，且不得静默地把 `open_id`、`union_id`、邮箱、显示名或工号视为同一身份。
 
@@ -21,6 +25,10 @@
 #### Scenario: 不同飞书应用
 - **WHEN** 同一个人在两个飞书应用下拥有不同的 `open_id`
 - **THEN** 平台不得仅根据姓名或邮箱自动关联
+
+#### Scenario: 原始 open_id 字符串相同但 Scope 不同
+- **WHEN** 聊天事件和 SSO 回调提供相同的原始 `open_id` 字符串但 Provider Scope 不同
+- **THEN** 平台不得自动认为它们属于同一用户或据此回填飞书历史
 
 ### Requirement: 飞书 SSO 授权流程
 Web 登录 SHALL 采用飞书 Authorization Code 流程，校验 State、在支持时使用 PKCE、严格校验 Redirect URI、一次性使用 Code，并限制登录事务有效期。
