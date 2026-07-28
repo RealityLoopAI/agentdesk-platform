@@ -46,7 +46,7 @@
 - [x] 5.6 在仓库顶层建立 `web/` React + Vite + TypeScript 工程，配置 Tailwind CSS、shadcn/ui、Radix UI、React Router、TanStack Query、Vitest、React Testing Library、网络 Mock 和根级 `pnpm` 开发/检查/构建脚本
 - [x] 5.7 扩展 `src/branding.ts` 的公开 UI 品牌配置并实现只读 `/api/branding`，动态提供 `PLATFORM_BRAND`、经过批准的同源 Logo 路径和校验后的主题 Token，禁止返回 Secret 或机器内部路径
 - [x] 5.8 建立语义化 CSS Token、4px 间距网格、系统字体栈、6/10/14/20px 圆角层级和深青色/暖白色推荐主题，并为缺失或非法品牌配置提供可访问回退
-- [ ] 5.9 导入运营者批准的正式 SVG/高分辨率 Logo，建立导航、登录页、Agent 头像、空状态和低动态处理状态的 Logo 使用组件及安全留白规则
+- [x] 5.9 导入运营者批准的正式 SVG/高分辨率 Logo，建立导航、登录页、Agent 头像、空状态和低动态处理状态的 Logo 使用组件及安全留白规则
 - [x] 5.10 建立 `/login`、`/conversations`、`/conversations/:laneId` 路由、应用错误边界，以及桌面双栏/窄屏页面切换的响应式骨架
 - [x] 5.11 实现同源 HTTP Client、`/api/me` 启动认证、飞书 SSO 顶层跳转、CSRF Header、`401` 重新登录和 `403` 无权访问的分离处理
 - [x] 5.12 实现均衡密度的会话侧栏、会话创建、URL Lane 选择、分页历史、品牌化空状态和确定性消息排序，并使用 TanStack Query 保存服务端权威状态
