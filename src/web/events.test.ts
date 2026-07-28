@@ -37,7 +37,6 @@ function config(maxConnections = 2): WebConfig {
       authorizeUrl: 'https://accounts.example/authorize',
       tokenUrl: 'https://accounts.example/token',
       userInfoUrl: 'https://accounts.example/user',
-      scope: 'auth:user.id:read',
       pkce: false,
     },
   };

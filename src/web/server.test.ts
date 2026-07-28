@@ -38,7 +38,6 @@ const CONFIG: WebConfig = {
     authorizeUrl: 'https://accounts.feishu.example/open-apis/authen/v1/authorize',
     tokenUrl: 'https://open.feishu.example/open-apis/authen/v2/oauth/token',
     userInfoUrl: 'https://open.feishu.example/open-apis/authen/v1/user_info',
-    scope: 'auth:user.id:read',
     pkce: false,
   },
 };

@@ -50,7 +50,7 @@ export interface WebConfig {
     authorizeUrl: string;
     tokenUrl: string;
     userInfoUrl: string;
-    scope: string;
+    scope?: string;
     pkce: boolean;
   };
 }
@@ -173,7 +173,7 @@ export function parseWebConfig(get: WebConfigReader): WebConfig | null {
       authorizeUrl: authorizeUrl.toString(),
       tokenUrl: tokenUrl.toString(),
       userInfoUrl: userInfoUrl.toString(),
-      scope: get('FEISHU_SSO_SCOPE') ?? 'auth:user.id:read',
+      scope: get('FEISHU_SSO_SCOPE')?.trim() || undefined,
       pkce: boolValue(get('FEISHU_SSO_PKCE')),
     },
   };

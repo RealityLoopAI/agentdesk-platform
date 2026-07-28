@@ -211,7 +211,9 @@ export function startFeishuSso(config: WebConfig, now: Date = new Date()): Feish
   url.searchParams.set('redirect_uri', config.redirectUri);
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('state', created.state);
-  url.searchParams.set('scope', config.feishu.scope);
+  if (config.feishu.scope) {
+    url.searchParams.set('scope', config.feishu.scope);
+  }
   if (verifier) {
     url.searchParams.set('code_challenge', pkceChallenge(verifier));
     url.searchParams.set('code_challenge_method', 'S256');

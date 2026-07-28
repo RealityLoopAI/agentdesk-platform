@@ -36,7 +36,6 @@ const CONFIG: WebConfig = {
     authorizeUrl: 'https://accounts.feishu.example/open-apis/authen/v1/authorize',
     tokenUrl: 'https://open.feishu.example/open-apis/authen/v2/oauth/token',
     userInfoUrl: 'https://open.feishu.example/open-apis/authen/v1/user_info',
-    scope: 'auth:user.id:read',
     pkce: true,
   },
 };
@@ -84,6 +83,7 @@ describe('Feishu Web SSO', () => {
     expect(url.searchParams.get('client_id')).toBe(CONFIG.feishu.appId);
     expect(url.searchParams.get('redirect_uri')).toBe(CONFIG.redirectUri);
     expect(url.searchParams.get('state')).toBeTruthy();
+    expect(url.searchParams.has('scope')).toBe(false);
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('code_challenge')).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
@@ -91,6 +91,19 @@ describe('Feishu Web SSO', () => {
     expect(raw).not.toContain(url.searchParams.get('state'));
     expect(raw).not.toContain(started.browserNonce);
     expect(raw).toContain('"pkce_verifier_ciphertext":"v1.');
+  });
+
+  it('requests an explicitly configured OAuth Scope without changing it', () => {
+    const configured: WebConfig = {
+      ...CONFIG,
+      feishu: {
+        ...CONFIG.feishu,
+        scope: 'contact:user.employee_id:readonly',
+      },
+    };
+    const started = startFeishuSso(configured, NOW);
+
+    expect(new URL(started.authorizationUrl).searchParams.get('scope')).toBe('contact:user.employee_id:readonly');
   });
 
   it('maps verified open_id to one canonical user and creates an opaque Web session', async () => {

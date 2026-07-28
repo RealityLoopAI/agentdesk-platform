@@ -37,10 +37,15 @@ Host 在每次原生 Channel 路由时读取 Lane 开关，但生产环境仍建
 - 已配置浏览器重定向地址：
   `https://<你的域名>/auth/feishu/callback`；
 - 地址必须与 `WEB_PUBLIC_ORIGIN` 拼出的地址逐字一致；
-- 应用具备 `auth:user.id:read` 等实际使用的 SSO Scope；
+- 当前只读取登录结果中的 `open_id`，`FEISHU_SSO_SCOPE` 默认留空，Host 不会在授权地址中强制附加
+  `scope` 参数；
+- 只有部署确实需要额外用户字段或 API、且应用已经开通对应 OAuth 权限时，才填写飞书开放平台当前
+  文档列出的有效 Scope；
 - 聊天事件和 SSO 返回的是可以在同一个 `FEISHU_APP_ID` Scope 下比较的身份。
 
-飞书 `open_id` 是应用范围内的标识。项目在 `user_identities` 中使用
+这里有两个容易混淆的“Scope”：`FEISHU_SSO_SCOPE` 是浏览器登录时向飞书额外申请的 OAuth
+权限；下文的 App Scope 是 `open_id` 所属的飞书应用边界。二者不是同一概念。飞书 `open_id`
+是应用范围内的标识。项目在 `user_identities` 中使用
 `provider + provider_scope + identifier_type + external_subject` 作为唯一外部身份，其中
 `provider_scope` 通常就是 `FEISHU_APP_ID`。如果聊天 Bot 和 SSO 使用不同应用，即使两边看起来是
 同一个人，也不能仅凭相似字符串自动合并；应先确认飞书的身份换取/映射方案，再由受审计的身份关联
@@ -63,12 +68,16 @@ WEB_COOKIE_NAME=agentdesk_web_session
 WEB_ALLOW_INSECURE_HTTP=false
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=<从 Secret Manager 注入>
-FEISHU_SSO_SCOPE=auth:user.id:read
+# 当前 open_id 登录流程不需要强制附加 OAuth Scope
+FEISHU_SSO_SCOPE=
 ```
 
 不要把示例占位符直接用于运行。启动校验会拒绝弱 Secret、非 HTTPS 公网 Origin、超出范围的 TTL 和
 含糊的 Feature Flag 值。完整参数见 [`.env.example`](../.env.example) 和
 [`src/web/config.ts`](../src/web/config.ts)。
+
+`FEISHU_SSO_SCOPE` 未填写或只包含空白时，授权跳转不会携带 `scope` 参数；明确填写时，Host 会原样
+传给飞书，不会替你猜测或扩张权限。不要填写已经下线、拼写不确定或应用尚未审批的 Scope。
 
 本机开发可设置 `WEB_ALLOW_INSECURE_HTTP=true`，但只允许
 `http://127.0.0.1`、`http://localhost` 或 `http://[::1]`。它不是生产反向代理的替代品。

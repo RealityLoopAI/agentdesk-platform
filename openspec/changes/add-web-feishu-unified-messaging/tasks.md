@@ -102,3 +102,4 @@
 - [x] 9.5 编写 Web/SSO 配置、反向代理、Cookie/CSRF、身份关联、Lane 隐私和多维表格运营指南
 - [x] 9.6 添加 Web、跨渠道 Lane、多维表格 Read/Write 的独立 Feature Flag 和分阶段启用说明
 - [x] 9.7 演练回滚：关闭 Web Listener、撤销 Web Session、关闭 Lane 自动关联和从 Gateway Discovery 移除多维表格 Operation
+- [x] 9.8 移除过时的飞书 OAuth Scope 强制默认值，仅在运营者显式配置时附加授权 Scope，并补充回归测试和中文运维说明

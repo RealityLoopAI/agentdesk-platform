@@ -175,6 +175,10 @@ Web Listener 默认关闭。启用时至少需要配置 `WEB_ENABLED=true`、精
 `src/web/config.ts`。本机开发如果使用 HTTP，必须显式开启仅限回环地址的
 `WEB_ALLOW_INSECURE_HTTP`。
 
+当前登录流程只使用飞书返回的应用内 `open_id`，因此 `FEISHU_SSO_SCOPE` 默认留空，授权地址也不会
+强制附加 `scope` 参数。只有确实需要额外用户字段或 API、并已在飞书开放平台审批相应权限时才填写
+该变量；它与身份映射中表示 App 边界的 `provider_scope` 不是同一概念。
+
 跨渠道自动关联由独立的 `CROSS_CHANNEL_LANES_ENABLED` 控制，默认关闭。关闭时，Web 中经过授权的
 Lane 仍可正常使用，但原生飞书消息继续命中旧 Session Key，不会仅因数据库中已有 Binding 就合并
 历史。完整的反向代理、SSO、Cookie/CSRF、身份关联、灰度顺序和回滚操作见

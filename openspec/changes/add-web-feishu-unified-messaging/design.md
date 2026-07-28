@@ -257,7 +257,7 @@ user_identities (
 
 首个自动关联路径假定 SSO 身份与聊天事件来自配置兼容的飞书应用 Scope。经过验证的 SSO `open_id` 才能解析为与消息发送者相同的外部身份。
 
-登录使用 Authorization Code、State、严格 Redirect URI，并在飞书支持时使用 PKCE。Host 只保留非敏感身份 Claim 和不透明 Web Auth Session。如果 OAuth 响应包含登录后仍需使用的 Token，则立即交给批准的凭证服务/Backend Gateway 或直接丢弃；不得进入 Prompt、浏览器存储、Session DB 或 Audit 文本。
+登录使用 Authorization Code、State、严格 Redirect URI，并在飞书支持时使用 PKCE。当前身份路径只读取飞书返回的应用内 `open_id`，所以 OAuth Scope 默认不配置，授权地址也不强制附加 `scope` 参数；只有部署确实需要额外用户字段或 API、并已审批对应权限时才显式配置。这里的 OAuth Scope 与用于隔离 `open_id` 的飞书应用 Scope 不是同一概念。Host 只保留非敏感身份 Claim 和不透明 Web Auth Session。如果 OAuth 响应包含登录后仍需使用的 Token，则立即交给批准的凭证服务/Backend Gateway 或直接丢弃；不得进入 Prompt、浏览器存储、Session DB 或 Audit 文本。
 
 不同应用 Scope、不同 Identifier Type 或已存在的关联冲突必须 Fail Closed。禁止根据 Email、Name 或 Employee Number 自动匹配。管理员重新关联是独立且受审计的操作。
 
