@@ -44,10 +44,12 @@ describe('buildOpenAIContribution (ADR-0035 vault mode)', () => {
     delete process.env[FLAG];
     process.env[KEY] = 'sk-secret';
     process.env[BASE] = 'https://api.openai.example';
+    process.env[TRANSPORT] = 'chat-completions';
     const { env } = buildOpenAIContribution();
     expect(env?.OPENAI_API_KEY).toBeDefined();
     expect(env?.OPENAI_CREDENTIAL_VIA_PROXY).toBeUndefined();
     expect(env?.OPENAI_BASE_URL).toBe('https://api.openai.example');
+    expect(env?.OPENAI_FORCE_TRANSPORT).toBe('chat-completions');
   });
 
   it('forwards the explicit chat-completions transport override', () => {
