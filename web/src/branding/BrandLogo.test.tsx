@@ -20,6 +20,15 @@ function renderLogo(decorative = false) {
 }
 
 describe('BrandLogo', () => {
+  it('renders the approved same-origin asset without stretching or draggable behavior', async () => {
+    renderLogo();
+
+    const image = await screen.findByRole('img', { name: 'Test Platform 标志' });
+    expect(image).toHaveAttribute('src', '/brand/logo.svg');
+    expect(image).toHaveAttribute('draggable', 'false');
+    expect(image).toHaveClass('aspect-square', 'object-contain', 'select-none');
+  });
+
   it('falls back to an accessible brand initial when the configured image is missing', async () => {
     server.use(
       http.get('/api/branding', () =>

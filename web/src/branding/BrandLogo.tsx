@@ -27,7 +27,8 @@ export function BrandLogo({ className, decorative = false }: { className?: strin
       src={branding.logoPath}
       alt={label}
       aria-hidden={decorative || undefined}
-      className={cn('aspect-square object-contain', className)}
+      draggable={false}
+      className={cn('aspect-square object-contain select-none', className)}
       onError={() => setFailed(true)}
     />
   );
