@@ -573,14 +573,14 @@ export function resolveConversationLaneIdForInbound(
   }
 
   const existing = findActiveConversationBinding({
-      channelType: event.channelType,
-      platformId: event.platformId,
-      threadId: event.threadId,
-      threadFallback: effectiveSessionMode !== 'per-user-per-thread',
-      externalIdentityId: identity.id,
-      ownerUserId: userId,
-      agentGroupId,
-    })?.lane.id;
+    channelType: event.channelType,
+    platformId: event.platformId,
+    threadId: event.threadId,
+    threadFallback: effectiveSessionMode !== 'per-user-per-thread',
+    externalIdentityId: identity.id,
+    ownerUserId: userId,
+    agentGroupId,
+  })?.lane.id;
   if (existing) return existing;
   if (
     event.channelType !== 'feishu' ||
