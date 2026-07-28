@@ -16,13 +16,14 @@ Channel Adapter 或 Agent 容器。
 | 开关                           | 所属进程 |  默认值 | 打开后发生什么                                                | 关闭后的保证                                                |
 | ------------------------------ | -------- | ------: | ------------------------------------------------------------- | ----------------------------------------------------------- |
 | `WEB_ENABLED`                  | Host     | `false` | 启动独立 Web Listener，提供 SSO、API、SSE 和前端静态文件      | 不监听 `WEB_PORT`；飞书入口继续工作                         |
-| `CROSS_CHANNEL_LANES_ENABLED`  | Host     | `false` | 原生飞书消息可按已验证的 Identity + Binding 自动命中 Web Lane | 飞书继续使用旧 Session Key；Web 自己的 Lane 不受影响        |
+| `CROSS_CHANNEL_LANES_ENABLED`  | Host     | `false` | 合格飞书入站可自动创建或复用用户 Lane 与 Binding              | 新飞书入站继续使用旧 Session Key；已有 Lane 保留            |
 | `FEISHU_BITABLE_READ_ENABLED`  | Gateway  | `false` | `/describe` 发布 5 个多维表格只读 Operation                   | 只读 Operation 不可发现，直接调用返回 `OPERATION_NOT_FOUND` |
 | `FEISHU_BITABLE_WRITE_ENABLED` | Gateway  | `false` | `/describe` 发布 6 个 Record 写 Operation                     | 写 Operation 不可发现，也不会触达飞书 API                   |
 
 这里的“独立”是指可以分别回滚，不代表可以跳过依赖。例如，打开
-`CROSS_CHANNEL_LANES_ENABLED` 前仍必须有经过验证的 `user_identities` 和
-`conversation_bindings`；打开多维表格写操作前仍必须先配置资源白名单、用户授权、确认和幂等。
+`CROSS_CHANNEL_LANES_ENABLED` 前必须已经有经过验证的 `user_identities`、用户级 Session Mode 和
+正确的 Messaging Group Wiring；Binding 可以由首条合格入站自动创建。打开多维表格写操作前仍
+必须先配置资源白名单、用户授权、确认和幂等。
 
 Host 在每次原生 Channel 路由时读取 Lane 开关，但生产环境仍建议修改配置后重启，以便部署记录、
 进程状态和实际行为一致。Web Listener 与参考 Gateway 的 Operation Catalog 都在启动时确定，
@@ -151,21 +152,81 @@ pnpm exec tsx scripts/revoke-web-sessions.ts \
 飞书群，也不是浏览器标签页。Lane 的所有权由 `owner_user_id + agent_group_id` 决定，根 Session
 通过 `conversation_lane_id` 连接。
 
-自动跨渠道关联必须同时满足：
+新的飞书入站自动关联必须同时满足：
 
 1. 飞书事件已由 Adapter 验证；
 2. 事件中的外部身份能解析为当前规范用户；
-3. Binding 的 Channel、Platform、Thread、External Identity、用户和 Agent Group 全部匹配；
-4. Lane 仍是 Active；
-5. Session 模式属于 `per-user` 或 `per-user-per-thread`；
+3. Messaging Group Wiring 已确定 Agent Group，且 Host 访问门允许该用户访问；
+4. Session 模式属于 `per-user` 或 `per-user-per-thread`；
+5. 已有 Binding 时，其 Channel、Platform、Thread、External Identity、用户和 Agent Group 全部
+   匹配；
 6. `CROSS_CHANNEL_LANES_ENABLED=true`。
 
 `shared`、`per-thread`、`agent-shared` Session 可能含其他参与者内容，永远不能自动并入用户自己的
 Web History。Organization 访问仍由 Host 通过 Agent Group 推导；Organization 不复制到 Lane，
 也不作为 Gateway 业务授权输入。`conversation_thread_id` 只用于观测关联，不能作为 Lane 查询键。
 
-上线前先为少量已验证的旧飞书 `per-user` Session 做显式关联。系统不会批量扫描和猜测历史归属，
-也不会把两个用户的历史合并。
+自动关联只创建 Lane/Binding，不创建 Role 或 Membership。公开飞书群允许用户发消息，不等于允许
+该用户从 Web 读取会话；Web 列表、历史、SSE 和发送操作每次都重新检查 Agent Group/Organization
+访问权。撤权后 Lane 立即隐藏，恢复权限后仍显示原 Lane。
+
+### 5.1 新会话与旧历史的处理方式
+
+- **新的飞书会话**：打开 Lane 开关后，首条合格入站在 Host 访问门之后自动创建 Lane 和飞书
+  Binding；重复 Callback 和并发重试复用相同结构结果。
+- **第一次 SSO**：登录成功后自动协调当前用户最多 50 条旧个人 Session。协调失败不会让已经成功的
+  登录失效，后续可以重试。
+- **已登录用户升级**：前端通过受 CSRF/Origin/限流保护的
+  `POST /api/conversations/reconcile` 按 Cursor 续跑，再刷新只读列表。
+- **运营回填**：停止 Host 后运行 CLI。CLI 默认 Dry Run，只处理一个规范用户，可选限定 Agent
+  Group；每批最多 500 条。
+
+每个既有飞书根 Session 单独映射一条 Lane。同一用户使用同一助手的两条根 Session不会合并。
+协调只读取中央数据库结构字段，不扫描、复制或重写 Session 消息正文。
+
+### 5.2 上线前影子统计与运营回填
+
+先保持 `CROSS_CHANNEL_LANES_ENABLED=false`，对试点用户做 Dry Run：
+
+```bash
+pnpm reconcile:feishu -- \
+  --user <canonical-user-id> \
+  --provider-scope <FEISHU_APP_ID> \
+  --actor <operator-user-id> \
+  --limit 100
+```
+
+结果中的 `dryRunEligible` 是可协调候选；`skippedMode` 应对应明确不支持的共享模式；
+`skippedUnauthorized` 表示当前用户已经没有相应 Agent Group 访问权；`conflicts` 必须在执行前逐条
+调查。`hasMore=true` 时使用返回的 `nextCursor` 作为下一批 `--cursor`。
+
+确认结果后，保持 Host 停止以满足中央数据库单写者不变量，再添加 `--execute`：
+
+```bash
+pnpm reconcile:feishu -- \
+  --user <canonical-user-id> \
+  --provider-scope <FEISHU_APP_ID> \
+  --actor <operator-user-id> \
+  --agent-group <optional-agent-group-id> \
+  --cursor <optional-next-cursor> \
+  --limit 100 \
+  --execute
+```
+
+命令可安全重跑；已经关联的 Session 计入 `existing`，不会复制 Lane 或正文。每批结果会写
+`conversation_reconciliation_completed` Enterprise Audit，明细只有结构 ID 和计数，不含消息正文。
+
+观察下列指标，先确认 `dry_run` 分布，再打开入站自动关联：
+
+```promql
+sum by (trigger, outcome) (
+  increase(agentdesk_conversation_reconciliations_total[1h])
+)
+```
+
+重点关注 `conflict`、`skipped_unauthorized` 和 `limit_reached`。`trigger="inbound"` 表示飞书入站，
+`sso` 表示首次登录批次，`web` 表示前端续跑，`operator` 表示 CLI。指标只含固定枚举标签，不含
+用户、飞书地址或消息正文。
 
 ## 6. 多维表格 Gateway 配置
 
@@ -206,9 +267,9 @@ Operation 应返回 `OPERATION_NOT_FOUND`，飞书 Mock/Provider 不应收到请
 | 阶段           | Web | 跨渠道 Lane | 多维表格读 | 多维表格写 | 验收重点                                                            |
 | -------------- | --: | ----------: | ---------: | ---------: | ------------------------------------------------------------------- |
 | 0：只迁移      |  关 |          关 |         关 |         关 | 旧飞书消息、旧 Session 和 NULL-org 行为不变                         |
-| 1：内部 Web    |  开 |          关 |         关 |         关 | SSO、Cookie/CSRF、会话隔离、SSE；用代理/IP/飞书应用范围限制试用人群 |
+| 1：内部 Web    |  开 |          关 |         关 |         关 | SSO、Cookie/CSRF、显式历史协调、会话隔离；仅给试点用户 Web 权限       |
 | 2：只读数据    |  开 |          关 |         开 |         关 | `/describe` 只发布读操作；资源和用户白名单正确；审计完整            |
-| 3：小范围 Lane |  开 |          开 |         开 |         关 | 只关联已验证 `per-user` Session；Alice/Bob 同群不串线               |
+| 3：小范围 Lane |  开 |          开 |         开 |         关 | 先完成 Dry Run/冲突清零；观察入站自动关联；Alice/Bob 同群不串线     |
 | 4：受控写入    |  开 |          开 |         开 |         开 | 先开放低风险逻辑资源；确认、幂等、限流、审计和告警全部通过          |
 
 每阶段至少观察一个完整业务周期，再进入下一阶段。不要在同一次发布里同时打开 Lane 和写操作，
@@ -255,8 +316,9 @@ Operation 应返回 `OPERATION_NOT_FOUND`，飞书 Mock/Provider 不应收到请
    ```
 
 验收结果应为：活动 Web Session 为 0；Gateway 不再发现多维表格 Operation；新的飞书消息正常回复；
-关闭 Lane 后不会再自动创建/命中跨渠道 Binding；现存 Lane、Binding 和 Web 历史仍保留，供恢复后
-继续使用。
+关闭 Lane 后新的飞书入站不会再自动创建/命中跨渠道 Binding；现存 Lane、Binding 和 Web 历史仍
+保留，供恢复后继续使用。注意：只关闭 `CROSS_CHANNEL_LANES_ENABLED` 不会关闭受认证的 SSO/显式
+协调入口；需要完全暂停 Web 回填时必须同时摘除 Web 流量并关闭 `WEB_ENABLED`。
 
 代码版本回滚只允许在确认旧版本能容忍这些加性表/列时进行。项目的兼容测试会用旧字段投影只读打开
 升级后的数据库；这不等于允许旧版本与新版本同时写数据库。任何时刻仍只能有一个 Host 版本作为
@@ -269,7 +331,11 @@ Operation 应返回 `OPERATION_NOT_FOUND`，飞书 Mock/Provider 不应收到请
 - Runner Typecheck/Test、Gateway Conformance 和真实容器 Smoke Test
 - `pnpm format:check && pnpm lint && pnpm audit`
 - SSO Redirect URI、TLS、Origin、Cookie、CSRF 和 SSE 代理均通过
+- 试点用户 Dry Run 的冲突已清零，分页 Cursor 已跑完，协调指标与 Audit 数量相符
+- 不预置 Lane/Binding 的真实 Host + Mock SSO 验收通过：飞书先聊、登录见历史、Web 可续聊
 - Alice/Bob 同群隔离测试通过，Shared Session 不进入 Web History
+- 撤销 Membership 后 Lane 立即隐藏，恢复后仍复用原 Lane；自动关联未创建任何 Role/Membership
 - Gateway `/describe` 与 Feature Flag 阶段一致
+- 多维表格已授权 CRUD 经 Gateway 执行并审计；越权和未确认破坏性请求在 Provider 前拒绝
 - `gateway_audit`、`enterprise_audit`、Web/Lane/Bitable 指标和告警可见
 - 已执行一次本节的回滚演练并保存命令输出

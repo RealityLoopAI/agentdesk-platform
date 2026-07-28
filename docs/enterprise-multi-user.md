@@ -31,6 +31,17 @@ Your backend should own:
 - approval rules
 - business-side audit
 
+## 飞书聊天、SSO 与规范用户
+
+飞书聊天与 Web SSO 只有在
+`provider + provider_scope + identifier_type + external_subject` 四项完全相同时，才会落到同一个
+规范 `users.id`。显示名、邮箱、工号以及跨应用看起来相同的 `open_id` 都不能用于自动合并。
+
+SSO 成功后的会话协调以该规范用户为 Owner，并对每个候选 Agent Group 重新运行 Host 访问门；它
+不会创建 Role、Agent Group Membership 或 Organization Membership，也不会把 Organization 作为
+Gateway 授权参数。身份或地址冲突时 Fail Closed，但可重试的历史协调失败不会撤销已经成功的登录。
+旧的 `users.id = feishu:ou_*` 仍可作为规范用户，升级只增加外部身份映射，不重写权限和审计外键。
+
 ## Access evaluation & revocation timing
 
 When does revoking a role actually take effect? The honest answer has three

@@ -106,7 +106,7 @@
 
 ## 10. Feishu-first 主流程修订
 
-- [ ] 10.1 为“飞书入站自动关联 + 用户定向历史协调 + Web 辅助新建会话”补充 ADR 并更新 ADR 索引、飞书 Channel、Web、身份和隔离文档
+- [x] 10.1 为“飞书入站自动关联 + 用户定向历史协调 + Web 辅助新建会话”补充 ADR 并更新 ADR 索引、飞书 Channel、Web、身份和隔离文档
 - [x] 10.2 实现统一的飞书会话协调服务：只按规范 Owner 和结构字段查询 `per-user`/`per-user-per-thread` 候选，以旧 Session ID 确定性创建或复用 Lane，且不扫描消息正文
 - [x] 10.3 扩展飞书入站 Router：跨渠道 Flag 开启时，在可信身份、Agent Group、Session Mode 和 Host 访问门确认后自动创建或关联 Lane/Binding，并让重复或并发事件收敛到同一 Lane
 - [x] 10.4 为自动关联实现冲突 Fail Closed、共享模式拒绝、候选数量/时间上限、幂等重试、Enterprise Audit 和不含敏感标识的指标

@@ -40,6 +40,7 @@ Session 的 CSRF Header。
 ```text
 GET  /api/me
 GET  /api/conversations
+POST /api/conversations/reconcile
 POST /api/conversations
 GET  /api/conversations/:laneId/messages
 POST /api/conversations/:laneId/messages
@@ -52,6 +53,17 @@ POST /api/logout
 `GET /api/conversations` 只返回当前用户拥有且此刻仍有权访问的 Lane，同时返回可创建会话的
 Agent Group。`POST /api/conversations` 接受一个待选择的 `agentGroupId`，但 Host 会重新检查
 权限；成功后创建用户自有 Lane、专属 Web Messaging Group 和 `per-user` Wiring。
+
+飞书 SSO 成功后，Host 会按当前用户和同一飞书 App Scope 的已验证 `open_id` 做一次最多 50 条的
+有界历史协调。新版前端还会通过 `POST /api/conversations/reconcile` 按 Cursor 续跑，再刷新只读
+会话列表；该写接口要求 Cookie、CSRF、精确 Origin、限流和每个候选 Agent Group 的当前访问权。
+协调按旧根 Session 确定性建 Lane，不扫描或复制正文。`GET /api/conversations` 本身没有协调副
+作用。
+
+飞书来源 Lane 起初可以只有飞书 Binding。用户第一次从该 Lane 在 Web 发消息时，Conversation
+Service 会在事务内重新执行 Owner、Agent Group 与 Organization 访问门，然后幂等创建私有 Web
+Messaging Group/Binding。这个入口只让已授权用户发送消息，不创建 Role 或 Membership；无效
+`clientMessageId` 或空正文不会触发创建。
 
 历史接口从 Lane 根 Session 的 `inbound.db` 与 `outbound.db` 合并记录，以服务端时间、Sequence
 和消息 ID 形成确定性不透明 Cursor。即使底层文件因异常含有其他 `origin_user_id` 的入站行，
@@ -154,6 +166,10 @@ Web 页面中的“飞书提醒”开关默认关闭。开启后，只有“由 
 桌面端使用会话侧栏和消息区双栏布局；窄屏只显示其中一页，并通过 URL 与返回按钮切换。侧栏只呈现
 `GET /api/conversations` 当前返回的 Lane 与 Agent Group，创建会话仍由 Host 重新授权。当前 Lane
 始终写入 `/conversations/:laneId`，所以刷新或复制同源 URL 后可以恢复选择。
+
+会话页以飞书已有对话为主流程：协调完成后直接列出助手名称、来源渠道和最后活动时间，打开历史不
+出现选择助手步骤。“新建 Web 对话”是次要操作；没有可用助手时提示联系管理员，只有一个助手时
+直接创建，多个助手时才打开选择框。终端文案使用“助手”，不显示 Agent Group 或 Lane 等内部名词。
 
 历史记录由 TanStack Query 分页读取并按服务端时间、Sequence、方向和消息 ID 确定性排序。用户发送
 消息时生成稳定 `clientMessageId`：本地先显示发送中，POST 返回后绑定服务端消息 ID，随后与 History

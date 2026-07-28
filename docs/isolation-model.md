@@ -157,7 +157,9 @@ Conversation Lane ──→ 一个根 Session（同一对 inbound.db/outbound.db
 Router 只接受两种 Lane 来源：
 
 - Web Server 已认证 Session、重新执行 Agent Group/Organization 访问门后写入的 Lane ID；
-- 原生 Channel 的可信 `senderIdentity` 与活跃 Binding 的精确匹配。
+- 原生 Channel 的可信 `senderIdentity` 与活跃 Binding 的精确匹配，或在
+  `CROSS_CHANNEL_LANES_ENABLED=true` 时由相同结构性 Session Key 在访问门后确定性建立的新
+  Binding。
 
 浏览器 JSON、消息正文中的 `senderId` 和 `conversation_thread_id` 都不能成为 Lane 查询键。最终
 还要同时校验 Lane 的 `owner_user_id`、`agent_group_id` 和用户级 Session Mode。任一不一致都会
@@ -165,6 +167,16 @@ Fail Closed。
 
 Alice 和 Bob 即使在同一个飞书群也分别拥有 Lane 和根 Session；Alice 的 Web 消息只能复用
 Alice 的根 Session。共享模式的旧历史不能自动关联，因为其中可能已经含有其他用户内容。
+
+Lane 不是 `(用户, Agent Group)` 的唯一会话。每个既有飞书根 Session 都映射到自己的 Lane，所以
+同一用户和同一助手在两个飞书地址或根上下文中的历史不会拼接。SSO/运营历史协调只读取中央数据库
+结构字段，并拒绝 `shared`、`per-thread`、`agent-shared`；它不会为了“判断是不是同一对话”搜索
+消息正文。
+
+自动关联只建立结构映射，不能授予访问权。公开飞书群不会因此成为 Web 公开会话；每次列表、历史、
+SSE 和消息写入仍重新执行当前的 Agent Group/Organization Host 访问门。撤销 Membership 后 Lane
+立即不可见，恢复权限后重新看到同一 Lane，不会创建替代 Lane。Organization 继续只在 Host 侧由
+`agent_group_id` 推导，绝不进入 Gateway 业务授权输入。
 
 同一根 Session 内每个 Turn 仍保留自己的来源地址。出站回复通过 `in_reply_to` 回查 Host 写入的
 入站行，不使用 Session 最初绑定的 Messaging Group 作为当前地址；来源行的

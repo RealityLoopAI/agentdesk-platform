@@ -103,6 +103,17 @@ re-check below — the events only tighten the window).
 Conversation Lane。详细启用与回滚步骤见
 [Web 与飞书统一消息运维手册](web-feishu-unified-messaging-operations.md)。
 
+飞书是统一消息的主入口。上述条件满足时，第一条合格飞书入站会在 Host 访问门之后自动创建或复用
+Lane 和飞书 Binding；它不会创建 Role、Agent Group Membership 或 Organization Membership。
+相同飞书地址和根 Session 的重复 Callback 会收敛到原 Lane。同一用户在同一 Agent Group 下仍可
+拥有多条 Lane，不同飞书根 Session 不会因为助手相同而被合并。
+
+升级前已经存在的 `per-user` / `per-user-per-thread` Session 由用户完成 SSO 时做有界协调，也可由
+已登录前端或运营 CLI 分页续跑。协调只读取 Owner、Agent Group、Messaging Group、Session Mode
+和 Session ID 等结构字段，不扫描消息正文；`shared`、`per-thread`、`agent-shared` 会被明确跳过。
+`CROSS_CHANNEL_LANES_ENABLED=false` 只关闭新的飞书入站自动关联，不删除已经关联的 Lane，也不
+代替显式 SSO/运营协调的灰度控制。
+
 旧部署的 `users.id = feishu:ou_*` 保持不变；安全回填只增加 `(App Scope, open_id) ->
 users.id` 的关联，不重写 Role、Membership、Session 或 Audit 外键。身份冲突会拒绝处理，
 不会自动合并两个用户的权限。
