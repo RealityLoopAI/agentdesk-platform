@@ -121,8 +121,14 @@ export function ConversationPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <ConversationHeader
-        title={conversation?.agentGroup.name ?? 'Agent 会话'}
-        subtitle={conversation?.status === 'archived' ? '已归档' : '与飞书共享上下文'}
+        title={conversation?.agentGroup.name ?? '助手会话'}
+        subtitle={
+          conversation?.status === 'archived'
+            ? '已归档'
+            : conversation?.sourceChannel === 'feishu'
+              ? '来自飞书，可在 Web 继续'
+              : '在 Web 中创建'
+        }
       >
         {conversation?.status !== 'archived' ? <DeliverySubscriptionControl laneId={laneId} /> : null}
       </ConversationHeader>
@@ -155,7 +161,7 @@ export function ConversationPage() {
 
 function ConversationHeader({
   title,
-  subtitle = 'Agent 会话',
+  subtitle = '助手会话',
   children,
 }: {
   title: string;

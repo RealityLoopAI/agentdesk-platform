@@ -1,10 +1,12 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { WifiOff } from 'lucide-react';
+import { RefreshCw, WifiOff } from 'lucide-react';
 import { Outlet, useMatch } from 'react-router-dom';
 
 import { BrandLogo } from '@/branding/BrandLogo';
 import type { MeResponse } from '@/api/types';
 import { ConversationSidebar } from '@/conversations/ConversationSidebar';
+import { CreateConversationDialog } from '@/conversations/CreateConversationDialog';
+import { useConversationList, useConversationReconciliation } from '@/conversations/useConversations';
 import { useWebEventStream } from '@/events/useWebEventStream';
 import { cn } from '@/lib/cn';
 
@@ -13,7 +15,19 @@ export function ConversationsPage() {
   const queryClient = useQueryClient();
   const me = queryClient.getQueryData<MeResponse>(['me']);
   const eventState = useWebEventStream();
+  const reconciliation = useConversationReconciliation(me?.user.id ?? '');
   if (!me) throw new Error('authenticated user context unavailable');
+
+  if (reconciliation.isPending) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-canvas" aria-busy="true" aria-live="polite">
+        <div className="flex items-center gap-3 text-sm text-muted">
+          <BrandLogo className="size-9 animate-pulse motion-reduce:animate-none" decorative />
+          正在同步你的飞书会话…
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="min-h-screen bg-canvas p-3 sm:p-5">
@@ -28,17 +42,45 @@ export function ConversationsPage() {
           </section>
         </div>
       </div>
+      {reconciliation.isError ? (
+        <button
+          type="button"
+          className="fixed right-5 bottom-5 z-30 flex items-center gap-2 rounded-md border border-warning/30 bg-surface px-3 py-2 text-xs text-muted shadow-[var(--shadow-panel)]"
+          onClick={() => void reconciliation.refetch()}
+        >
+          <RefreshCw aria-hidden="true" className="size-3.5 text-warning" />
+          部分飞书历史暂未同步，点击重试
+        </button>
+      ) : null}
     </main>
   );
 }
 
 export function ConversationPlaceholder() {
+  const list = useConversationList();
+  const conversations = list.data?.conversations ?? [];
+  const assistants = list.data?.availableAgentGroups ?? [];
+  const hasConversations = conversations.length > 0;
+
   return (
     <div className="grid h-full place-items-center p-6 text-center">
       <div className="max-w-md">
         <BrandLogo className="mx-auto mb-6 size-20 opacity-85" />
-        <h1 className="text-2xl font-semibold text-ink">选择一段会话</h1>
-        <p className="mt-3 leading-7 text-muted">从左侧继续已有上下文，或新建一个只属于你的 Agent 会话。</p>
+        <h1 className="text-2xl font-semibold text-ink">
+          {hasConversations ? '选择一段会话' : assistants.length > 0 ? '从飞书开始对话' : '暂无可见会话'}
+        </h1>
+        <p className="mt-3 leading-7 text-muted">
+          {hasConversations
+            ? '从左侧直接打开飞书或 Web 中的已有对话。'
+            : assistants.length > 0
+              ? '在飞书中与助手发出第一条消息后，对话会自动同步到这里；也可以单独新建一段 Web 对话。'
+              : '请联系管理员为你的账号分配助手权限。完成后刷新页面即可开始使用。'}
+        </p>
+        {!hasConversations && assistants.length > 0 ? (
+          <div className="mt-6 flex justify-center">
+            <CreateConversationDialog agentGroups={assistants} />
+          </div>
+        ) : null}
       </div>
     </div>
   );

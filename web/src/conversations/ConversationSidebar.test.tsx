@@ -13,6 +13,7 @@ const agentGroup = { id: 'agent-1', name: '研究 Agent' };
 const existing = {
   id: 'lane-1',
   agentGroup,
+  sourceChannel: 'feishu',
   status: 'active' as const,
   createdAt: '2026-07-27T10:00:00.000Z',
   archivedAt: null,
@@ -52,7 +53,7 @@ beforeEach(async () => {
 });
 
 describe('ConversationSidebar', () => {
-  it('lists accessible lanes and creates a new server-authorized conversation', async () => {
+  it('lists the Feishu source and directly creates when exactly one assistant is available', async () => {
     let postedAgentGroup = '';
     server.use(
       http.post('/api/conversations', async ({ request }) => {
@@ -75,11 +76,56 @@ describe('ConversationSidebar', () => {
     renderSidebar();
 
     expect(await screen.findByRole('link', { name: /研究 Agent/ })).toHaveAttribute('href', '/conversations/lane-1');
-    await user.click(screen.getByRole('button', { name: /新会话/ }));
-    expect(screen.getByRole('dialog')).toHaveAccessibleName('选择 Agent');
-    await user.click(screen.getByRole('button', { name: '创建会话' }));
+    expect(screen.getByText('飞书')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '新建 Web 对话' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
     await waitFor(() => expect(postedAgentGroup).toBe('agent-1'));
     expect(screen.getByTestId('location')).toHaveTextContent('/conversations/lane-2');
+  });
+
+  it('asks the user to choose only when multiple assistants are available', async () => {
+    const second = { id: 'agent-2', name: '数据助手' };
+    server.use(
+      http.get('/api/conversations', () =>
+        HttpResponse.json({ conversations: [existing], availableAgentGroups: [agentGroup, second] }),
+      ),
+      http.post('/api/conversations', async ({ request }) => {
+        const body = (await request.json()) as { agentGroupId: string };
+        return HttpResponse.json(
+          {
+            conversation: {
+              ...existing,
+              id: 'lane-selected',
+              agentGroup: body.agentGroupId === second.id ? second : agentGroup,
+              sourceChannel: 'web',
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    renderSidebar();
+
+    await user.click(await screen.findByRole('button', { name: '新建 Web 对话' }));
+    expect(screen.getByRole('dialog')).toHaveAccessibleName('选择助手');
+    await user.selectOptions(screen.getByLabelText('助手'), second.id);
+    await user.click(screen.getByRole('button', { name: '新建对话' }));
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/conversations/lane-selected'));
+  });
+
+  it('shows an administrator guidance message without an invalid selector when no assistant is available', async () => {
+    server.use(
+      http.get('/api/conversations', () => HttpResponse.json({ conversations: [], availableAgentGroups: [] })),
+    );
+    const user = userEvent.setup();
+    renderSidebar();
+
+    expect(await screen.findByText('请联系管理员为你分配助手权限。')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '新建 Web 对话' }));
+    expect(screen.getByRole('dialog')).toHaveAccessibleName('暂时无法新建对话');
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(screen.getByText(/当前没有可用助手/)).toBeInTheDocument();
   });
 });

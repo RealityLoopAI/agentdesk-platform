@@ -27,7 +27,7 @@ function AgentMessage({ message }: { message: HistoryMessage }) {
       <BrandLogo className="mt-1 size-8 shrink-0" decorative />
       <div className="min-w-0 flex-1">
         <div className="mb-1.5 flex items-center gap-2 text-xs text-muted">
-          <span className="font-medium text-ink">Agent</span>
+          <span className="font-medium text-ink">助手</span>
           <time dateTime={message.timestamp}>{formatTime(message.timestamp)}</time>
           {message.channel.type === 'feishu' ? (
             <span className="rounded-full bg-brand-subtle px-2 py-0.5 text-brand">来自飞书</span>
@@ -144,7 +144,7 @@ export function MessageTimeline({
           <div className="my-auto py-10 text-center">
             <BrandLogo className="mx-auto size-16 opacity-80" />
             <h2 className="mt-5 text-lg font-semibold text-ink">开始这段会话</h2>
-            <p className="mt-2 text-sm leading-6 text-muted">这里发送的消息会进入同一个 Agent 上下文。</p>
+            <p className="mt-2 text-sm leading-6 text-muted">这里发送的消息会继续进入同一段助手上下文。</p>
           </div>
         ) : (
           <div className="mt-auto space-y-7">
@@ -172,7 +172,7 @@ export function MessageTimeline({
             {processing ? (
               <div role="status" className="flex items-center gap-3 text-sm text-muted">
                 <BrandLogo className="size-8 animate-pulse motion-reduce:animate-none" decorative />
-                <span>Agent 正在处理…</span>
+                <span>助手正在处理…</span>
               </div>
             ) : null}
           </div>

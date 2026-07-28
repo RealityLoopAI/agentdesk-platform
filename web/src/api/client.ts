@@ -1,6 +1,7 @@
 import type {
   ConversationHistoryResponse,
   ConversationListResponse,
+  ConversationReconciliationResponse,
   ConversationSummary,
   DeliverySubscriptionState,
   MeResponse,
@@ -89,6 +90,15 @@ export async function getMe(): Promise<MeResponse> {
 
 export async function listConversations(): Promise<ConversationListResponse> {
   return apiFetch<ConversationListResponse>('/api/conversations');
+}
+
+export async function reconcileConversations(
+  cursor: string | null = null,
+): Promise<ConversationReconciliationResponse> {
+  return apiFetch<ConversationReconciliationResponse>('/api/conversations/reconcile', {
+    method: 'POST',
+    json: cursor ? { cursor, limit: 100 } : { limit: 100 },
+  });
 }
 
 export async function createConversation(agentGroupId: string): Promise<ConversationSummary> {

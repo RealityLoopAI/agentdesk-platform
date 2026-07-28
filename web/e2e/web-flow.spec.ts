@@ -100,7 +100,7 @@ test('窄屏可以从消息页返回列表，低动态模式会关闭 Logo 动�
   const composer = page.getByLabel('输入消息');
   await composer.fill('[慢速] 检查低动态模式');
   await composer.press('Enter');
-  const processing = page.getByText('Agent 正在处理…');
+  const processing = page.getByText('助手正在处理…');
   await expect(processing).toBeVisible();
   const animationName = await processing
     .locator('xpath=..')

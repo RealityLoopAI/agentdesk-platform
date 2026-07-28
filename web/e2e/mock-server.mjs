@@ -105,6 +105,7 @@ function conversation(session) {
   return {
     id: 'lane-main',
     agentGroup: { id: 'agent-research', name: '研究 Agent' },
+    sourceChannel: 'feishu',
     status: 'active',
     createdAt: FIXED_TIME,
     archivedAt: null,
@@ -246,6 +247,26 @@ async function handle(req, res) {
     json(res, 200, {
       conversations: [conversation(session)],
       availableAgentGroups: [{ id: 'agent-research', name: '研究 Agent' }],
+    });
+    return;
+  }
+
+  if (method === 'POST' && url.pathname === '/api/conversations/reconcile') {
+    if (req.headers['x-csrf-token'] !== session.csrfToken) {
+      json(res, 403, { error: 'request_forbidden' });
+      return;
+    }
+    await readJson(req);
+    json(res, 200, {
+      scanned: 1,
+      linked: 0,
+      existing: 1,
+      dryRunEligible: 0,
+      skippedUnauthorized: 0,
+      skippedMode: 0,
+      conflicts: 0,
+      hasMore: false,
+      nextCursor: 'session-feishu-main',
     });
     return;
   }

@@ -12,6 +12,7 @@ import { ConversationPage } from './ConversationPage';
 const conversation = {
   id: 'lane-1',
   agentGroup: { id: 'agent-1', name: '研究 Agent' },
+  sourceChannel: 'feishu',
   status: 'active' as const,
   createdAt: '2026-07-27T10:00:00.000Z',
   archivedAt: null,

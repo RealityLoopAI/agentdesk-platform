@@ -19,7 +19,7 @@ export function LoginPage() {
         <p className="mb-4 text-sm font-semibold tracking-[0.18em] text-brand uppercase">连接工作，延续上下文</p>
         <h1 className="max-w-xl text-5xl leading-[1.12] font-semibold tracking-tight text-ink">
           在浏览器和飞书之间，
-          <span className="text-brand">继续同一段 Agent 会话。</span>
+          <span className="text-brand">继续同一段助手会话。</span>
         </h1>
         <p className="mt-7 max-w-lg text-lg leading-8 text-muted">
           消息历史、用户身份和权限都由服务端统一管理。换一个终端，不需要从头解释。
@@ -52,7 +52,7 @@ export function LoginPage() {
               <ArrowRight aria-hidden="true" className="size-4" />
             </a>
           </Button>
-          <p className="mt-5 text-center text-xs leading-5 text-muted">登录后只会访问你当前有权限使用的 Agent 会话。</p>
+          <p className="mt-5 text-center text-xs leading-5 text-muted">登录后只会访问你当前有权限使用的助手会话。</p>
         </div>
       </section>
     </main>

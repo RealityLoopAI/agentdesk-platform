@@ -1,4 +1,5 @@
 import { LogOut, MessageSquareText } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { NavLink } from 'react-router-dom';
 
 import { logout } from '@/api/client';
@@ -25,8 +26,15 @@ function formatActivity(conversation: ConversationSummary): string {
   }).format(date);
 }
 
+function sourceLabel(sourceChannel: string): string {
+  if (sourceChannel === 'feishu') return '飞书';
+  if (sourceChannel === 'web') return 'Web';
+  return '其他渠道';
+}
+
 export function ConversationSidebar({ user }: { user: CurrentUser }) {
   const branding = useBranding();
+  const queryClient = useQueryClient();
   const list = useConversationList();
   const conversations = [...(list.data?.conversations ?? [])].sort(
     (left, right) => activityTime(right) - activityTime(left) || left.id.localeCompare(right.id),
@@ -57,8 +65,12 @@ export function ConversationSidebar({ user }: { user: CurrentUser }) {
         ) : conversations.length === 0 ? (
           <div className="mx-2 rounded-md border border-dashed border-brand-border p-5 text-center">
             <MessageSquareText aria-hidden="true" className="mx-auto size-5 text-brand" />
-            <p className="mt-3 text-sm font-medium text-ink">还没有会话</p>
-            <p className="mt-1 text-xs leading-5 text-muted">点击“新会话”选择你有权访问的 Agent。</p>
+            <p className="mt-3 text-sm font-medium text-ink">还没有可见会话</p>
+            <p className="mt-1 text-xs leading-5 text-muted">
+              {(list.data?.availableAgentGroups.length ?? 0) > 0
+                ? '先在飞书中与助手发消息，对话会自动出现在这里。'
+                : '请联系管理员为你分配助手权限。'}
+            </p>
           </div>
         ) : (
           <ul className="space-y-1">
@@ -79,8 +91,10 @@ export function ConversationSidebar({ user }: { user: CurrentUser }) {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-sm font-medium">{conversation.agentGroup.name}</span>
-                      <span className="mt-1 block text-xs text-muted">
-                        {conversation.status === 'archived' ? '已归档' : formatActivity(conversation)}
+                      <span className="mt-1 flex items-center gap-1.5 text-xs text-muted">
+                        <span>{sourceLabel(conversation.sourceChannel)}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{conversation.status === 'archived' ? '已归档' : formatActivity(conversation)}</span>
                       </span>
                     </span>
                   </span>
@@ -101,7 +115,15 @@ export function ConversationSidebar({ user }: { user: CurrentUser }) {
           <span className="block truncate text-sm font-medium text-ink">{user.displayName ?? '飞书用户'}</span>
           <span className="block truncate text-xs text-muted">已通过飞书登录</span>
         </span>
-        <Button variant="ghost" size="icon" aria-label="退出登录" title="退出登录" onClick={() => void logout()}>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="退出登录"
+          title="退出登录"
+          onClick={() => {
+            void logout().finally(() => queryClient.clear());
+          }}
+        >
           <LogOut aria-hidden="true" className="size-4" />
         </Button>
       </div>

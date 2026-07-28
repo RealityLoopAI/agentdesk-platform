@@ -38,6 +38,7 @@ export interface AgentGroupSummary {
 export interface ConversationSummary {
   id: string;
   agentGroup: AgentGroupSummary;
+  sourceChannel: string;
   status: 'active' | 'archived';
   createdAt: string;
   archivedAt: string | null;
@@ -47,6 +48,18 @@ export interface ConversationSummary {
 export interface ConversationListResponse {
   conversations: ConversationSummary[];
   availableAgentGroups: AgentGroupSummary[];
+}
+
+export interface ConversationReconciliationResponse {
+  scanned: number;
+  linked: number;
+  existing: number;
+  dryRunEligible: number;
+  skippedUnauthorized: number;
+  skippedMode: number;
+  conflicts: number;
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
 export interface HistoryMessage {
