@@ -115,6 +115,52 @@ async function postJson(pathname: string, auth: { token: string; csrfToken: stri
   });
 }
 
+function cookieValue(setCookie: string, name: string): string {
+  const match = new RegExp(`(?:^|, )${name}=([A-Za-z0-9_-]+)`).exec(setCookie);
+  if (!match?.[1]) throw new Error(`missing cookie ${name}: ${setCookie}`);
+  return match[1];
+}
+
+function feishuSsoProviderFetch() {
+  return vi.fn<typeof fetch>(async (input) => {
+    if (String(input) === CONFIG.feishu.tokenUrl) {
+      return new Response(JSON.stringify({ code: 0, access_token: 'mock-provider-token' }));
+    }
+    if (String(input) === CONFIG.feishu.userInfoUrl) {
+      return new Response(JSON.stringify({ code: 0, data: { open_id: 'ou_alice', name: 'Alice' } }));
+    }
+    throw new Error(`unexpected SSO provider endpoint: ${String(input)}`);
+  });
+}
+
+async function loginThroughFeishuSso(): Promise<{ token: string; csrfToken: string }> {
+  const start = await fetch(`${baseUrl}/auth/feishu/start`, { redirect: 'manual' });
+  expect(start.status).toBe(303);
+  const oauthCookie = start.headers.get('set-cookie')!;
+  const authorize = new URL(start.headers.get('location')!);
+
+  const callback = await fetch(
+    `${baseUrl}/auth/feishu/callback?state=${encodeURIComponent(authorize.searchParams.get('state')!)}&code=valid-code`,
+    {
+      redirect: 'manual',
+      headers: {
+        cookie: `${CONFIG.cookieName}_oauth=${cookieValue(oauthCookie, `${CONFIG.cookieName}_oauth`)}`,
+      },
+    },
+  );
+  expect(callback.status).toBe(303);
+  expect(callback.headers.get('location')).toBe('/conversations');
+  const token = cookieValue(callback.headers.get('set-cookie')!, CONFIG.cookieName);
+
+  const me = await fetch(`${baseUrl}/api/me`, {
+    headers: { cookie: `${CONFIG.cookieName}=${token}` },
+  });
+  expect(me.status).toBe(200);
+  const payload = (await me.json()) as { user: { id: string }; csrfToken: string };
+  expect(payload.user.id).toBe('user-alice');
+  return { token, csrfToken: payload.csrfToken };
+}
+
 beforeEach(async () => {
   previousCrossChannelLanesFlag = process.env.CROSS_CHANNEL_LANES_ENABLED;
   process.env.CROSS_CHANNEL_LANES_ENABLED = 'true';
@@ -153,7 +199,7 @@ beforeEach(async () => {
     },
   });
 
-  const handler = createWebRequestHandler(CONFIG);
+  const handler = createWebRequestHandler(CONFIG, { fetchImpl: feishuSsoProviderFetch() });
   server = http.createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
@@ -174,6 +220,138 @@ afterEach(async () => {
 });
 
 describe('真实 Host + MockProvider 的 Web/飞书统一消息', () => {
+  it('不预置 Lane/Binding 时由飞书首条消息自动建档，SSO 后回填历史并继续 Web 对话', async () => {
+    createUserIdentity({
+      userId: 'user-alice',
+      provider: 'feishu',
+      providerScope: CONFIG.feishu.appId,
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
+    createMessagingGroup({
+      id: 'mg-feishu-first',
+      channel_type: 'feishu',
+      platform_id: 'feishu:oc_feishu_first',
+      name: '飞书主流程群',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: new Date().toISOString(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-feishu-first',
+      messaging_group_id: 'mg-feishu-first',
+      agent_group_id: 'ag-unified',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'per-user',
+      priority: 0,
+      created_at: new Date().toISOString(),
+    });
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(0);
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_bindings').pluck().get()).toBe(0);
+
+    await routeInbound({
+      channelType: 'feishu',
+      platformId: 'feishu:oc_feishu_first',
+      threadId: null,
+      senderIdentity: {
+        provider: 'feishu',
+        providerScope: CONFIG.feishu.appId,
+        identifierType: 'open_id',
+        externalSubject: 'ou_alice',
+      },
+      message: {
+        id: 'feishu-first-turn',
+        kind: 'chat',
+        content: JSON.stringify({ text: '请总结本周进展', sender: 'Alice' }),
+        timestamp: new Date().toISOString(),
+        isMention: true,
+        isGroup: true,
+      },
+    });
+
+    const session = getDb()
+      .prepare(
+        `SELECT * FROM sessions
+         WHERE agent_group_id = 'ag-unified' AND messaging_group_id = 'mg-feishu-first'`,
+      )
+      .get() as Session;
+    expect(session.conversation_lane_id).toEqual(expect.any(String));
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(1);
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_bindings').pluck().get()).toBe(1);
+
+    const inboundDb = new Database(inboundDbPath('ag-unified', session.id), { readonly: true });
+    const inboundId = inboundDb.prepare('SELECT id FROM messages_in ORDER BY seq LIMIT 1').pluck().get() as string;
+    inboundDb.close();
+    writeMockReply({
+      sessionId: session.id,
+      inReplyTo: inboundId,
+      id: 'mock-feishu-first-reply',
+      text: mockProviderReply('请总结本周进展'),
+    });
+    await deliverSessionMessages(session);
+
+    const auth = await loginThroughFeishuSso();
+    const list = await fetch(`${baseUrl}/api/conversations`, {
+      headers: { cookie: `${CONFIG.cookieName}=${auth.token}` },
+    });
+    expect(list.status).toBe(200);
+    const listed = (await list.json()) as {
+      conversations: Array<{ id: string; sourceChannel: string }>;
+    };
+    expect(listed.conversations).toEqual([
+      expect.objectContaining({
+        id: session.conversation_lane_id,
+        sourceChannel: 'feishu',
+      }),
+    ]);
+
+    const history = await fetch(
+      `${baseUrl}/api/conversations/${encodeURIComponent(session.conversation_lane_id!)}/messages`,
+      { headers: { cookie: `${CONFIG.cookieName}=${auth.token}` } },
+    );
+    expect(history.status).toBe(200);
+    const historicalMessages = (await history.json()) as {
+      messages: Array<{ direction: string; text: string; channel: { type: string } }>;
+    };
+    expect(historicalMessages.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          direction: 'user',
+          text: '请总结本周进展',
+          channel: expect.objectContaining({ type: 'feishu' }),
+        }),
+        expect.objectContaining({
+          direction: 'agent',
+          text: expect.stringContaining('请总结本周进展'),
+          channel: expect.objectContaining({ type: 'feishu' }),
+        }),
+      ]),
+    );
+    expect(historicalMessages.messages).toHaveLength(2);
+
+    const continuation = await postJson(
+      `/api/conversations/${encodeURIComponent(session.conversation_lane_id!)}/messages`,
+      auth,
+      {
+        clientMessageId: 'web-after-sso',
+        text: '继续补充风险项',
+      },
+    );
+    expect(continuation.status).toBe(202);
+    expect(getDb().prepare("SELECT COUNT(*) FROM sessions WHERE agent_group_id = 'ag-unified'").pluck().get()).toBe(1);
+    const continuedInboundDb = new Database(inboundDbPath('ag-unified', session.id), {
+      readonly: true,
+    });
+    expect(continuedInboundDb.prepare('SELECT channel_type FROM messages_in ORDER BY seq').pluck().all()).toEqual([
+      'feishu',
+      'web',
+    ]);
+    continuedInboundDb.close();
+  });
+
   it('把同一飞书用户的 Web 和飞书消息路由到同一 Lane 与同一根 Session', async () => {
     const auth = createWebAuthSession({
       userId: 'user-alice',

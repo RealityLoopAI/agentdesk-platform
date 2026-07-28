@@ -18,7 +18,13 @@ import {
   enableFeishuDeliverySubscription,
   getFeishuDeliverySubscriptionState,
 } from '../db/delivery-subscriptions.js';
-import { createMessagingGroup, createMessagingGroupAgent, getMessagingGroup } from '../db/messaging-groups.js';
+import {
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  getMessagingGroup,
+  getMessagingGroupAgentByPair,
+  getMessagingGroupByPlatform,
+} from '../db/messaging-groups.js';
 import { getSession } from '../db/sessions.js';
 import {
   completeWebMessageReceipt,
@@ -155,40 +161,7 @@ export function createWebConversation(userId: string, agentGroupId: string): Web
       ownerUserId: userId,
       actor: userId,
     });
-    const platformId = `web:${created.id}`;
-    const messagingGroupId = `mg-web-${randomUUID()}`;
-    const now = created.created_at;
-    createMessagingGroup({
-      id: messagingGroupId,
-      channel_type: 'web',
-      platform_id: platformId,
-      name: `Web ${created.id.slice(-8)}`,
-      is_group: 0,
-      unknown_sender_policy: 'strict',
-      denied_at: null,
-      created_at: now,
-    });
-    createMessagingGroupAgent({
-      id: `mga-web-${randomUUID()}`,
-      messaging_group_id: messagingGroupId,
-      agent_group_id: normalizedAgentGroupId,
-      engage_mode: 'pattern',
-      engage_pattern: '.',
-      sender_scope: 'known',
-      ignored_message_policy: 'drop',
-      session_mode: 'per-user',
-      priority: 0,
-      created_at: now,
-    });
-    createConversationBinding({
-      laneId: created.id,
-      channelType: 'web',
-      messagingGroupId,
-      platformId,
-      deliveryMode: 'source-reply',
-      actor: userId,
-      verifiedAt: now,
-    });
+    ensureActiveWebBinding(created, userId);
     return created;
   })();
   return laneSummary(lane);
@@ -446,7 +419,7 @@ export function getWebConversationHistory(args: {
   }
 }
 
-function activeWebBinding(lane: ConversationLane): { platformId: string; messagingGroupId: string } {
+function findActiveWebBinding(lane: ConversationLane): { platformId: string; messagingGroupId: string } | null {
   const binding = listConversationBindings(lane.id).find(
     (candidate) =>
       candidate.revoked_at === null &&
@@ -454,12 +427,77 @@ function activeWebBinding(lane: ConversationLane): { platformId: string; messagi
       candidate.delivery_mode === 'source-reply' &&
       candidate.messaging_group_id !== null,
   );
-  if (!binding?.messaging_group_id) throw new WebConversationError(409, 'conversation_binding_unavailable');
+  if (!binding?.messaging_group_id) return null;
   const group = getMessagingGroup(binding.messaging_group_id);
   if (!group || group.channel_type !== 'web' || group.platform_id !== binding.platform_id || group.is_group !== 0) {
     throw new WebConversationError(409, 'conversation_binding_unavailable');
   }
   return { platformId: binding.platform_id, messagingGroupId: group.id };
+}
+
+/**
+ * Feishu-first Lanes do not initially have a Web address. Provision that
+ * private ingress lazily on the first authenticated Web send, after repeating
+ * the Host access gate inside the transaction. The deterministic platform ID
+ * and serialized central-DB transaction make retries converge without
+ * granting any new Role or Membership.
+ */
+function ensureActiveWebBinding(
+  lane: ConversationLane,
+  userId: string,
+): {
+  platformId: string;
+  messagingGroupId: string;
+} {
+  return getDb().transaction(() => {
+    const currentLane = assertAccessibleLane(userId, lane.id, true);
+    const active = findActiveWebBinding(currentLane);
+    if (active) return active;
+
+    const platformId = `web:${currentLane.id}`;
+    let group = getMessagingGroupByPlatform('web', platformId);
+    const now = new Date().toISOString();
+    if (!group) {
+      createMessagingGroup({
+        id: `mg-web-${randomUUID()}`,
+        channel_type: 'web',
+        platform_id: platformId,
+        name: `Web ${currentLane.id.slice(-8)}`,
+        is_group: 0,
+        unknown_sender_policy: 'strict',
+        denied_at: null,
+        created_at: now,
+      });
+      group = getMessagingGroupByPlatform('web', platformId);
+    }
+    if (!group || group.is_group !== 0) {
+      throw new WebConversationError(409, 'conversation_binding_unavailable');
+    }
+    if (!getMessagingGroupAgentByPair(group.id, currentLane.agent_group_id)) {
+      createMessagingGroupAgent({
+        id: `mga-web-${randomUUID()}`,
+        messaging_group_id: group.id,
+        agent_group_id: currentLane.agent_group_id,
+        engage_mode: 'pattern',
+        engage_pattern: '.',
+        sender_scope: 'known',
+        ignored_message_policy: 'drop',
+        session_mode: 'per-user',
+        priority: 0,
+        created_at: now,
+      });
+    }
+    createConversationBinding({
+      laneId: currentLane.id,
+      channelType: 'web',
+      messagingGroupId: group.id,
+      platformId,
+      deliveryMode: 'source-reply',
+      actor: userId,
+      verifiedAt: now,
+    });
+    return { platformId, messagingGroupId: group.id };
+  })();
 }
 
 function receiptResponse(
@@ -492,7 +530,7 @@ export async function submitWebConversationMessage(args: {
     throw new WebConversationError(400, 'invalid_client_message_id');
   }
   if (!args.text.trim()) throw new WebConversationError(400, 'message_text_required');
-  const binding = activeWebBinding(lane);
+  const binding = ensureActiveWebBinding(lane, args.userId);
   const reserved = reserveWebMessageReceipt({
     userId: args.userId,
     laneId: lane.id,
