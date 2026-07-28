@@ -47,6 +47,7 @@ export class WebConversationError extends Error {
 export interface WebConversationSummary {
   id: string;
   agentGroup: { id: string; name: string };
+  sourceChannel: string;
   status: ConversationLane['status'];
   createdAt: string;
   archivedAt: string | null;
@@ -110,9 +111,11 @@ function laneSummary(lane: ConversationLane): WebConversationSummary {
   const group = getAgentGroup(lane.agent_group_id);
   if (!group) throw new WebConversationError(403, 'conversation_unavailable');
   const session = lane.root_session_id ? getSession(lane.root_session_id) : undefined;
+  const sourceBinding = listConversationBindings(lane.id)[0];
   return {
     id: lane.id,
     agentGroup: { id: group.id, name: group.name },
+    sourceChannel: sourceBinding?.channel_type ?? 'unknown',
     status: lane.status,
     createdAt: lane.created_at,
     archivedAt: lane.archived_at,

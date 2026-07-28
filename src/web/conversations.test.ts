@@ -50,10 +50,49 @@ describe('Web conversation service', () => {
       platform_id: `web:${lane.id}`,
       delivery_mode: 'source-reply',
     });
+    expect(lane).toMatchObject({
+      sourceChannel: 'web',
+      lastActiveAt: null,
+    });
 
     expect(listWebConversations('alice').conversations.map((item) => item.id)).toEqual([lane.id]);
     getDb().prepare('DELETE FROM agent_group_members WHERE user_id = ?').run('alice');
     expect(listWebConversations('alice').conversations).toEqual([]);
+  });
+
+  it('returns the original Feishu channel and root Session activity as non-sensitive list metadata', () => {
+    const now = '2026-01-01T02:03:04.000Z';
+    getDb().exec(`
+      INSERT INTO messaging_groups
+        (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
+      VALUES ('mg-feishu', 'feishu', 'feishu:oc_private', 'Private', 0, 'strict', '${now}');
+      INSERT INTO conversation_lanes
+        (id, agent_group_id, owner_user_id, root_session_id, status, created_at, archived_at)
+      VALUES ('lane-feishu', 'ag-1', 'alice', NULL, 'active', '${now}', NULL);
+      INSERT INTO sessions
+        (id, agent_group_id, messaging_group_id, thread_id, owner_user_id, root_session_id,
+         conversation_thread_id, conversation_lane_id, agent_provider, status, container_status,
+         last_active, archived_at, spawn_depth, created_at)
+      VALUES
+        ('session-feishu', 'ag-1', 'mg-feishu', NULL, 'alice', 'session-feishu',
+         NULL, 'lane-feishu', NULL, 'active', 'stopped', '${now}', NULL, 0, '${now}');
+      UPDATE conversation_lanes SET root_session_id = 'session-feishu' WHERE id = 'lane-feishu';
+      INSERT INTO conversation_bindings
+        (id, lane_id, channel_type, messaging_group_id, platform_id, thread_id,
+         external_identity_id, delivery_mode, verified_at, revoked_at)
+      VALUES
+        ('binding-feishu', 'lane-feishu', 'feishu', 'mg-feishu', 'feishu:oc_private',
+         NULL, NULL, 'source-reply', '${now}', NULL);
+    `);
+
+    expect(listWebConversations('alice').conversations).toEqual([
+      expect.objectContaining({
+        id: 'lane-feishu',
+        sourceChannel: 'feishu',
+        lastActiveAt: now,
+        agentGroup: { id: 'ag-1', name: 'Research Agent' },
+      }),
+    ]);
   });
 
   it('assembles deterministic pages from the authoritative DB pair without exposing another user row', () => {
