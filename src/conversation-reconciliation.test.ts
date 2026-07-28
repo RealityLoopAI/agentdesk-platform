@@ -52,14 +52,20 @@ beforeEach(() => {
       VALUES
         ('mg-1', 'feishu', 'feishu:oc_one', 'One', 1, 'public', '${NOW}'),
         ('mg-2', 'feishu', 'feishu:oc_two', 'Two', 1, 'public', '${NOW}'),
-        ('mg-shared', 'feishu', 'feishu:oc_shared', 'Shared', 1, 'public', '${NOW}');
+        ('mg-alt', 'feishu', 'feishu:oc_alt', 'Alternate', 1, 'public', '${NOW}'),
+        ('mg-shared', 'feishu', 'feishu:oc_shared', 'Shared', 1, 'public', '${NOW}'),
+        ('mg-per-thread', 'feishu', 'feishu:oc_thread', 'Thread', 1, 'public', '${NOW}'),
+        ('mg-agent-shared', 'feishu', 'feishu:oc_agent_shared', 'Agent shared', 1, 'public', '${NOW}');
     INSERT INTO messaging_group_agents
       (id, messaging_group_id, agent_group_id, engage_mode, engage_pattern,
        sender_scope, ignored_message_policy, session_mode, priority, created_at)
       VALUES
         ('mga-1', 'mg-1', 'ag-1', 'pattern', '.', 'all', 'drop', 'per-user', 0, '${NOW}'),
         ('mga-2', 'mg-2', 'ag-2', 'pattern', '.', 'all', 'drop', 'per-user', 0, '${NOW}'),
-        ('mga-shared', 'mg-shared', 'ag-1', 'pattern', '.', 'all', 'drop', 'shared', 0, '${NOW}');
+        ('mga-alt', 'mg-alt', 'ag-1', 'pattern', '.', 'all', 'drop', 'per-user', 0, '${NOW}'),
+        ('mga-shared', 'mg-shared', 'ag-1', 'pattern', '.', 'all', 'drop', 'shared', 0, '${NOW}'),
+        ('mga-per-thread', 'mg-per-thread', 'ag-1', 'pattern', '.', 'all', 'drop', 'per-thread', 0, '${NOW}'),
+        ('mga-agent-shared', 'mg-agent-shared', 'ag-1', 'pattern', '.', 'all', 'drop', 'agent-shared', 0, '${NOW}');
   `);
 });
 
@@ -120,6 +126,8 @@ describe('Feishu conversation reconciliation', () => {
     createSession(session('session-1', 'mg-1'));
     createSession(session('session-2', 'mg-2', 'ag-2'));
     createSession(session('session-shared', 'mg-shared'));
+    createSession(session('session-per-thread', 'mg-per-thread'));
+    createSession(session('session-agent-shared', 'mg-agent-shared'));
 
     const result = reconcileFeishuConversationLanes({
       userId: 'alice',
@@ -131,10 +139,10 @@ describe('Feishu conversation reconciliation', () => {
       authorizeAgentGroup: (agentGroupId) => agentGroupId === 'ag-1',
     });
     expect(result).toMatchObject({
-      scanned: 3,
+      scanned: 5,
       dryRunEligible: 1,
       skippedUnauthorized: 1,
-      skippedMode: 1,
+      skippedMode: 3,
       linked: 0,
     });
     expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(0);
@@ -144,6 +152,33 @@ describe('Feishu conversation reconciliation', () => {
       .get() as { details: string };
     expect(audit.details).not.toContain('ou_alice');
     expect(audit.details).not.toContain('feishu:oc_');
+  });
+
+  it('preserves two Feishu root conversations for the same user and assistant as separate Lanes', () => {
+    const identity = aliceIdentity();
+    createSession(session('session-conversation-a', 'mg-1'));
+    createSession(session('session-conversation-b', 'mg-alt'));
+
+    const result = reconcileFeishuConversationLanes({
+      userId: 'alice',
+      externalIdentityId: identity.id,
+      actor: 'alice',
+      trigger: 'web',
+      limit: 10,
+    });
+
+    expect(result).toMatchObject({ scanned: 2, linked: 2, conflicts: 0 });
+    const sessions = getDb()
+      .prepare(
+        `SELECT id, conversation_lane_id
+         FROM sessions
+         WHERE id IN ('session-conversation-a', 'session-conversation-b')
+         ORDER BY id`,
+      )
+      .all() as Array<{ id: string; conversation_lane_id: string }>;
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]!.conversation_lane_id).not.toBe(sessions[1]!.conversation_lane_id);
+    expect(getDb().prepare('SELECT COUNT(DISTINCT root_session_id) FROM conversation_lanes').pluck().get()).toBe(2);
   });
 
   it('fails closed for an identity-owner mismatch and for an address conflict', () => {

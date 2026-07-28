@@ -21,6 +21,7 @@ import { runMigrations } from './db/migrations/index.js';
 import { createUserIdentity } from './db/user-identities.js';
 import { inboundDbPath } from './session-manager.js';
 import { routeInbound, setSenderResolver } from './router.js';
+import { listWebConversations } from './web/conversations.js';
 
 const TEST_DATA_DIR = '/tmp/agentdesk-test-conversation-lane-router';
 
@@ -132,18 +133,41 @@ describe('Router cross-channel Conversation Lane', () => {
       ),
     ]);
 
-    const sessions = getDb()
-      .prepare('SELECT id, owner_user_id, conversation_lane_id FROM sessions')
-      .all() as Array<{ id: string; owner_user_id: string; conversation_lane_id: string }>;
+    const sessions = getDb().prepare('SELECT id, owner_user_id, conversation_lane_id FROM sessions').all() as Array<{
+      id: string;
+      owner_user_id: string;
+      conversation_lane_id: string;
+    }>;
     expect(sessions).toHaveLength(1);
     expect(sessions[0]?.owner_user_id).toBe('alice');
     expect(sessions[0]?.conversation_lane_id).toMatch(/^lane-feishu-/);
-    expect(
-      getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get(),
-    ).toBe(1);
-    expect(
-      getDb().prepare('SELECT COUNT(*) FROM conversation_bindings WHERE revoked_at IS NULL').pluck().get(),
-    ).toBe(1);
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(1);
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_bindings WHERE revoked_at IS NULL').pluck().get()).toBe(
+      1,
+    );
+    expect(getDb().prepare('SELECT COUNT(*) FROM agent_group_members').pluck().get()).toBe(0);
+    expect(getDb().prepare('SELECT COUNT(*) FROM organization_members').pluck().get()).toBe(0);
+    expect(getDb().prepare('SELECT COUNT(*) FROM user_roles').pluck().get()).toBe(0);
+    expect(listWebConversations('alice').conversations).toEqual([]);
+
+    const laneId = sessions[0]!.conversation_lane_id;
+    getDb()
+      .prepare(
+        `INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+         VALUES ('alice', 'ag-1', NULL, '2026-01-01T00:01:00.000Z')`,
+      )
+      .run();
+    expect(listWebConversations('alice').conversations.map((conversation) => conversation.id)).toEqual([laneId]);
+    getDb().prepare("DELETE FROM agent_group_members WHERE user_id = 'alice' AND agent_group_id = 'ag-1'").run();
+    expect(listWebConversations('alice').conversations).toEqual([]);
+    getDb()
+      .prepare(
+        `INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+         VALUES ('alice', 'ag-1', NULL, '2026-01-01T00:02:00.000Z')`,
+      )
+      .run();
+    expect(listWebConversations('alice').conversations.map((conversation) => conversation.id)).toEqual([laneId]);
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(1);
 
     const inbound = new Database(inboundDbPath('ag-1', sessions[0]!.id), { readonly: true });
     expect(inbound.prepare('SELECT COUNT(*) FROM messages_in').pluck().get()).toBe(2);
@@ -239,16 +263,16 @@ describe('Router cross-channel Conversation Lane', () => {
     expect(sessions.map((row) => row.conversation_lane_id)).toEqual([aliceLane.id, bobLane.id]);
 
     const aliceSession = sessions[0]!;
-    const inbound = new Database(inboundDbPath('ag-1', aliceSession.id), {
+    const aliceInbound = new Database(inboundDbPath('ag-1', aliceSession.id), {
       readonly: true,
     });
-    const rows = inbound
+    const rows = aliceInbound
       .prepare(
         `SELECT channel_type, platform_id, thread_id, origin_user_id
          FROM messages_in ORDER BY seq`,
       )
       .all();
-    inbound.close();
+    aliceInbound.close();
     expect(rows).toEqual([
       {
         channel_type: 'feishu',
@@ -263,6 +287,12 @@ describe('Router cross-channel Conversation Lane', () => {
         origin_user_id: 'alice',
       },
     ]);
+
+    const bobInbound = new Database(inboundDbPath('ag-1', sessions[1]!.id), { readonly: true });
+    expect(bobInbound.prepare('SELECT id, origin_user_id FROM messages_in ORDER BY seq').all()).toEqual([
+      { id: 'feishu-bob:ag-1', origin_user_id: 'bob' },
+    ]);
+    bobInbound.close();
   });
 
   it('keeps Feishu on its legacy session key while cross-channel auto-association is disabled', async () => {
