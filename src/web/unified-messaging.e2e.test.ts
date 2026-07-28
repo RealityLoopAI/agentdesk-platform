@@ -37,8 +37,11 @@ import { deliverSessionMessages, setDeliveryAdapter } from '../delivery.js';
 import { routeInbound, setSenderResolver } from '../router.js';
 import { inboundDbPath, outboundDbPath } from '../session-manager.js';
 import type { Session } from '../types.js';
+import '../modules/gateway-audit/index.js';
 import type { WebConfig } from './config.js';
 import { createWebRequestHandler } from './server.js';
+// @ts-expect-error 参考 Gateway 是供运营者直接运行的原生 ESM 模块，不参与 Host 的 TS 声明发布。
+import { createFeishuBitableAdapter } from '../../examples/reference-gateway/feishu-bitable-adapter.mjs';
 
 const TEST_DIR = '/tmp/agentdesk-test-web-feishu-e2e';
 const SECRET = '3343e16ed72c245827d2760f3544ce75bb6f25e7710b0874f81c4c7a6fd771a7';
@@ -92,14 +95,25 @@ function mockProviderReply(prompt: string): string {
   return `Mock response to: ${prompt.slice(0, 100)}`;
 }
 
-function writeMockReply(args: { sessionId: string; inReplyTo: string; text: string; id: string }): void {
+function writeOutboundMessage(args: {
+  sessionId: string;
+  inReplyTo?: string | null;
+  text?: string;
+  content?: Record<string, unknown>;
+  id: string;
+  kind: 'chat' | 'system';
+}): void {
   const db = new Database(outboundDbPath('ag-unified', args.sessionId));
   db.prepare(
     `INSERT INTO messages_out
        (id, timestamp, kind, platform_id, channel_type, thread_id, content, in_reply_to)
-     VALUES (?, datetime('now'), 'chat', NULL, NULL, NULL, ?, ?)`,
-  ).run(args.id, JSON.stringify({ text: args.text }), args.inReplyTo);
+     VALUES (?, datetime('now'), ?, NULL, NULL, NULL, ?, ?)`,
+  ).run(args.id, args.kind, JSON.stringify(args.content ?? { text: args.text ?? '' }), args.inReplyTo ?? null);
   db.close();
+}
+
+function writeMockReply(args: { sessionId: string; inReplyTo: string; text: string; id: string }): void {
+  writeOutboundMessage({ ...args, kind: 'chat' });
 }
 
 async function postJson(pathname: string, auth: { token: string; csrfToken: string }, body: unknown) {
@@ -220,6 +234,260 @@ afterEach(async () => {
 });
 
 describe('真实 Host + MockProvider 的 Web/飞书统一消息', () => {
+  it('让飞书多维表格请求经 Gateway 授权执行并审计，拒绝越权和未确认删除', async () => {
+    createUserIdentity({
+      userId: 'user-alice',
+      provider: 'feishu',
+      providerScope: CONFIG.feishu.appId,
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
+    createMessagingGroup({
+      id: 'mg-bitable-assistant',
+      channel_type: 'feishu',
+      platform_id: 'feishu:oc_bitable_assistant',
+      name: '多维表格助手群',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: new Date().toISOString(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-bitable-assistant',
+      messaging_group_id: 'mg-bitable-assistant',
+      agent_group_id: 'ag-unified',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'per-user',
+      priority: 0,
+      created_at: new Date().toISOString(),
+    });
+
+    await routeInbound({
+      channelType: 'feishu',
+      platformId: 'feishu:oc_bitable_assistant',
+      threadId: null,
+      senderIdentity: {
+        provider: 'feishu',
+        providerScope: CONFIG.feishu.appId,
+        identifierType: 'open_id',
+        externalSubject: 'ou_alice',
+      },
+      message: {
+        id: 'feishu-bitable-create',
+        kind: 'chat',
+        content: JSON.stringify({ text: '在销售管道中新建“上海续约”', sender: 'Alice' }),
+        timestamp: new Date().toISOString(),
+        isMention: true,
+        isGroup: true,
+      },
+    });
+    const session = getDb()
+      .prepare("SELECT * FROM sessions WHERE messaging_group_id = 'mg-bitable-assistant'")
+      .get() as Session;
+    const inDb = new Database(inboundDbPath('ag-unified', session.id), { readonly: true });
+    const inboundId = inDb.prepare('SELECT id FROM messages_in ORDER BY seq LIMIT 1').pluck().get() as string;
+    inDb.close();
+
+    const gatewayAudits: Array<Record<string, unknown>> = [];
+    let createProviderCalls = 0;
+    let deleteProviderCalls = 0;
+    const bitableFetch = vi.fn(async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
+      const href = String(input);
+      if (href.endsWith('/auth/v3/tenant_access_token/internal')) {
+        return new Response(JSON.stringify({ code: 0, tenant_access_token: 'mock-tenant-token', expire: 7200 }));
+      }
+      if (href.includes('/fields')) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              items: [
+                { field_id: 'fld-name', field_name: 'Name', type: 1, ui_type: 'Text' },
+                {
+                  field_id: 'fld-status',
+                  field_name: 'Status',
+                  type: 3,
+                  ui_type: 'SingleSelect',
+                  property: { options: [{ name: 'Open' }, { name: 'Closed' }] },
+                },
+              ],
+              has_more: false,
+            },
+          }),
+        );
+      }
+      if (href.endsWith('/records') && init.method === 'POST') {
+        createProviderCalls += 1;
+        const body = JSON.parse(String(init.body)) as { fields: Record<string, unknown> };
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: { record: { record_id: 'rec-created', fields: body.fields } },
+          }),
+        );
+      }
+      if (init.method === 'DELETE') {
+        deleteProviderCalls += 1;
+        return new Response(JSON.stringify({ code: 0, data: {} }));
+      }
+      throw new Error(`unexpected Bitable provider endpoint: ${href}`);
+    });
+    const adapter = createFeishuBitableAdapter({
+      appId: 'cli-bitable-e2e',
+      appSecret: 'gateway-only-secret',
+      cursorSecret: 'cursor-secret-at-least-32-characters-long',
+      confirmationSecret: 'confirmation-secret-at-least-32-characters',
+      readEnabled: true,
+      writeEnabled: true,
+      fetchImpl: bitableFetch,
+      baseUrl: 'https://mock.feishu.local/open-apis',
+      audit: async (event: Record<string, unknown>) => gatewayAudits.push(event),
+      resources: {
+        'sales.pipeline': {
+          appToken: 'bas-provider-secret',
+          tableId: 'tbl-provider-secret',
+          name: '销售管道',
+          readers: ['user-alice'],
+          writers: ['user-alice'],
+          requiredFields: ['Name'],
+          highImpactFields: ['Status'],
+        },
+      },
+    });
+    const createRequest = {
+      operation: 'feishu.bitable.record.create',
+      input: { resource: 'sales.pipeline', fields: { Name: '上海续约', Status: 'Open' } },
+      requester: { userId: 'user-alice' },
+      requesterSource: 'session',
+      dryRun: false,
+      idempotencyKey: 'bitable-create-e2e',
+    };
+    await expect(adapter.authorize(createRequest)).resolves.toMatchObject({ allowed: true });
+    const createdRecord = await adapter.execute(createRequest);
+    expect(createdRecord).toMatchObject({
+      ok: true,
+      result: { recordId: 'rec-created', fields: { Name: '上海续约', Status: 'Open' } },
+    });
+    expect(createProviderCalls).toBe(1);
+
+    const providerCallsAfterCreate = bitableFetch.mock.calls.length;
+    const unauthorized = await adapter.execute({
+      ...createRequest,
+      requester: { userId: 'user-bob' },
+      idempotencyKey: 'bitable-bob-e2e',
+    });
+    expect(unauthorized).toMatchObject({ status: 403, body: { code: 'BACKEND_UNAUTHORIZED' } });
+    expect(bitableFetch).toHaveBeenCalledTimes(providerCallsAfterCreate);
+
+    const unconfirmedDelete = await adapter.execute({
+      operation: 'feishu.bitable.record.delete',
+      input: { resource: 'sales.pipeline', recordId: 'rec-created' },
+      requester: { userId: 'user-alice' },
+      requesterSource: 'session',
+      dryRun: false,
+      idempotencyKey: 'bitable-delete-e2e',
+    });
+    expect(unconfirmedDelete).toMatchObject({
+      status: 409,
+      body: { code: 'CONFIRMATION_REQUIRED' },
+    });
+    expect(deleteProviderCalls).toBe(0);
+    expect(gatewayAudits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          phase: 'execute',
+          requesterUserId: 'user-alice',
+          operation: 'feishu.bitable.record.create',
+          resource: 'sales.pipeline',
+          outcome: 'ok',
+        }),
+        expect.objectContaining({
+          phase: 'execute',
+          requesterUserId: 'user-bob',
+          outcome: 'BACKEND_UNAUTHORIZED',
+        }),
+        expect.objectContaining({
+          phase: 'execute',
+          operation: 'feishu.bitable.record.delete',
+          outcome: 'CONFIRMATION_REQUIRED',
+        }),
+      ]),
+    );
+
+    writeOutboundMessage({
+      sessionId: session.id,
+      id: 'gateway-audit-bitable-create',
+      kind: 'system',
+      content: {
+        action: 'gateway_audit',
+        path: '/execute',
+        operation: 'feishu.bitable.record.create',
+        logicalResource: 'sales.pipeline',
+        userId: 'user-alice',
+        requesterSource: 'session',
+        status: 'ok',
+        httpStatus: 200,
+        durationMs: 3,
+        idempotencyKey: 'bitable-create-e2e',
+        inputHash: 'sha256:e2e',
+      },
+    });
+    writeMockReply({
+      sessionId: session.id,
+      inReplyTo: inboundId,
+      id: 'bitable-create-result',
+      text: '已在销售管道创建记录“上海续约”（rec-created）。',
+    });
+    await deliverSessionMessages(session);
+
+    expect(
+      getDb()
+        .prepare(
+          `SELECT session_id, agent_group_id, user_id, operation, logical_resource, status
+           FROM gateway_audit WHERE idempotency_key = 'bitable-create-e2e'`,
+        )
+        .get(),
+    ).toEqual({
+      session_id: session.id,
+      agent_group_id: 'ag-unified',
+      user_id: 'user-alice',
+      operation: 'feishu.bitable.record.create',
+      logical_resource: 'sales.pipeline',
+      status: 'ok',
+    });
+
+    const auth = createWebAuthSession({
+      userId: 'user-alice',
+      secret: SECRET,
+      policy: CONFIG.sessionPolicy,
+    });
+    const history = await fetch(
+      `${baseUrl}/api/conversations/${encodeURIComponent(session.conversation_lane_id!)}/messages`,
+      { headers: { cookie: `${CONFIG.cookieName}=${auth.token}` } },
+    );
+    expect(history.status).toBe(200);
+    const body = (await history.json()) as {
+      messages: Array<{ direction: string; text: string; channel: { type: string } }>;
+    };
+    expect(body.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          direction: 'user',
+          text: '在销售管道中新建“上海续约”',
+          channel: expect.objectContaining({ type: 'feishu' }),
+        }),
+        expect.objectContaining({
+          direction: 'agent',
+          text: expect.stringContaining('rec-created'),
+          channel: expect.objectContaining({ type: 'feishu' }),
+        }),
+      ]),
+    );
+    expect(body.messages).toHaveLength(2);
+  });
+
   it('不预置 Lane/Binding 时由飞书首条消息自动建档，SSO 后回填历史并继续 Web 对话', async () => {
     createUserIdentity({
       userId: 'user-alice',

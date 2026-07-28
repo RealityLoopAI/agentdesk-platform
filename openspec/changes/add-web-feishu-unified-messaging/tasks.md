@@ -120,5 +120,5 @@
 - [x] 10.12 增加权限隔离测试，证明自动关联不创建 Role/Membership、公开飞书群不自动授予 Web 权限、撤权即时隐藏 Lane、恢复授权后仍复用原 Lane，且 Organization 不进入 Gateway 授权输入
 - [x] 10.13 增加 Alice/Bob 同群和多会话隐私测试，证明两人的 Lane/根 Session 分离，同一用户的不同飞书根 Session 不被合并，`shared`/`per-thread`/`agent-shared` 历史不会进入个人 Web
 - [x] 10.14 使用真实 Host + Mock Feishu/SSO Provider 增加不预置 Lane/Binding 的 E2E：飞书发消息并收到 Agent 回复后，用户登录 Web 自动看到完整会话并可继续发送
-- [ ] 10.15 增加多维表格助手跨端 E2E：飞书来源的已授权 CRUD 请求经 Backend Gateway 执行并审计，对话和 Agent 结果进入同一 Web Lane，未授权和破坏性未确认请求保持拒绝
+- [x] 10.15 增加多维表格助手跨端 E2E：飞书来源的已授权 CRUD 请求经 Backend Gateway 执行并审计，对话和 Agent 结果进入同一 Web Lane，未授权和破坏性未确认请求保持拒绝
 - [ ] 10.16 更新 Feature Flag 分阶段启用、影子统计、历史回填、回滚和人工验收指南，并运行 Host/Runner Typecheck、全量测试、Web 组件/E2E、Lint、构建和容器 Smoke Test
