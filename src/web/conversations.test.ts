@@ -115,7 +115,8 @@ describe('Web conversation service', () => {
            (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content, in_reply_to)
          VALUES (?, ?, ?, 'chat', NULL, NULL, NULL, ?, ?)`,
       )
-      .run('out-1', 3, '2026-01-01T00:00:02.000Z', JSON.stringify({ text: 'answer' }), 'in-1');
+      // SQLite CURRENT_TIMESTAMP uses this UTC shape without `T` or `Z`.
+      .run('out-1', 3, '2026-01-01 00:00:02', JSON.stringify({ text: 'answer' }), 'in-1');
     outbound.close();
     writeSessionMessage('ag-1', resolved.session.id, {
       id: 'in-2',
@@ -140,6 +141,7 @@ describe('Web conversation service', () => {
 
     const latest = getWebConversationHistory({ userId: 'alice', laneId: lane.id, limit: 2 });
     expect(latest.messages.map((message) => message.id)).toEqual(['out-1', 'in-2']);
+    expect(latest.messages[0]!.timestamp).toBe('2026-01-01T00:00:02.000Z');
     expect(latest.messages.map((message) => message.text)).not.toContain('private Bob text');
     expect(latest.messages[0]!.channel).toEqual({
       type: 'web',

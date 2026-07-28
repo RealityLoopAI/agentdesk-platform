@@ -236,7 +236,13 @@ function decodeCursor(raw: string | null): EncodedCursor | null {
     ) {
       throw new Error('invalid cursor shape');
     }
-    return decoded as EncodedCursor;
+    return {
+      ...(decoded as EncodedCursor),
+      before: {
+        ...(decoded.before as HistoryKey),
+        timestamp: normalizeHistoryTimestamp(decoded.before.timestamp),
+      },
+    };
   } catch {
     throw new WebConversationError(400, 'invalid_cursor');
   }
@@ -253,6 +259,21 @@ function historyKey(message: WebHistoryMessage): HistoryKey {
     direction: message.direction === 'user' ? 0 : 1,
     id: message.id,
   };
+}
+
+/**
+ * SQLite CURRENT_TIMESTAMP is UTC but uses `YYYY-MM-DD HH:mm:ss` without a
+ * timezone suffix. Browsers interpret that shape as local time, and raw string
+ * ordering places it before ISO timestamps containing `T`. Normalize every
+ * valid timestamp at the Web API boundary so display, pagination, and ordering
+ * all use one unambiguous UTC representation.
+ */
+function normalizeHistoryTimestamp(raw: string): string {
+  const trimmed = raw.trim();
+  const sqliteUtc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(trimmed);
+  const candidate = sqliteUtc ? `${trimmed.replace(' ', 'T')}Z` : trimmed;
+  const milliseconds = Date.parse(candidate);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : raw;
 }
 
 function compareKey(left: HistoryKey, right: HistoryKey): number {
@@ -378,7 +399,7 @@ export function getWebConversationHistory(args: {
           sequence: row.seq,
           direction: 'user' as const,
           kind: row.kind,
-          timestamp: row.timestamp,
+          timestamp: normalizeHistoryTimestamp(row.timestamp),
           text: messageText(row.content),
           channel: { type: row.channel_type, platformId: row.platform_id, threadId: row.thread_id },
           status: row.status === 'failed' ? 'failed' : 'accepted',
@@ -393,7 +414,7 @@ export function getWebConversationHistory(args: {
           sequence: row.seq,
           direction: 'agent' as const,
           kind: row.kind,
-          timestamp: row.timestamp,
+          timestamp: normalizeHistoryTimestamp(row.timestamp),
           text: messageText(row.content),
           channel: (row.in_reply_to ? trustedRoutes.get(row.in_reply_to) : undefined) ?? {
             type: row.channel_type,
