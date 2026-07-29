@@ -141,6 +141,35 @@ describe('erp gateway mcp tools', () => {
     });
   });
 
+  it('makes exact discovered operation names prominent and forbids guessed variants', async () => {
+    setRequestIdentity(sessionIdentity());
+
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          operations: [
+            { name: 'feishu.bitable.field.list', description: 'List fields' },
+            { name: 'feishu.bitable.record.list', description: 'List records' },
+            { name: 'feishu.bitable.record.get', description: 'Get one record' },
+            { name: 'feishu.bitable.record.create', description: 'Create one record' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch;
+
+    const result = await handleGatewayDescribe(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {});
+    const text = result.content[0]?.text ?? '';
+
+    expect(result.isError).toBeUndefined();
+    expect(text).toContain('EXACT_OPERATION_NAMES (4; copy one of these names verbatim');
+    expect(text).toContain('- feishu.bitable.field.list');
+    expect(text).toContain('- feishu.bitable.record.list');
+    expect(text).toContain('Do not invent singular/plural, schema/describe, query/filter');
+    expect(text.indexOf('EXACT_OPERATION_NAMES')).toBeLessThan(text.indexOf('"operations"'));
+    expect(text.lastIndexOf('EXACT_OPERATION_NAMES')).toBeGreaterThan(text.lastIndexOf('"operations"'));
+    expect(text).toContain('"description": "List fields"');
+  });
+
   it('propagates origin_user_id from an a2a-delegated worker session', async () => {
     // Worker session identity was resolved by poll-loop from the a2a
     // inbound row's origin_user_id (host-written, container can't forge).

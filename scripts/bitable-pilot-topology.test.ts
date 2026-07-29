@@ -27,6 +27,11 @@ describe('Bitable pilot topology', () => {
 
     expect(worker).toContain('gateway_describe');
     expect(worker).toContain('gateway_authorize');
+    expect(worker).toContain('feishu.bitable.field.list');
+    expect(worker).toContain('feishu.bitable.record.list');
+    expect(worker).toContain('Copy Operation names verbatim');
+    expect(worker).toContain('Never invent variants');
+    expect(worker).toContain('Never claim that an Operation was attempted');
     expect(worker).toContain('explicit user confirmation');
     expect(worker).toContain('stable idempotency key');
     expect(worker).toContain('Never use or request record update, record delete, or any batch operation');

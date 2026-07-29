@@ -37,6 +37,10 @@ Gateway SHALL 为本轮试点只发布批准资源的只读 Operation 和 `feish
 - **WHEN** Web Lane 中的用户请求新增一条多维表格记录
 - **THEN** Bitable Worker 的 Gateway 请求继续归属于同一个规范用户，工具参数不能替换该身份
 
+#### Scenario: Worker 使用发现结果中的精确 Operation 名称
+- **WHEN** 最新 `gateway_describe` 发布 Field 或 Record List Operation
+- **THEN** Worker 从返回目录逐字复制 Operation 名称，不猜测复数、Schema、Describe、Query 或 Filter 变体，也不把已发布的 Field/List 能力误报为不支持
+
 ### Requirement: 单条新增执行纪律
 Bitable Worker SHALL 在新增前确认 Operation 可发现、调用 Gateway 授权、获取当前 Field Schema，并在最终字段值已由用户明确确认后使用稳定幂等键执行 `feishu.bitable.record.create`。只有成功结果可以报告为已创建。
 

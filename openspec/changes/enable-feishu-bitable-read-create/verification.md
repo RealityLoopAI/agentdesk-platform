@@ -141,3 +141,35 @@ Command: `pnpm typecheck && pnpm test`
   `助手 · 来自飞书`; the raw Worker result no longer appeared as a user bubble.
   Existing Create, replay, Get, Feishu delivery, and Web history remained
   visible.
+
+## Discovery reliability regression fix
+
+- The reported “permission problem” was not a Gateway release-policy or Feishu
+  authorization failure. Live `/describe` already published the exact
+  `feishu.bitable.field.list` and `feishu.bitable.record.list` Operations.
+  The OpenAI-compatible Worker had retained a stale narrative conclusion and
+  guessed unsupported Operation-name variants instead of copying the catalog.
+- `gateway_describe` now surrounds the original descriptor with a compact exact
+  Operation-name index and explicitly forbids guessed variants. The original
+  JSON descriptor remains intact. The Bitable Worker Prompt names the expected
+  Field/List/Get/Create candidates, requires verbatim selection from the latest
+  discovery, and forbids claiming an attempted Operation without a current
+  tool result.
+- The polluted internal Worker session
+  `sess-1785300699619-vaxj2b` was stopped and recoverably archived. A fresh
+  root-session Worker, `sess-1785306652724-njq518`, was created by the next
+  delegated request; no session database was edited out of band.
+- A real Web request in the existing Feishu-linked Lane successfully executed
+  `feishu.bitable.field.list`, returned 9 fields, and produced Gateway audit ID
+  `68915862-948d-4672-8a8a-3eedf2473bc5`.
+- A second real request successfully executed
+  `feishu.bitable.record.list`, filtered the bounded result to 4 P0 records, and
+  produced Gateway audit ID `2a22b7a3-9b57-4db8-b088-357e56ca788c`.
+  Host audit retained `requesterSource=session`, the canonical Feishu user,
+  logical resource `pilot.records`, and the Bitable Worker group on both reads.
+- Focused topology tests passed 2/2 and Gateway MCP tests passed 60/60. Final
+  gates passed: Host 105/105 test files and 993/993 tests, reference Gateway
+  13/13, Runner 336/336, Host/Web/Runner typechecks, lint with zero errors
+  (196 pre-existing warnings), and OpenSpec strict validation. The initial
+  sandboxed full-test attempt hit the known `tsx` IPC/Vitest worker restriction;
+  the same suite passed outside that restriction.

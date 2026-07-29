@@ -828,6 +828,40 @@ function normalizeResponseText(text: string): string {
   }
 }
 
+function formatGatewayDescribeForAgent(text: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as Record<string, unknown>).operations)) {
+    return text;
+  }
+
+  const operationNames = (parsed as { operations: unknown[] }).operations
+    .map((operation) => {
+      if (!operation || typeof operation !== 'object') return null;
+      const name = (operation as Record<string, unknown>).name;
+      return typeof name === 'string' && name.length > 0 ? name : null;
+    })
+    .filter((name): name is string => name !== null);
+
+  if (operationNames.length === 0) return text;
+
+  const exactNameIndex = [
+    `EXACT_OPERATION_NAMES (${operationNames.length}; copy one of these names verbatim into gateway_authorize and gateway_execute):`,
+    ...operationNames.map((name) => `- ${name}`),
+    'Do not invent singular/plural, schema/describe, query/filter, or other operation-name variants.',
+  ].join('\n');
+
+  // Repeat the compact index after the descriptor as well. This keeps the
+  // authoritative names visible even when a long catalog is summarized from
+  // either end by a model or intermediary.
+  return `${exactNameIndex}\n\n${text}\n\n${exactNameIndex}`;
+}
+
 function truncate(text: string): string {
   return text.length > 600 ? `${text.slice(0, 600)}...` : text;
 }
@@ -852,7 +886,7 @@ export async function handleGatewayDescribe(
   });
   if (!result.ok) return gatewayErr(result);
   log(`gateway_describe: ${requester.userId ?? 'anonymous'} (${requesterSource})`);
-  return ok(result.text);
+  return ok(formatGatewayDescribeForAgent(result.text));
 }
 
 export async function handleGatewayAuthorize(

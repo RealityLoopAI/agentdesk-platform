@@ -23,6 +23,7 @@
 - [x] 3.4 在 Create Prompt 流程中加入最终资源/字段摘要与显式用户确认，成功回复包含 Operation、Record 结果和 `auditId`
 - [x] 3.5 为 Frontdesk 增加 `bitable` 目的地和分类规则，把多维表格意图委派给专用 Worker
 - [x] 3.6 增加 Prompt/拓扑测试，证明 Frontdesk 不宣称未发现能力，Worker 结果返回 Frontdesk，原始规范用户跨 A2A 保持不变
+- [x] 3.7 修复 Worker 误读 Discovery 的回归：突出精确 Operation 名称、禁止猜测变体，并为 Field/List 候选增加确定性 Prompt 约束
 
 ## 4. 纵向测试与审计
 
@@ -33,6 +34,7 @@
 - [x] 4.5 在用户确认后对真实试验表执行一次 Create，并用相同幂等键重放验证只有一条 Record
 - [x] 4.6 从飞书发起读取，再通过 Web SSO 查看同一 Lane；从 Web 发起新增并验证只回复触发来源且不形成回环
 - [x] 4.7 修复 Web 历史把 A2A Worker 返回误标为用户消息的问题，并增加身份链保留但内部消息不可见的回归测试
+- [x] 4.8 归档受陈旧结论污染的内部 Worker 会话，并在既有真实 Lane 验证 Field Schema 与 P0 Record List 查询
 
 ## 5. 文档、回滚与质量门
 
@@ -42,3 +44,4 @@
 - [x] 5.4 运行 Host/Runner Typecheck、全量测试、参考 Gateway 测试、Conformance、Lint 和相关容器 Smoke Test
 - [x] 5.5 重启 Host 和 Gateway，检查健康状态、Bitable 指标、Gateway Audit，并完成飞书/Web 人工验收清单
 - [x] 5.6 运行修复相关测试和全量质量门，并在真实既有 Lane 中确认历史不再重复且原有飞书/Web/Bitable 功能未受影响
+- [x] 5.7 运行 Discovery 可靠性修复的 Host/Runner Typecheck、全量测试、Lint 与 OpenSpec 严格校验
