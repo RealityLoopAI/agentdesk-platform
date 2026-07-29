@@ -13,12 +13,12 @@ Channel Adapter 或 Agent 容器。
 
 ## 1. 四个独立 Feature Flag
 
-| 开关                           | 所属进程 |  默认值 | 打开后发生什么                                                | 关闭后的保证                                                |
-| ------------------------------ | -------- | ------: | ------------------------------------------------------------- | ----------------------------------------------------------- |
-| `WEB_ENABLED`                  | Host     | `false` | 启动独立 Web Listener，提供 SSO、API、SSE 和前端静态文件      | 不监听 `WEB_PORT`；飞书入口继续工作                         |
-| `CROSS_CHANNEL_LANES_ENABLED`  | Host     | `false` | 合格飞书入站可自动创建或复用用户 Lane 与 Binding              | 新飞书入站继续使用旧 Session Key；已有 Lane 保留            |
-| `FEISHU_BITABLE_READ_ENABLED`  | Gateway  | `false` | `/describe` 发布 5 个多维表格只读 Operation                   | 只读 Operation 不可发现，直接调用返回 `OPERATION_NOT_FOUND` |
-| `FEISHU_BITABLE_WRITE_ENABLED` | Gateway  | `false` | `/describe` 发布 6 个 Record 写 Operation                     | 写 Operation 不可发现，也不会触达飞书 API                   |
+| 开关                           | 所属进程 |  默认值 | 打开后发生什么                                           | 关闭后的保证                                                |
+| ------------------------------ | -------- | ------: | -------------------------------------------------------- | ----------------------------------------------------------- |
+| `WEB_ENABLED`                  | Host     | `false` | 启动独立 Web Listener，提供 SSO、API、SSE 和前端静态文件 | 不监听 `WEB_PORT`；飞书入口继续工作                         |
+| `CROSS_CHANNEL_LANES_ENABLED`  | Host     | `false` | 合格飞书入站可自动创建或复用用户 Lane 与 Binding         | 新飞书入站继续使用旧 Session Key；已有 Lane 保留            |
+| `FEISHU_BITABLE_READ_ENABLED`  | Gateway  | `false` | `/describe` 发布 5 个多维表格只读 Operation              | 只读 Operation 不可发现，直接调用返回 `OPERATION_NOT_FOUND` |
+| `FEISHU_BITABLE_WRITE_ENABLED` | Gateway  | `false` | `/describe` 发布 6 个 Record 写 Operation                | 写 Operation 不可发现，也不会触达飞书 API                   |
 
 这里的“独立”是指可以分别回滚，不代表可以跳过依赖。例如，打开
 `CROSS_CHANNEL_LANES_ENABLED` 前必须已经有经过验证的 `user_identities`、用户级 Session Mode 和
@@ -96,7 +96,8 @@ server {
   location / {
     proxy_pass http://127.0.0.1:3100;
     proxy_http_version 1.1;
-    proxy_set_header Host $host;
+    # 保留浏览器实际访问的 Host；非默认端口也是 SSE 同源校验的一部分。
+    proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-Proto https;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
@@ -111,6 +112,7 @@ server {
 检查项：
 
 - TLS 证书有效，浏览器最终 Origin 与 `WEB_PUBLIC_ORIGIN` 完全一致；
+- 反向代理传给 Host 的 `Host` 与 `WEB_PUBLIC_ORIGIN` 的 Host（含非默认端口）一致；
 - `/healthz` 返回 `200`；
 - `/api/*`、`/auth/*` 不被代理缓存；
 - `text/event-stream` 响应不被缓冲、压缩聚合或中途截断；
@@ -264,13 +266,13 @@ Operation 应返回 `OPERATION_NOT_FOUND`，飞书 Mock/Provider 不应收到请
 
 ## 7. 推荐的分阶段启用顺序
 
-| 阶段           | Web | 跨渠道 Lane | 多维表格读 | 多维表格写 | 验收重点                                                            |
-| -------------- | --: | ----------: | ---------: | ---------: | ------------------------------------------------------------------- |
-| 0：只迁移      |  关 |          关 |         关 |         关 | 旧飞书消息、旧 Session 和 NULL-org 行为不变                         |
-| 1：内部 Web    |  开 |          关 |         关 |         关 | SSO、Cookie/CSRF、显式历史协调、会话隔离；仅给试点用户 Web 权限       |
-| 2：只读数据    |  开 |          关 |         开 |         关 | `/describe` 只发布读操作；资源和用户白名单正确；审计完整            |
-| 3：小范围 Lane |  开 |          开 |         开 |         关 | 先完成 Dry Run/冲突清零；观察入站自动关联；Alice/Bob 同群不串线     |
-| 4：受控写入    |  开 |          开 |         开 |         开 | 先开放低风险逻辑资源；确认、幂等、限流、审计和告警全部通过          |
+| 阶段           | Web | 跨渠道 Lane | 多维表格读 | 多维表格写 | 验收重点                                                        |
+| -------------- | --: | ----------: | ---------: | ---------: | --------------------------------------------------------------- |
+| 0：只迁移      |  关 |          关 |         关 |         关 | 旧飞书消息、旧 Session 和 NULL-org 行为不变                     |
+| 1：内部 Web    |  开 |          关 |         关 |         关 | SSO、Cookie/CSRF、显式历史协调、会话隔离；仅给试点用户 Web 权限 |
+| 2：只读数据    |  开 |          关 |         开 |         关 | `/describe` 只发布读操作；资源和用户白名单正确；审计完整        |
+| 3：小范围 Lane |  开 |          开 |         开 |         关 | 先完成 Dry Run/冲突清零；观察入站自动关联；Alice/Bob 同群不串线 |
+| 4：受控写入    |  开 |          开 |         开 |         开 | 先开放低风险逻辑资源；确认、幂等、限流、审计和告警全部通过      |
 
 每阶段至少观察一个完整业务周期，再进入下一阶段。不要在同一次发布里同时打开 Lane 和写操作，
 否则出现异常时很难判断是身份关联、会话路由还是业务授权问题。

@@ -84,6 +84,14 @@ Web 消息通过认证后的 HTTP POST 提交；持久化后的 Agent 和 Delive
 
 SSE 只是通知路径，不是新的数据真相源。重连重放必须在 Cursor 之后读取持久化 Session 数据；只有对应数据库写入成功后才能发出 Event。
 
+原生浏览器 `EventSource` 的同源 GET 不保证携带 `Origin`。事件流安全校验因此采用两条封闭路径：
+请求明确携带 `Origin` 时必须与 `WEB_PUBLIC_ORIGIN` 完全一致；请求没有 `Origin` 时，只有
+`Host` 与公开 Origin 的 Host（含非默认端口）完全一致且浏览器 Fetch Metadata 明确报告
+`Sec-Fetch-Site: same-origin` 才允许连接。`same-site`、`cross-site`、`none`、缺失
+Fetch Metadata、`Origin: null` 和 Host 不匹配全部拒绝。显式 Origin 优先，不能由兼容分支覆盖。
+POST 写请求继续要求精确 Origin 和 CSRF，不使用该兼容路径。连接建立后 Host 立即发送 SSE 注释帧
+促使浏览器和反向代理确认流已经可用。
+
 备选方案：WebSocket。暂缓，直到出现 HTTP POST + SSE 无法满足的双向低延迟状态需求。
 
 ### 3. 使用 React + Vite + TypeScript 实现独立 Web 前端

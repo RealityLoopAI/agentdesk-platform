@@ -76,8 +76,17 @@ Web History 也会 Fail Closed 地过滤掉。
 ## SSE 实时事件
 
 `GET /api/events` 建立一个用户级 Server-Sent Events（SSE）连接。SSE 是服务器持续向浏览器发送
-通知的标准 HTTP 流；浏览器发消息仍使用普通 POST。该接口同时要求有效 Cookie 和精确
-`Origin`，不接受跨站凭证流。
+通知的标准 HTTP 流；浏览器发消息仍使用普通 POST。该接口要求有效 Cookie 和同源证明，不接受
+跨站凭证流。请求带有 `Origin` 时必须与 `WEB_PUBLIC_ORIGIN` 完全一致；原生同源
+`EventSource` 没有发送 `Origin` 时，Host 只接受同时满足以下条件的请求：
+
+- `Host` 与 `WEB_PUBLIC_ORIGIN` 的 Host（包括非默认端口）完全一致；
+- 浏览器生成的 `Sec-Fetch-Site` 精确等于 `same-origin`。
+
+显式 Origin 的判断优先，错误 Origin 或 `Origin: null` 不能通过兼容分支；缺少 Fetch Metadata，
+或其值为 `same-site`、`cross-site`、`none` 时同样返回 `403`。POST 写请求仍使用精确 Origin 和
+CSRF，不采用这条 SSE 兼容规则。Host 建立流后立即发送 `: connected` 注释帧，让浏览器和代理尽快
+确认连接；该帧不进入业务事件或聊天历史。
 
 中央 `web_events` 表持久化 `event_id`、规范用户、Lane、事件类型、服务端资源 ID 和顺序号，
 不保存消息正文。浏览器收到事件后根据 `laneId` 重新校验相应 History Query，所以 Session

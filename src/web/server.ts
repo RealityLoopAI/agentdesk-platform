@@ -204,6 +204,17 @@ function exactOriginAllowed(req: IncomingMessage, config: WebConfig): boolean {
   return typeof origin === 'string' && origin === config.publicOrigin;
 }
 
+function sseOriginAllowed(req: IncomingMessage, config: WebConfig): boolean {
+  const origin = req.headers.origin;
+  if (typeof origin === 'string') return origin === config.publicOrigin;
+  if (origin !== undefined) return false;
+
+  const host = req.headers.host;
+  const fetchSite = req.headers['sec-fetch-site'];
+  const publicHost = new URL(config.publicOrigin).host;
+  return typeof host === 'string' && host.toLowerCase() === publicHost.toLowerCase() && fetchSite === 'same-origin';
+}
+
 async function readJsonRequestBody(req: IncomingMessage, maxBytes: number): Promise<Record<string, unknown>> {
   const declared = Number(req.headers['content-length'] ?? 0);
   if (Number.isFinite(declared) && declared > maxBytes) {
@@ -365,7 +376,7 @@ export function createWebRequestHandler(
         }
 
         if (method === 'GET' && url.pathname === '/api/events') {
-          if (!exactOriginAllowed(req, config)) throw new WebRequestError(403, 'request_forbidden');
+          if (!sseOriginAllowed(req, config)) throw new WebRequestError(403, 'request_forbidden');
           const lastEventId =
             typeof req.headers['last-event-id'] === 'string'
               ? req.headers['last-event-id']

@@ -190,6 +190,11 @@ export function createWebEventStreamManager(
     args.req.on('aborted', close);
     args.res.on('close', close);
 
+    // Native EventSource does not expose response headers to application code.
+    // An immediate comment confirms that the stream is usable and also prompts
+    // reverse proxies to flush the response before the first business event.
+    if (!write(': connected\n\n')) return;
+
     // Subscribe before replay. Both replay reads and append notifications are
     // synchronous in this single Host process, so no event can fall into a gap
     // between the two operations.

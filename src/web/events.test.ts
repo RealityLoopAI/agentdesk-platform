@@ -160,6 +160,7 @@ describe('Web SSE event stream', () => {
     });
 
     expect(response.headers.get('content-type')).toContain('text/event-stream');
+    expect(response.chunks[0]).toBe(': connected\n\n');
     expect(response.chunks.join('')).toContain(visible.event_id);
     expect(response.chunks.join('')).not.toContain('message-secret');
     expect(response.chunks.join('')).not.toContain('message-bob');

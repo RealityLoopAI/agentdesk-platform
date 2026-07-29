@@ -118,6 +118,7 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0064](ADR-0064-web-ui-foundation.md) | 建立同源 React Web UI 与公开品牌投影：公开配置显式校验，前端 Bundle 禁止 Secret，Host 同版本发布静态资源 | Accepted | 2026-07-27 | `web`, `frontend`, `branding`, `security`, `testing` |
 | [ADR-0065](ADR-0065-unified-messaging-release-gates.md) | 在权限边界实施 Web、跨渠道 Lane、多维表格读/写的独立发布开关，并保留可审计回滚路径 | Accepted | 2026-07-27 | `web`, `feishu`, `feature-flags`, `gateway`, `rollback`, `privacy` |
 | [ADR-0066](ADR-0066-feishu-first-conversation-reconciliation.md) | 飞书已有会话作为 Web 主流程，并以根 Session 做确定性协调 | Accepted | 2026-07-28 | `web`, `feishu`, `conversation-lane`, `identity`, `privacy`, `reconciliation` |
+| [ADR-0067](ADR-0067-native-eventsource-same-origin-validation.md) | 原生 EventSource 使用 Origin 优先、Fetch Metadata 兜底的同源校验 | Accepted | 2026-07-29 | `web`, `sse`, `security`, `csrf`, `browser` |
 
 ---
 

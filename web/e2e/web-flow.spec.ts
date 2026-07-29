@@ -16,7 +16,7 @@ async function openMainConversation(page: Page): Promise<void> {
   await page.getByRole('link', { name: /研究 Agent/ }).click();
   await expect(page).toHaveURL('/conversations/lane-main');
   await expect(page.getByText('这是一条从飞书同步过来的历史消息。')).toBeVisible();
-  await expect(page.getByText('来自飞书')).toBeVisible();
+  await expect(page.getByText('来自飞书', { exact: true })).toBeVisible();
 }
 
 async function sendMessage(page: Page, text: string): Promise<void> {

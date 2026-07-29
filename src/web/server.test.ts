@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import http, { type Server } from 'node:http';
+import http, { type IncomingHttpHeaders, type IncomingMessage, type Server } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -60,6 +60,13 @@ async function serve(
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('test server did not bind TCP');
   return `http://127.0.0.1:${address.port}`;
+}
+
+async function rawGet(base: string, pathname: string, headers: IncomingHttpHeaders): Promise<IncomingMessage> {
+  return new Promise<IncomingMessage>((resolve, reject) => {
+    const request = http.get(`${base}${pathname}`, { headers }, resolve);
+    request.on('error', reject);
+  });
 }
 
 function cookieValue(setCookie: string, name: string): string {
@@ -576,7 +583,7 @@ describe('Web HTTP authentication boundary', () => {
     expect(await afterRevocation.json()).toMatchObject({ conversations: [] });
   });
 
-  it('protects the SSE route with authentication and exact Origin, then honors Last-Event-ID replay', async () => {
+  it('accepts safe browser SSE origin evidence, rejects ambiguous requests, and honors replay', async () => {
     const now = new Date().toISOString();
     getDb().exec(`
       INSERT INTO users (id, kind, display_name, created_at)
@@ -611,10 +618,42 @@ describe('Web HTTP authentication boundary', () => {
 
     const unauthenticated = await fetch(`${base}/api/events`, { headers: { origin: CONFIG.publicOrigin } });
     expect(unauthenticated.status).toBe(401);
+
     const wrongOrigin = await fetch(`${base}/api/events`, {
       headers: { cookie, origin: 'https://attacker.example' },
     });
     expect(wrongOrigin.status).toBe(403);
+    const nullOrigin = await fetch(`${base}/api/events`, {
+      headers: { cookie, origin: 'null' },
+    });
+    expect(nullOrigin.status).toBe(403);
+    const explicitOriginTakesPrecedence = await fetch(`${base}/api/events`, {
+      headers: {
+        cookie,
+        host: new URL(CONFIG.publicOrigin).host,
+        origin: 'https://attacker.example',
+        'sec-fetch-site': 'same-origin',
+      },
+    });
+    expect(explicitOriginTakesPrecedence.status).toBe(403);
+
+    for (const fetchSite of [undefined, 'same-site', 'cross-site', 'none'] as const) {
+      const response = await rawGet(base, '/api/events', {
+        cookie,
+        host: new URL(CONFIG.publicOrigin).host,
+        ...(fetchSite ? { 'sec-fetch-site': fetchSite } : {}),
+      });
+      expect(response.statusCode).toBe(403);
+      response.resume();
+    }
+    const wrongHost = await rawGet(base, '/api/events', {
+      cookie,
+      host: 'attacker.example',
+      'sec-fetch-site': 'same-origin',
+    });
+    expect(wrongHost.statusCode).toBe(403);
+    wrongHost.resume();
+
     const malformed = await fetch(`${base}/api/events?cursor=forged`, {
       headers: { cookie, origin: CONFIG.publicOrigin },
     });
@@ -632,10 +671,23 @@ describe('Web HTTP authentication boundary', () => {
     const reader = stream.body!.getReader();
     const chunk = await reader.read();
     const text = new TextDecoder().decode(chunk.value);
+    expect(text).toContain(': connected');
     expect(text).toContain(second.event_id);
     expect(text).toContain('message-2');
     expect(text).not.toContain('message-1');
     await reader.cancel();
+
+    const browserStyleStream = await rawGet(base, '/api/events', {
+      cookie,
+      host: new URL(CONFIG.publicOrigin).host,
+      'sec-fetch-site': 'same-origin',
+    });
+    expect(browserStyleStream.statusCode).toBe(200);
+    const browserStyleChunk = await new Promise<Buffer>((resolve) => {
+      browserStyleStream.once('data', resolve);
+    });
+    expect(browserStyleChunk.toString('utf8')).toContain(': connected');
+    browserStyleStream.destroy();
   });
 });
 

@@ -122,3 +122,9 @@
 - [x] 10.14 使用真实 Host + Mock Feishu/SSO Provider 增加不预置 Lane/Binding 的 E2E：飞书发消息并收到 Agent 回复后，用户登录 Web 自动看到完整会话并可继续发送
 - [x] 10.15 增加多维表格助手跨端 E2E：飞书来源的已授权 CRUD 请求经 Backend Gateway 执行并审计，对话和 Agent 结果进入同一 Web Lane，未授权和破坏性未确认请求保持拒绝
 - [x] 10.16 更新 Feature Flag 分阶段启用、影子统计、历史回填、回滚和人工验收指南，并运行 Host/Runner Typecheck、全量测试、Web 组件/E2E、Lint、构建和容器 Smoke Test
+
+## 11. SSE 浏览器同源兼容修复
+
+- [x] 11.1 为缺失 Origin 的原生同源 EventSource 增加 Host 与 Fetch Metadata 联合校验，保持 POST 的精确 Origin 与 CSRF 边界
+- [x] 11.2 建连后立即发送确认帧，并覆盖允许、拒绝、游标重放、背压、连接上限和 Session 撤销测试
+- [x] 11.3 更新 ADR、Web Channel 与反向代理运维文档，运行 Host/Web 类型检查、定向测试、组件测试、E2E 和生产构建
