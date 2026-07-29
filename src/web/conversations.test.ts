@@ -163,6 +163,64 @@ describe('Web conversation service', () => {
     );
   });
 
+  it('keeps A2A Worker results internal instead of rendering them as user-authored messages', () => {
+    const lane = createWebConversation('alice', 'ag-1');
+    const binding = listConversationBindings(lane.id)[0]!;
+    const resolved = resolveSession('ag-1', binding.messaging_group_id, null, 'per-user', 'alice', null, null, lane.id);
+    writeSessionMessage('ag-1', resolved.session.id, {
+      id: 'in-user',
+      kind: 'chat',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      platformId: binding.platform_id,
+      channelType: 'web',
+      content: JSON.stringify({ text: 'read the approved record' }),
+      originUserId: 'alice',
+    });
+    writeSessionMessage('ag-1', resolved.session.id, {
+      id: 'in-worker-result',
+      kind: 'chat',
+      timestamp: '2026-01-01T00:00:02.000Z',
+      platformId: 'ag-bitable-worker',
+      channelType: 'agent',
+      content: JSON.stringify({ text: '**internal Worker result**' }),
+      sourceSessionId: 'session-bitable-worker',
+      // The trusted origin must survive A2A for Gateway authorization, but it
+      // must not make the Worker the author of a user-facing message.
+      originUserId: 'alice',
+    });
+    const outbound = openOutboundDbRw('ag-1', resolved.session.id);
+    outbound
+      .prepare(
+        `INSERT INTO messages_out
+           (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content, in_reply_to)
+         VALUES (?, ?, ?, 'chat', ?, 'web', NULL, ?, ?)`,
+      )
+      .run(
+        'out-user-facing',
+        3,
+        '2026-01-01 00:00:03',
+        binding.platform_id,
+        JSON.stringify({ text: '**public Agent reply**' }),
+        'in-user',
+      );
+    outbound.close();
+
+    expect(getWebConversationHistory({ userId: 'alice', laneId: lane.id }).messages).toEqual([
+      expect.objectContaining({
+        id: 'in-user',
+        direction: 'user',
+        text: 'read the approved record',
+        channel: expect.objectContaining({ type: 'web' }),
+      }),
+      expect.objectContaining({
+        id: 'out-user-facing',
+        direction: 'agent',
+        text: '**public Agent reply**',
+        channel: expect.objectContaining({ type: 'web' }),
+      }),
+    ]);
+  });
+
   it('uses the same generic error for missing and foreign conversation ids', () => {
     const lane = createWebConversation('alice', 'ag-1');
     for (const laneId of [lane.id, 'lane-does-not-exist']) {

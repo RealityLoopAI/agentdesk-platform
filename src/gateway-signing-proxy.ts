@@ -204,6 +204,23 @@ function sanitizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
+/**
+ * A group's backendGateway.baseUrl is normally authored for the Agent
+ * container. In local Docker that means host.docker.internal. Proxy mode moves
+ * the actual backend fetch into the Host process, where the Docker-only alias
+ * may not resolve (notably on macOS). Translate only that standard host alias
+ * to loopback; all other internal DNS names remain untouched.
+ */
+export function signingProxyUpstreamBaseUrl(baseUrl: string): string {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.hostname === HOST_ALIAS) parsed.hostname = '127.0.0.1';
+    return sanitizeBaseUrl(parsed.toString());
+  } catch {
+    return sanitizeBaseUrl(baseUrl);
+  }
+}
+
 /** Production gateway resolver: authoritative host-side config for a group. */
 export function resolveGatewayForGroup(agentGroupId: string): BackendGatewayConfig | undefined {
   const group = getAgentGroup(agentGroupId);
@@ -400,7 +417,7 @@ export async function processSigningProxyRequest(
     return jsonError(503, 'AUDIT_UNAVAILABLE', 'audit write failed; refusing to sign', 'audit_write_failed');
   }
 
-  const target = `${sanitizeBaseUrl(gateway.baseUrl)}${input.pathname}`;
+  const target = `${signingProxyUpstreamBaseUrl(gateway.baseUrl)}${input.pathname}`;
   const controller = new AbortController();
   const timeoutMs = gateway.timeoutMs ?? FORWARD_TIMEOUT_FALLBACK_MS;
   const timer = setTimeout(() => controller.abort(), timeoutMs);

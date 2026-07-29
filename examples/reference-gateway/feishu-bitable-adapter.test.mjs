@@ -213,6 +213,130 @@ test('Bitable feature flags are opt-in and fail closed on invalid or missing con
   );
 });
 
+test('read-create pilot exposes only the intended operation subset to every trusted canonical user', async () => {
+  let createCalls = 0;
+  const { adapter, calls } = makeHarness(
+    ({ url, body }) => {
+      if (url.pathname.endsWith('/records/search')) {
+        return json({
+          code: 0,
+          data: { items: [{ record_id: 'rec-existing', fields: { Name: 'Existing' } }], has_more: false },
+        });
+      }
+      if (url.pathname.endsWith('/records')) {
+        createCalls += 1;
+        return json({ code: 0, data: { record: { record_id: 'rec-created', fields: body.fields } } });
+      }
+      throw new Error(`unexpected path ${url.pathname}`);
+    },
+    {
+      resources: {
+        'pilot.records': {
+          appToken: APP_TOKEN,
+          tableId: TABLE_ID,
+          readers: ['*'],
+          writers: ['*'],
+          requiredFields: ['Name'],
+          allowedOperations: [
+            'feishu.bitable.field.list',
+            'feishu.bitable.record.list',
+            'feishu.bitable.record.get',
+            'feishu.bitable.record.create',
+          ],
+        },
+      },
+    },
+  );
+
+  assert.deepEqual(
+    adapter.describeOperations().map((item) => item.name),
+    [
+      'feishu.bitable.field.list',
+      'feishu.bitable.record.list',
+      'feishu.bitable.record.get',
+      'feishu.bitable.record.create',
+    ],
+  );
+
+  const readAsBob = await adapter.execute(
+    request(
+      'feishu.bitable.record.list',
+      { resource: 'pilot.records' },
+      { requester: { userId: BOB }, idempotencyKey: null },
+    ),
+  );
+  assert.equal(readAsBob.ok, true);
+
+  const missingRequired = await adapter.execute(
+    request(
+      'feishu.bitable.record.create',
+      { resource: 'pilot.records', fields: { Status: 'Open' } },
+      { requester: { userId: BOB }, idempotencyKey: 'pilot-missing-required' },
+    ),
+  );
+  assert.equal(missingRequired.body.code, 'VALIDATION_FAILED');
+
+  const unknownField = await adapter.execute(
+    request(
+      'feishu.bitable.record.create',
+      { resource: 'pilot.records', fields: { Name: 'Blocked', SecretColumn: 'no' } },
+      { requester: { userId: BOB }, idempotencyKey: 'pilot-unknown-field' },
+    ),
+  );
+  assert.equal(unknownField.body.code, 'VALIDATION_FAILED');
+
+  for (const operation of [
+    'feishu.bitable.record.update',
+    'feishu.bitable.record.delete',
+    'feishu.bitable.record.batch_create',
+    'feishu.bitable.record.batch_update',
+    'feishu.bitable.record.batch_delete',
+  ]) {
+    const denied = await adapter.execute(
+      request(
+        operation,
+        operation.includes('batch_')
+          ? { resource: 'pilot.records', mode: 'best-effort', records: [] }
+          : operation.endsWith('.delete')
+            ? { resource: 'pilot.records', recordId: 'rec-existing' }
+            : { resource: 'pilot.records', recordId: 'rec-existing', fields: { Name: 'no' } },
+        { requester: { userId: BOB }, idempotencyKey: `pilot-denied-${operation}` },
+      ),
+    );
+    assert.ok(['RESOURCE_NOT_ALLOWED', 'VALIDATION_FAILED'].includes(denied.body.code));
+  }
+
+  const anonymous = await adapter.execute(
+    request(
+      'feishu.bitable.record.create',
+      { resource: 'pilot.records', fields: { Name: 'Anonymous' } },
+      { requester: { userId: '' }, idempotencyKey: 'pilot-anonymous' },
+    ),
+  );
+  assert.equal(anonymous.body.code, 'BACKEND_UNAUTHORIZED');
+
+  const asserted = await adapter.execute(
+    request(
+      'feishu.bitable.record.create',
+      { resource: 'pilot.records', fields: { Name: 'Asserted' } },
+      { requester: { userId: BOB }, requesterSource: 'agent-asserted', idempotencyKey: 'pilot-asserted' },
+    ),
+  );
+  assert.equal(asserted.body.code, 'BACKEND_UNAUTHORIZED');
+
+  const createRequest = request(
+    'feishu.bitable.record.create',
+    { resource: 'pilot.records', fields: { Name: 'Exactly once' } },
+    { requester: { userId: BOB }, idempotencyKey: 'pilot-stable-create' },
+  );
+  const created = await adapter.execute(createRequest);
+  const replay = await adapter.execute(createRequest);
+  assert.equal(created.result.recordId, 'rec-created');
+  assert.equal(replay.result.recordId, 'rec-created');
+  assert.equal(replay.replayed, true);
+  assert.equal(createCalls, 1);
+});
+
 test('unknown resources, unauthorized users and agent-asserted writes fail before Feishu', async () => {
   const { adapter, calls } = makeHarness(() => {
     throw new Error('provider must not be called');

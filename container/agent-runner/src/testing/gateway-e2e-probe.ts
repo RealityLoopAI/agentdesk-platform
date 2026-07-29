@@ -52,15 +52,19 @@ async function main(): Promise<void> {
   const described = await handleGatewayDescribe(runtime, {});
   if (described.isError) fail('gateway_describe returned an error');
 
-  const executed = await handleGatewayExecute(runtime, {
-    operation: 'feishu.bitable.record.list',
-    input: { resource: 'e2e.contacts', pageSize: 20 },
+  const createArgs = {
+    operation: 'feishu.bitable.record.create',
+    input: { resource: 'e2e.contacts', fields: { Name: 'Container A2A E2E' } },
     context: { purpose: 'container-a2a-gateway-e2e' },
-    dryRun: true,
-  });
-  if (executed.isError) fail('gateway_execute returned an error');
+    dryRun: false,
+    idempotencyKey: 'container-a2a-stable-create',
+  };
+  const executed = await handleGatewayExecute(runtime, createArgs);
+  if (executed.isError) fail('first gateway_execute returned an error');
+  const replayed = await handleGatewayExecute(runtime, createArgs);
+  if (replayed.isError) fail('replayed gateway_execute returned an error');
 
-  console.log(`gateway-e2e-probe: trusted user ${identity.userId}; describe + execute completed`);
+  console.log(`gateway-e2e-probe: trusted user ${identity.userId}; describe + idempotent create completed`);
 }
 
 main().catch((error) => fail(error instanceof Error ? (error.stack ?? error.message) : String(error)));

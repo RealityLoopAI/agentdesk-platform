@@ -1,4 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// Runtime configuration intentionally falls back to the operator's .env.
+// Unit tests must exercise only the process values they set themselves.
+vi.mock('./env.js', async () => {
+  const actual = await vi.importActual<typeof import('./env.js')>('./env.js');
+  return { ...actual, readEnvFile: () => ({}) };
+});
 
 import { computeGatewaySignature } from './gateway-signing.js';
 import {
@@ -7,6 +14,7 @@ import {
   makeRateLimiter,
   processSigningProxyRequest,
   READ_PATHS,
+  signingProxyUpstreamBaseUrl,
   type ProxyDeps,
 } from './gateway-signing-proxy.js';
 
@@ -91,6 +99,25 @@ describe('processSigningProxyRequest (ADR-0034 security core)', () => {
     expect(cap.intents[0].tokenJti).toBe('j1');
     expect(cap.finals).toHaveLength(1);
     expect(cap.finals[0].o.status).toBe('ok');
+  });
+
+  it('translates the Docker host alias only for the Host-side proxy upstream fetch', async () => {
+    const cap = makeDeps({
+      resolveGateway: () => ({
+        baseUrl: 'http://host.docker.internal:8088',
+        signingKey: 'secret-key',
+      }),
+    });
+    const result = await processSigningProxyRequest(
+      { method: 'POST', pathname: '/execute', token: 'good', sourceIp: '172.17.0.2', rawBody: body() },
+      cap.deps,
+    );
+
+    expect(result.httpStatus).toBe(200);
+    expect(cap.fetches[0]?.url).toBe('http://127.0.0.1:8088/execute');
+    expect(signingProxyUpstreamBaseUrl('https://gateway.internal/api/')).toBe(
+      'https://gateway.internal/api',
+    );
   });
 
   it('canonicalizes the signed+forwarded body, defeating a duplicate-key parser differential', async () => {
@@ -388,7 +415,8 @@ describe('gatewaySigningProxyConfig', () => {
     try {
       expect(gatewaySigningProxyConfig().enabled).toBe(false);
     } finally {
-      if (prev !== undefined) process.env.AGENTDESK_GATEWAY_SIGNING_PROXY = prev;
+      if (prev === undefined) delete process.env.AGENTDESK_GATEWAY_SIGNING_PROXY;
+      else process.env.AGENTDESK_GATEWAY_SIGNING_PROXY = prev;
     }
   });
 

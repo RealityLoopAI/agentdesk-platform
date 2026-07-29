@@ -112,8 +112,11 @@ fail-closed 哲学;**不复用** body 签名/契约层与一次性转发模型�
 
 - **P0 共享原语**:抽 `src/gateway-signing.ts`(`computeGatewaySignature`,roster-gateway 改 import);flag 解析。
 - **P1 host 代理 + mint**:迁移 `029-gateway-audit-proxy-columns.ts`(加上述 6 列,全 nullable)+ `recordGatewayAudit`/新 `updateGatewayAuditFinal`/`queryGatewayAudit` 过滤;新模块 `src/modules/gateway-signing-proxy/index.ts`(独立 http.Server + 自包含签名 token mint/验签 + central DB mint/tombstone 持久化 + handler:源 IP→token→path 白名单→identity 比对 409→字节透传签名→转发 mint baseUrl→两阶段审计 + 限速);`src/index.ts` flag 开才启动 + 启动期连通性 loud warn。
-- **P2 spawn 注入**:`container-runner.ts`(image tag 前)mint token + 登记容器 docker IP + allowedPaths 收窄 + 注入 proxy/port/token + 合并 `NO_PROXY`;容器退出 + host-sweep kill 同一路径撤销 token;`writeContainerConfig` flag 开时省略 signingKey。
+- **P2 spawn 注入**:`container-runner.ts`(image tag 前)mint token + 登记容器 docker IP + allowedPaths 收窄 + 注入 proxy/port/token + 合并 `NO_PROXY`;容器退出 + host-sweep kill 同一路径撤销 token;`writeContainerConfig` flag 开时省略 signingKey。内置 MCP 工具服务是独立进程，入口必须自行 `loadConfig()` 后再接受工具调用，不能依赖 Runner 主进程的内存单例。
 - **P3 容器侧分叉**:`gateway.ts` `callGateway` 顶部 `if (proxyMode()) return proxyCall(...)` 早返回、绕环境代理 dispatcher fetch、不签名、不 fall through;idempotencyKey 上移稳定锚点。
+- **本地宿主地址语义**:group 的 `backendGateway.baseUrl` 仍按容器视角配置
+  `host.docker.internal`;启用代理后真正的 upstream fetch 改由 Host 发起，因此代理只把这个
+  标准 Docker 宿主别名转换为 `127.0.0.1`。其他内部 DNS 名称和 URL path 保持原样。
 - **测试**:proxy 模式 container.json 无 signingKey;proxy 不可达无 baseUrl fetch;NO_PROXY 注入;恶意 body.baseUrl/signingHeaders 被丢弃、出站目标恒等 mint baseUrl;identity_mismatch 409;字节透传;CI grep 禁 proxy 路径调 applySigningHeaders / token 进 log。
 
 ## 残余风险

@@ -377,33 +377,34 @@ export function getWebConversationHistory(args: {
       status: string;
     }>;
     const deliveries = new Map(deliveryRows.map((row) => [row.message_out_id, row.status]));
+    const userFacingIncoming = incoming.filter(
+      (row) =>
+        // A2A rows deliberately retain the originating user for authorization
+        // and audit continuity. That identity is not message authorship: an
+        // Agent reply arriving from a Worker must remain internal to the
+        // delegation path instead of being rendered as a user-authored turn.
+        row.channel_type !== 'agent' &&
+        (row.origin_user_id === args.userId ||
+          (row.origin_user_id === null && legacyInboundOwner(row.content) === args.userId)),
+    );
     const trustedRoutes = new Map(
-      incoming
-        .filter(
-          (row) =>
-            row.origin_user_id === args.userId ||
-            (row.origin_user_id === null && legacyInboundOwner(row.content) === args.userId),
-        )
-        .map((row) => [row.id, { type: row.channel_type, platformId: row.platform_id, threadId: row.thread_id }]),
+      userFacingIncoming.map((row) => [
+        row.id,
+        { type: row.channel_type, platformId: row.platform_id, threadId: row.thread_id },
+      ]),
     );
 
     const messages: WebHistoryMessage[] = [
-      ...incoming
-        .filter(
-          (row) =>
-            row.origin_user_id === args.userId ||
-            (row.origin_user_id === null && legacyInboundOwner(row.content) === args.userId),
-        )
-        .map((row) => ({
-          id: row.id,
-          sequence: row.seq,
-          direction: 'user' as const,
-          kind: row.kind,
-          timestamp: normalizeHistoryTimestamp(row.timestamp),
-          text: messageText(row.content),
-          channel: { type: row.channel_type, platformId: row.platform_id, threadId: row.thread_id },
-          status: row.status === 'failed' ? 'failed' : 'accepted',
-        })),
+      ...userFacingIncoming.map((row) => ({
+        id: row.id,
+        sequence: row.seq,
+        direction: 'user' as const,
+        kind: row.kind,
+        timestamp: normalizeHistoryTimestamp(row.timestamp),
+        text: messageText(row.content),
+        channel: { type: row.channel_type, platformId: row.platform_id, threadId: row.thread_id },
+        status: row.status === 'failed' ? 'failed' : 'accepted',
+      })),
       ...outgoing
         // For Lane replies, the Host-written inbound source is the same
         // trusted routing authority used by delivery.ts. Container-written

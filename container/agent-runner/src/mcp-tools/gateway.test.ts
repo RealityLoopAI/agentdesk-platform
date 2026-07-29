@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import type { BackendGatewayConfig, RunnerConfig } from '../config.js';
-import { closeSessionDb, getOutboundDb, initTestSessionDb } from '../db/connection.js';
+import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../db/connection.js';
 import { clearRequestIdentity, setRequestIdentity, type RequestIdentity } from '../request-context.js';
 import {
   computeGatewaySignature,
@@ -63,6 +63,38 @@ afterEach(() => {
 
 function configuredRuntime(backendGateway?: BackendGatewayConfig) {
   return { ...runtime, backendGateway };
+}
+
+function seedProcessingInbound(params: {
+  id: string;
+  seq: number;
+  senderId?: string;
+  channelType?: string;
+  platformId?: string;
+  originUserId?: string | null;
+}): void {
+  const channelType = params.channelType ?? 'feishu';
+  const platformId = params.platformId ?? 'feishu:p2p:ou_host';
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in
+       (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, content, origin_user_id)
+       VALUES (?, ?, 'chat', ?, 'pending', 1, ?, ?, ?, ?)`,
+    )
+    .run(
+      params.id,
+      params.seq,
+      `2026-07-29T00:00:0${params.seq}Z`,
+      platformId,
+      channelType,
+      JSON.stringify(params.senderId ? { senderId: params.senderId } : {}),
+      params.originUserId ?? null,
+    );
+  getOutboundDb()
+    .prepare(
+      "INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, 'processing', '2026-07-29T00:00:00Z')",
+    )
+    .run(params.id);
 }
 
 describe('erp gateway mcp tools', () => {
@@ -135,6 +167,79 @@ describe('erp gateway mcp tools', () => {
     expect(body?.requesterSource).toBe('session');
     expect((body?.requester as Record<string, unknown>)?.userId).toBe('feishu:ou_employee');
     expect((body?.requester as Record<string, unknown>)?.platformId).toBe('ag-frontdesk');
+  });
+
+  it('re-derives the trusted a2a origin from host-written inbound rows in the separate MCP process path', async () => {
+    // No setRequestIdentity(): this is the real built-in MCP child shape.
+    seedProcessingInbound({
+      id: 'msg-a2a-1',
+      seq: 1,
+      channelType: 'agent',
+      platformId: 'ag-frontdesk',
+      originUserId: 'feishu:ou_employee',
+    });
+
+    let body: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ allowed: true }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await handleGatewayAuthorize(
+      { ...runtime, agentGroupId: 'ag-worker', backendGateway: { baseUrl: 'https://erp-gateway.example' } },
+      {
+        operation: 'feishu.bitable.record.create',
+        userId: 'feishu:ou_attacker',
+        channelType: 'slack',
+      },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(body?.requesterSource).toBe('session');
+    expect(body?.requester).toEqual({
+      userId: 'feishu:ou_employee',
+      channelType: 'agent',
+      platformId: 'ag-frontdesk',
+      threadId: null,
+    });
+  });
+
+  it('fails closed to agent-asserted when the processing marker has no host-written inbound row', async () => {
+    getOutboundDb()
+      .prepare(
+        "INSERT INTO processing_ack (message_id, status, status_changed) VALUES ('missing', 'processing', '2026-07-29T00:00:00Z')",
+      )
+      .run();
+
+    let body: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    await handleGatewayDescribe(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      userId: 'feishu:ou_agent_claim',
+    });
+
+    expect(body?.requesterSource).toBe('agent-asserted');
+    expect((body?.requester as Record<string, unknown>)?.userId).toBe('feishu:ou_agent_claim');
+  });
+
+  it('fails closed to agent-asserted when processing rows contain mixed trusted users', async () => {
+    seedProcessingInbound({ id: 'alice', seq: 1, senderId: 'feishu:ou_alice' });
+    seedProcessingInbound({ id: 'bob', seq: 2, senderId: 'feishu:ou_bob' });
+
+    let body: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    await handleGatewayDescribe(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      userId: 'feishu:ou_agent_claim',
+    });
+
+    expect(body?.requesterSource).toBe('agent-asserted');
   });
 
   it('falls back to agent-asserted identity when no poll-loop identity is published', async () => {

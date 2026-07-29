@@ -121,6 +121,7 @@ async function main(): Promise<void> {
   }
 
   const gatewayRequests: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const committedCreates = new Map<string, Record<string, unknown>>();
   const gateway = http.createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -132,9 +133,32 @@ async function main(): Promise<void> {
       response.end(
         JSON.stringify({
           contractVersion: body.contractVersion,
-          operations: [{ name: 'feishu.bitable.record.list', mutating: false }],
+          operations: [{ name: 'feishu.bitable.record.create', mutating: true }],
         }),
       );
+      return;
+    }
+    if (request.url === '/execute') {
+      const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey : '';
+      if (!idempotencyKey) {
+        response.statusCode = 422;
+        response.end(JSON.stringify({ code: 'VALIDATION_FAILED', message: 'idempotency key required' }));
+        return;
+      }
+      const committed = committedCreates.get(idempotencyKey);
+      if (committed) {
+        response.end(JSON.stringify({ ...committed, replayed: true }));
+        return;
+      }
+      const input = body.input as { fields?: Record<string, unknown> } | undefined;
+      const created = {
+        contractVersion: body.contractVersion,
+        ok: true,
+        result: { recordId: 'rec-e2e-created', fields: input?.fields ?? {} },
+        auditId: 'gateway-e2e-audit',
+      };
+      committedCreates.set(idempotencyKey, created);
+      response.end(JSON.stringify(created));
       return;
     }
     response.end(
@@ -347,7 +371,7 @@ async function main(): Promise<void> {
       .prepare(
         `SELECT user_id, path, operation, logical_resource, requester_source, status
          FROM gateway_audit
-         WHERE session_id = ? AND operation = 'feishu.bitable.record.list'
+         WHERE session_id = ? AND operation = 'feishu.bitable.record.create'
          ORDER BY id DESC LIMIT 1`,
       )
       .get(worker.id) as
@@ -370,14 +394,24 @@ async function main(): Promise<void> {
     ) {
       throw new Error(`Host gateway audit assertion failed: ${JSON.stringify(audit)}`);
     }
-    const executeRequest = gatewayRequests.find((request) => request.path === '/execute');
-    const requester = executeRequest?.body.requester as { userId?: string } | undefined;
-    if (requester?.userId !== 'user-e2e' || executeRequest?.body.requesterSource !== 'session') {
-      throw new Error(`Gateway HTTP identity assertion failed: ${JSON.stringify(executeRequest?.body)}`);
+    const executeRequests = gatewayRequests.filter((request) => request.path === '/execute');
+    if (executeRequests.length !== 2) {
+      throw new Error(`Gateway expected one create plus one replay, got ${executeRequests.length}`);
+    }
+    const keys = executeRequests.map((request) => request.body.idempotencyKey);
+    if (
+      keys.some((key) => key !== 'container-a2a-stable-create') ||
+      committedCreates.size !== 1 ||
+      executeRequests.some((request) => {
+        const requester = request.body.requester as { userId?: string } | undefined;
+        return requester?.userId !== 'user-e2e' || request.body.requesterSource !== 'session';
+      })
+    ) {
+      throw new Error(`Gateway HTTP identity/idempotency assertion failed: ${JSON.stringify(executeRequests)}`);
     }
 
     console.log(
-      '✓ e2e-container-a2a-gateway PASSED — Web identity survived real-container A2A and Bitable Gateway audit.',
+      '✓ e2e-container-a2a-gateway PASSED — Web identity survived real-container A2A; create replay committed once.',
     );
   } finally {
     if (stopAllContainers) await stopAllContainers('e2e-cleanup');

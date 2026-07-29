@@ -9,21 +9,24 @@
  * The requester identity (userId / channelType / platformId / threadId)
  * attached to each gateway call MUST NOT come from the agent's own tool
  * arguments — a prompt-injected agent can otherwise forge any identity it
- * likes. Instead, `resolveTrustedRequester()` reads the most recent chat
- * message from inbound.db (host-written, container-read) and uses that as
- * the ground truth. When that read succeeds, we send `requesterSource:
- * 'session'`. Only when no usable inbound row exists (scheduled tasks,
- * agent-to-agent sessions without an originating user) do we fall back to
- * agent-asserted values, tagged `requesterSource: 'agent-asserted'` so the
- * backend can apply a stricter policy to unauthenticated requests.
+ * likes. The runner parent pins a batch-level RequestIdentity; the independent
+ * MCP child re-derives that same identity by joining the current processing
+ * marker to host-written inbound.db rows. When either trusted path succeeds,
+ * we send `requesterSource: 'session'`. Only when no usable inbound row exists
+ * (scheduled/detached tasks, or agent-to-agent rows without an originating
+ * user) do we fall back to agent-asserted values, tagged
+ * `requesterSource: 'agent-asserted'` so the backend can apply a stricter
+ * policy to unauthenticated requests.
  */
 import crypto from 'node:crypto';
 
 import { SIGNING_NONCE_HEADER, SIGNING_SIGNATURE_HEADER, SIGNING_TIMESTAMP_HEADER } from '../branding.js';
-import { getOutboundDb } from '../db/connection.js';
+import { getOutboundDb, openInboundDb } from '../db/connection.js';
+import type { MessageInRow } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getConfig, type BackendGatewayConfig, type RunnerConfig } from '../config.js';
 import { getRequestIdentity, type RequestIdentity } from '../request-context.js';
+import { resolveBatchIdentity, splitBatchByTurn } from '../request-identity.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -197,6 +200,54 @@ function readAgentAssertedRequester(args: Record<string, unknown>): RequesterCon
 }
 
 /**
+ * Rebuild the current turn's identity across the MCP child-process boundary.
+ *
+ * The poll loop's RequestIdentity singleton lives in the runner parent and is
+ * therefore absent in the built-in MCP child. processing_ack supplies only the
+ * current message IDs; the identity itself is re-derived from the exact
+ * host-written inbound.db rows. The outbound marker cannot manufacture a user
+ * or origin_user_id, and any missing/mixed batch fails closed.
+ */
+function resolveProcessingBatchIdentity(): RequestIdentity | null {
+  let messageIds: string[];
+  try {
+    messageIds = (
+      getOutboundDb()
+        .prepare("SELECT message_id FROM processing_ack WHERE status = 'processing' ORDER BY message_id")
+        .all() as Array<{ message_id: string }>
+    ).map((row) => row.message_id);
+  } catch {
+    return null;
+  }
+  if (messageIds.length === 0) return null;
+
+  const inbound = openInboundDb();
+  try {
+    const placeholders = messageIds.map(() => '?').join(',');
+    const rows = inbound
+      .prepare(
+        `SELECT * FROM messages_in
+         WHERE id IN (${placeholders})
+         ORDER BY seq ASC, timestamp ASC, id ASC`,
+      )
+      .all(...messageIds) as MessageInRow[];
+
+    // Every marker must resolve to a host-written row. Partial resolution
+    // could otherwise let a malformed marker set hide a conflicting row.
+    if (rows.length !== messageIds.length) return null;
+    const split = splitBatchByTurn(rows);
+    if (split.defer.length > 0 || split.keep.length !== rows.length) return null;
+
+    const identity = resolveBatchIdentity(rows);
+    return identity.source === 'session' && identity.userId ? identity : null;
+  } catch {
+    return null;
+  } finally {
+    inbound.close();
+  }
+}
+
+/**
  * Resolve the requester identity to attach to a gateway call.
  *
  * Preferred path: the poll loop publishes a `RequestIdentity` at batch
@@ -206,14 +257,17 @@ function readAgentAssertedRequester(args: Record<string, unknown>): RequesterCon
  * later messages landing in group/shared sessions, and picks up
  * host-written `origin_user_id` on a2a hops.
  *
- * Fallback: when no identity is published (callers outside the poll loop —
- * in practice scheduled tasks or unit tests), we fall back to whatever
- * the agent asserted via tool arguments, tagged `agent-asserted` so the
- * backend can apply a stricter policy.
+ * Cross-process path: the built-in MCP server has no access to the parent's
+ * module singleton, so it re-derives identity from the current processing
+ * marker plus the host-written inbound rows.
+ *
+ * Fallback: when neither trusted source exists (scheduled/detached calls or
+ * malformed markers), use the agent's arguments but tag them
+ * `agent-asserted` so the backend can apply a stricter policy.
  */
 function resolveRequester(args: Record<string, unknown>): ResolvedRequester {
   const asserted = readAgentAssertedRequester(args);
-  const identity = getRequestIdentity();
+  const identity = getRequestIdentity() ?? resolveProcessingBatchIdentity();
   if (!identity) {
     return { context: asserted, source: 'agent-asserted' };
   }

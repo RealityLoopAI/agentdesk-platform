@@ -84,7 +84,10 @@ beforeEach(() => {
   process.env.ENTERPRISE_AUTO_WIRE_GROUPS = 'true';
   delete process.env.ENTERPRISE_AUTO_WIRE_P2P;
   delete process.env.ENTERPRISE_AUTO_WIRE_GROUP_ISOLATED;
-  delete process.env.ENTERPRISE_AUTO_WIRE_GROUP_STRATEGY;
+  // Keep the test independent from an operator's local .env. An empty
+  // process-level value deliberately shadows any persisted strategy while
+  // still allowing the legacy GROUP_ISOLATED alias to select per-group.
+  process.env.ENTERPRISE_AUTO_WIRE_GROUP_STRATEGY = '';
 });
 
 afterEach(() => {
