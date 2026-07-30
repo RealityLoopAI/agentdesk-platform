@@ -32,6 +32,7 @@
     "e2e:container": "tsx scripts/e2e-container-roundtrip.ts",
     "e2e:container:a2a-gateway": "tsx scripts/e2e-container-a2a-gateway.ts",
     "chat": "tsx scripts/chat.ts",
+    "voice-photos:monitor": "tsx examples/voice-photos-feishu-monitor/index.ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",

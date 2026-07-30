@@ -79,6 +79,7 @@ import { optOutParticipant, parseRosterOptOut } from '../roster-dm.js';
 import { revokeGrantsForLeaver } from '../db/dm-grants.js';
 import { hasTable } from '../db/connection.js';
 import { getDb } from '../db/connection.js';
+import { createFeishuOutboundImageTransport } from './feishu/outbound-image.js';
 
 // Re-export the subset of primitives that existing callers (including
 // tests) reach for via `./feishu`. Keeping the public surface stable means
@@ -269,6 +270,10 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
     return tokenInflight;
   }
 
+  const outboundImageTransport = createFeishuOutboundImageTransport(config, {
+    getAccessToken: fetchTenantAccessToken,
+  });
+
   async function callApi<T extends FeishuApiResponse>(
     path: string,
     init: {
@@ -310,36 +315,6 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
     } finally {
       clearTimeout(timeout);
     }
-  }
-
-  /**
-   * Upload an image to Feishu's image API, returning the `image_key` used to
-   * send the actual `msg_type: "image"` message. Multipart because the Feishu
-   * API expects the raw bytes as a form field — `callApi` only knows
-   * application/json, so this routes around it with raw fetch + FormData.
-   *
-   * Bytes come from `OutboundFile.data` (already in-memory at delivery time,
-   * sourced from the agent's outbox).
-   */
-  async function uploadImage(filename: string, data: Buffer): Promise<string> {
-    const form = new FormData();
-    form.append('image_type', 'message');
-    // Construct a Blob from the buffer; the SDK side accepts either.
-    form.append('image', new Blob([new Uint8Array(data)]), filename);
-
-    const url = `${config.baseUrl}/open-apis/im/v1/images`;
-    const token = await fetchTenantAccessToken();
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
-    });
-    const text = await response.text();
-    const parsed = text ? (JSON.parse(text) as FeishuApiResponse & { data?: { image_key?: string } }) : null;
-    if (!parsed || parsed.code !== 0 || !parsed.data?.image_key) {
-      throw new Error(`Feishu image upload failed: ${parsed?.msg || `code ${parsed?.code ?? response.status}`}`);
-    }
-    return parsed.data.image_key;
   }
 
   function isImageFile(filename: string): boolean {
@@ -1104,15 +1079,19 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
       const nonImages: typeof files = files.filter((f) => !isImageFile(f.filename));
 
       let firstId: string | undefined;
-      for (const img of images) {
+      for (let imageIndex = 0; imageIndex < images.length; imageIndex += 1) {
+        const img = images[imageIndex];
         try {
-          const imageKey = await uploadImage(img.filename, img.data);
-          const imgMsgId = await createMessage(
+          const imageDelivery = await outboundImageTransport.sendImage({
             target,
-            'image',
-            JSON.stringify({ image_key: imageKey }),
-            firstId ? null : threadId,
-          );
+            filename: img.filename,
+            data: img.data,
+            threadId: firstId ? null : threadId,
+            idempotencyKey: message.source?.originId
+              ? `${message.source.messageId}-image-${imageIndex}`
+              : undefined,
+          });
+          const imgMsgId = imageDelivery.messageId;
           if (!firstId) firstId = imgMsgId;
         } catch (err) {
           // Upload failed — degrade to filename suffix in the text branch.

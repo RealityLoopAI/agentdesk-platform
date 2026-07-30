@@ -1,5 +1,9 @@
 # Examples
 
+- [`voice-photos-feishu-monitor/`](voice-photos-feishu-monitor/) — optional
+  durable recursive SMB image monitor that sends only post-baseline images to
+  one configured Feishu private conversation without invoking an Agent.
+
 Worked reference setups that show how to put a real business on top of the
 platform. **None of this is loaded by default** — the baseline ships a single
 blank template frontdesk and no workers. These directories are here to copy
