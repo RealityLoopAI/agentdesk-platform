@@ -124,6 +124,8 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0070](ADR-0070-request-driven-vision-archive-gateway.md) | 通过请求驱动的 Gateway 读取 Vision Archive | Accepted | 2026-07-30 | `gateway`, `smb`, `archive`, `security`, `agent-routing`, `read-only` |
 | [ADR-0071](ADR-0071-provider-neutral-group-instructions.md) | Provider-neutral 的 Group 指令与私有 Skill | Accepted | 2026-07-30 | `provider`, `agent-runner`, `prompt`, `skills`, `agent-group`, `openai` |
 | [ADR-0073](ADR-0073-host-mediated-gateway-confirmation.md) | Host-mediated Gateway 确认签发：Host 只收集可信用户交互，Gateway 验证 opaque Preview 并签发绑定用户、组、操作、资源、记录、Patch、Fingerprint、有效期和 Nonce 的一次性 Token；旧 Gateway 404、跨用户、过期、伪造或签名失败均 Fail Closed，且不形成平行业务授权路径 | Accepted | 2026-07-30 | `gateway`, `confirmation`, `identity-trust-chain`, `interactive`, `feishu`, `fail-closed` |
+| [ADR-0072](ADR-0072-operator-specific-doubao-wav-extraction.md) | 将豆包 WAV 实验提取实现为 operator-specific 两阶段示例 | Superseded by ADR-0074 | 2026-07-30 | `doubao`, `speech`, `structured-output`, `examples`, `privacy`, `provider` |
+| [ADR-0074](ADR-0074-single-stage-ark-multimodal-wav-extraction.md) | 用方舟原生音频模型单阶段提取 WAV 实验信息 | Accepted | 2026-07-30 | `doubao`, `ark`, `multimodal`, `audio`, `structured-output`, `examples` |
 
 ---
 
