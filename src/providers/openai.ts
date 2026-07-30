@@ -26,6 +26,7 @@ const OPENAI_ENV_KEYS = [
   // falls back to OPENAI_MODEL / archiving-off when unset.
   'OPENAI_COMPACT_MODEL',
   'OPENAI_COMPACT_ARCHIVE',
+  'OPENAI_MAX_REQUEST_CONTEXT_CHARS',
 ] as const;
 
 /**

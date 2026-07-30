@@ -136,7 +136,7 @@ The Bridge SHALL optionally acknowledge an utterance after its complete WAV has 
 - **THEN** audio ingestion and the existing confirmation workflow behave exactly as before and no TTS HTTP request is made
 
 ### Requirement: Serialize drafts across confirmation lifecycles
-The Bridge SHALL allow at most one active Agent draft awaiting confirmation resolution, SHALL queue later structured results in bounded FIFO order, and SHALL release the next draft only after the active Host confirmation is approved, rejected, expired or failed.
+The Bridge SHALL allow at most one active Agent draft, SHALL distinguish Agent processing from awaiting confirmation, SHALL queue later structured results in bounded FIFO order, and SHALL release or retry the active draft only from a correlated Agent-turn or confirmation terminal event.
 
 #### Scenario: Later utterance completes while confirmation is pending
 - **WHEN** one Bridge draft is active and another utterance produces valid structured output
@@ -151,9 +151,70 @@ The Bridge SHALL allow at most one active Agent draft awaiting confirmation reso
 - **THEN** the active draft remains blocked and no queued draft is submitted
 
 #### Scenario: No confirmation is ever created
-- **WHEN** an active draft has not bound to and resolved through a confirmation within the confirmation lifetime bound
-- **THEN** the Bridge safely releases it and continues with the next queued draft without treating the timeout as approval
+- **WHEN** a correlated Agent turn completes and no confirmation is delivered within the bounded settle window
+- **THEN** the Bridge safely releases it and continues with the next queued draft without treating completion as approval
+
+#### Scenario: Agent is still processing
+- **WHEN** a later utterance completes before the active Agent turn emits a terminal event
+- **THEN** the later draft remains queued even when no confirmation ID has been created yet
+
+#### Scenario: Confirmation arrives around Agent completion
+- **WHEN** a matching confirmation-delivered event arrives before the Agent completion settle window expires
+- **THEN** the Bridge enters awaiting-confirmation and does not release the next draft until that confirmation resolves
+
+#### Scenario: Confirmation lifetime expires
+- **WHEN** an active draft has bound to a confirmation but no matching resolved event arrives within the confirmation lifetime bound
+- **THEN** the Bridge safely releases it without treating the timeout as approval
 
 #### Scenario: Draft queue reaches its bound
 - **WHEN** another structured result arrives while the bounded pending draft queue is full
 - **THEN** the Bridge reports a content-safe overflow error and creates no Agent turn for that result
+
+### Requirement: Correlate every Agent turn terminal outcome
+The Runner SHALL emit one Host-observable terminal action for each processed trusted inbound turn, SHALL bind it to the original inbound message through `in_reply_to`, and SHALL classify whether a provider failure is retryable without granting authorization.
+
+#### Scenario: Turn completes without a confirmation
+- **WHEN** the Agent finishes processing an inbound Bridge draft without creating a confirmation
+- **THEN** Host emits a correlated `completed` terminal event and the Bridge can release that draft after its settle window
+
+#### Scenario: Provider request fails
+- **WHEN** the Agent provider exhausts its internal request retries
+- **THEN** Host emits a correlated `provider-failed` terminal event with a bounded error code and retryable flag
+
+#### Scenario: Terminal event is unrelated
+- **WHEN** a turn terminal event references another source message or session
+- **THEN** the active Bridge draft and queue remain unchanged
+
+#### Scenario: Error reply is produced
+- **WHEN** Runner writes a provider error action, user-visible error, clear acknowledgement or terminal action
+- **THEN** every output carries the current trusted `in_reply_to` routing anchor
+
+### Requirement: Retry transient Agent failures without duplicating business intent
+The Bridge SHALL retry only classified transient provider failures with bounded attempts and backoff, SHALL keep the source fingerprint stable, and SHALL use a distinct Host inbound message ID for each attempt.
+
+#### Scenario: Transient failure recovers
+- **WHEN** an active attempt fails with a retryable provider code and a later bounded attempt completes
+- **THEN** the Bridge preserves one logical request fingerprint and proceeds with at most one confirmation lifecycle
+
+#### Scenario: Retry is exhausted
+- **WHEN** all configured Bridge retry attempts fail
+- **THEN** the Bridge reports a content-safe terminal failure, releases the active draft and processes the next queued draft
+
+#### Scenario: Failure is not retryable
+- **WHEN** the terminal code denotes unauthorized, client error, invalid response or another non-transient failure
+- **THEN** the Bridge does not retry and safely advances to the next queued draft
+
+### Requirement: Bound the complete model request context
+The OpenAI-compatible provider SHALL evaluate context pressure using transcript, system instructions and serialized tool definitions, SHALL compact before sending an over-budget request, and SHALL keep the outgoing request within the configured full-request character budget or fail closed.
+
+#### Scenario: Tools make the full request exceed budget
+- **WHEN** transcript alone is below the old compaction threshold but transcript plus system instructions and tools exceeds the full-request budget
+- **THEN** the provider compacts or trims transcript before issuing the upstream request
+
+#### Scenario: Compaction is insufficient
+- **WHEN** summary compaction succeeds but the complete request remains over budget
+- **THEN** the provider hard-trims transcript using only the budget remaining after fixed system and tool overhead
+
+#### Scenario: Fixed request overhead exceeds budget
+- **WHEN** system instructions and tool definitions alone consume the configured budget
+- **THEN** the provider fails with a bounded local context-budget error and does not send an oversized upstream request

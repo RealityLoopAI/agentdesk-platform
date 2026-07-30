@@ -170,10 +170,17 @@ capture ID，同一句重放可由设备去重。“收到”只表示本机已�
 确认或写表成功。HTTP 429、超时或无效响应只记录安全错误，不阻止后续链路。硬件播放
 期间会暂停麦克风和 RTP，短句结束并等待约 200 ms 后自动恢复。
 
-Bridge 对 Agent 入站实行单飞：第一条草稿进入确认流程后，后续方舟结果先进入容量与
-VAD `maxQueue` 相同的 FIFO 队列；只有第一条确认被批准、拒绝、过期或失败后才投递
-下一条。无关确认事件不会释放队列；若 Agent 在 15 分钟内始终没有形成可解决的确认，
-该 active draft 会按超时释放但绝不会被视为批准。关闭服务时不再投递排队草稿。
+Bridge 对 Agent 入站实行单飞：第一条草稿处于 Agent processing 或 awaiting-confirmation
+时，后续方舟结果先进入容量与 VAD `maxQueue` 相同的 FIFO 队列。Agent 正常结束但未产
+确认卡时，短 settle 窗口后释放并处理下一句；已产卡时仍只有批准、拒绝、过期或失败
+才能释放。可重试的 5xx、超时和限流会保留同一 fingerprint，使用不同 attempt message
+ID 在 5 秒、30 秒后最多追加两次尝试。无关 turn/确认事件不会释放队列；15 分钟仅作为
+processing/confirmation 的最终安全上限，任何超时都不被视为批准。关闭服务时取消退避
+定时器且不再投递排队草稿。
+
+OpenAI-compatible Agent provider 默认按 240000 字符的完整请求预算计算 transcript、
+system instructions 和 tools。可用 `OPENAI_MAX_REQUEST_CONTEXT_CHARS` 调整；超限时先
+摘要压缩再按剩余预算裁剪，固定 instructions/tools 本身超限时本地失败关闭。
 
 最后填写现有方舟配置：
 

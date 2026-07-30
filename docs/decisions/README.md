@@ -135,6 +135,7 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0081](ADR-0081-confirmation-delivered-correlation-event.md) | 用相关键连接确认卡投递事件与设备语音回执 | Superseded by ADR-0083 | 2026-07-30 | `confirmation`, `events`, `voice`, `correlation` |
 | [ADR-0082](ADR-0082-evidence-bounded-voice-field-normalization.md) | 以原始证据和实时表 Schema 约束语音字段归一化 | Accepted | 2026-07-30 | `voice`, `bitable`, `normalization`, `evidence` |
 | [ADR-0083](ADR-0083-early-audio-ack-and-confirmation-serialized-ingress.md) | 完整 WAV 立即回执并按确认生命周期串行投递语音草稿 | Accepted | 2026-07-30 | `voice`, `confirmation`, `serialization`, `tts` |
+| [ADR-0084](ADR-0084-agent-turn-terminal-and-bounded-voice-retry.md) | 用 Agent Turn 终态驱动语音队列与有界重试 | Accepted | 2026-07-30 | `agent-runner`, `host-runtime`, `voice`, `retry`, `queue`, `openai` |
 
 ---
 

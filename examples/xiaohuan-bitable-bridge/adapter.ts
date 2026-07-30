@@ -13,6 +13,10 @@ import {
   onGatewayConfirmationResolved,
   type GatewayConfirmationResolvedEvent,
 } from '../../src/modules/gateway-confirmation/events.js';
+import {
+  onAgentTurnResolved,
+  type AgentTurnResolvedEvent,
+} from '../../src/modules/agent-turn/events.js';
 import { getUser } from '../../src/modules/permissions/db/users.js';
 import { createAudioPipeline, type SafeLogger } from '../xiaohuan-doubao-audio/pipeline.js';
 import type { ExperimentAudioV1 } from '../xiaohuan-doubao-audio/experiment-schema.js';
@@ -54,9 +58,12 @@ export interface XiaohuanBitableAdapterDependencies {
   idempotencyKey?: typeof createIdempotencyKey;
   onConfirmationDelivered?: typeof onGatewayConfirmationDelivered;
   onConfirmationResolved?: typeof onGatewayConfirmationResolved;
+  onAgentTurnResolved?: typeof onAgentTurnResolved;
   sendTtsAck?: typeof sendTtsAcknowledgement;
   createReceiptRunId?: () => string;
   activeDraftMaxMs?: number;
+  turnSettleMs?: number;
+  retryDelaysMs?: readonly number[];
   logger?: BridgeAdapterLogger;
   now?: () => Date;
 }
@@ -76,11 +83,21 @@ const defaultLogger: BridgeAdapterLogger = {
   error: (event) => log.error('Xiaohuan Bitable bridge', event),
 };
 const ACTIVE_DRAFT_MAX_MS = 15 * 60_000;
+const TURN_SETTLE_MS = 1_000;
+const RETRY_DELAYS_MS = [5_000, 30_000] as const;
 
 interface ActiveDraft {
   requestFingerprint: string;
+  stableIdempotencyKey: string;
+  fields: BitableDraftFields;
+  result: ExperimentAudioV1;
+  attempt: number;
+  sourceMessageId: string;
+  state: 'processing' | 'awaiting-confirmation' | 'retry-backoff';
   confirmationId?: string;
   timeout?: NodeJS.Timeout;
+  settleTimeout?: NodeJS.Timeout;
+  retryTimeout?: NodeJS.Timeout;
 }
 
 function safeErrorCode(error: unknown, fallback: string): string {
@@ -144,9 +161,12 @@ export function createXiaohuanBitableAdapter(
     dependencies.onConfirmationDelivered ?? onGatewayConfirmationDelivered;
   const subscribeResolution =
     dependencies.onConfirmationResolved ?? onGatewayConfirmationResolved;
+  const subscribeAgentTurn = dependencies.onAgentTurnResolved ?? onAgentTurnResolved;
   const sendTtsAck = dependencies.sendTtsAck ?? sendTtsAcknowledgement;
   const createReceiptRunId = dependencies.createReceiptRunId ?? randomUUID;
   const activeDraftMaxMs = dependencies.activeDraftMaxMs ?? ACTIVE_DRAFT_MAX_MS;
+  const turnSettleMs = dependencies.turnSettleMs ?? TURN_SETTLE_MS;
+  const retryDelaysMs = dependencies.retryDelaysMs ?? RETRY_DELAYS_MS;
   const logger = dependencies.logger ?? defaultLogger;
   const now = dependencies.now ?? (() => new Date());
 
@@ -155,6 +175,7 @@ export function createXiaohuanBitableAdapter(
   let servicePromise: Promise<void> | null = null;
   let unsubscribeConfirmationDelivered: (() => void) | null = null;
   let unsubscribeConfirmationResolved: (() => void) | null = null;
+  let unsubscribeAgentTurnResolved: (() => void) | null = null;
   let receiptRunId: string | null = null;
   let acceptingOutputs = false;
   const pendingDeliveries = new Set<Promise<void>>();
@@ -211,10 +232,12 @@ export function createXiaohuanBitableAdapter(
 
   const releaseActiveDraft = (
     expected: ActiveDraft,
-    reason: 'resolved' | 'timeout' | 'host-ingress-failed',
+    reason: 'resolved' | 'timeout' | 'host-ingress-failed' | 'completed-without-confirmation' | 'provider-failed',
   ): void => {
     if (activeDraft !== expected) return;
     if (expected.timeout) clearTimeout(expected.timeout);
+    if (expected.settleTimeout) clearTimeout(expected.settleTimeout);
+    if (expected.retryTimeout) clearTimeout(expected.retryTimeout);
     activeDraft = null;
     logger.info({
       event: 'xiaohuan_bitable_draft_released',
@@ -245,7 +268,16 @@ export function createXiaohuanBitableAdapter(
     if (current.confirmationId && current.confirmationId !== event.confirmationId) {
       return;
     }
+    if (current.settleTimeout) {
+      clearTimeout(current.settleTimeout);
+      current.settleTimeout = undefined;
+    }
+    if (current.retryTimeout) {
+      clearTimeout(current.retryTimeout);
+      current.retryTimeout = undefined;
+    }
     current.confirmationId = event.confirmationId;
+    current.state = 'awaiting-confirmation';
   };
 
   const handleConfirmationResolved = (
@@ -267,12 +299,126 @@ export function createXiaohuanBitableAdapter(
     releaseActiveDraft(current, 'resolved');
   };
 
+  const sourceMatches = (actual: string, expected: string): boolean =>
+    actual === expected || actual.startsWith(`${expected}:`);
+
+  let submitActiveDraft: (setup: ChannelSetup, current: ActiveDraft) => Promise<boolean>;
+
+  const handleAgentTurnResolved = (event: AgentTurnResolvedEvent): void => {
+    const current = activeDraft;
+    if (
+      !current ||
+      current.state !== 'processing' ||
+      !sourceMatches(event.sourceMessageId, current.sourceMessageId)
+    ) {
+      return;
+    }
+
+    if (event.status === 'completed') {
+      if (current.confirmationId) return;
+      current.settleTimeout = setTimeout(
+        () => releaseActiveDraft(current, 'completed-without-confirmation'),
+        turnSettleMs,
+      );
+      current.settleTimeout.unref?.();
+      return;
+    }
+
+    if (event.status === 'provider-failed' && event.retryable && current.attempt < retryDelaysMs.length) {
+      if (current.timeout) clearTimeout(current.timeout);
+      current.state = 'retry-backoff';
+      const delayMs = retryDelaysMs[current.attempt] ?? 0;
+      current.retryTimeout = setTimeout(() => {
+        if (activeDraft !== current || !hostSetup || !acceptingOutputs) return;
+        current.attempt += 1;
+        current.sourceMessageId =
+          `${XIAOHUAN_BITABLE_CHANNEL_TYPE}-${current.requestFingerprint}-attempt-${current.attempt + 1}`;
+        current.state = 'processing';
+        current.confirmationId = undefined;
+        current.retryTimeout = undefined;
+        current.timeout = setTimeout(
+          () => releaseActiveDraft(current, 'timeout'),
+          activeDraftMaxMs,
+        );
+        current.timeout.unref?.();
+        trackDelivery(submitActiveDraft(hostSetup, current).then(() => undefined));
+      }, delayMs);
+      current.retryTimeout.unref?.();
+      logger.info({
+        event: 'xiaohuan_bitable_draft_retry_scheduled',
+        outcome: 'retry',
+        requestFingerprint: current.requestFingerprint,
+        attempt: current.attempt + 2,
+        delayMs,
+        code: event.code,
+      });
+      return;
+    }
+
+    releaseActiveDraft(current, event.status === 'provider-failed' ? 'provider-failed' : 'timeout');
+  };
+
+  submitActiveDraft = async (
+    setup: ChannelSetup,
+    current: ActiveDraft,
+  ): Promise<boolean> => {
+    const result = current.result;
+
+    const envelope = createBridgeEnvelope({
+      resource: config.resource,
+      result,
+      fieldMapping: config.fieldMap,
+      fields: current.fields,
+      requestFingerprint: current.requestFingerprint,
+      idempotencyKey: current.stableIdempotencyKey,
+    });
+
+    try {
+      await setup.onInboundEvent({
+        channelType: 'feishu',
+        platformId: config.platformId,
+        threadId: null,
+        authenticatedUserId: config.authenticatedUserId,
+        message: {
+          id: current.sourceMessageId,
+          kind: 'chat',
+          content: JSON.stringify({
+            text: JSON.stringify(envelope),
+            displayText: `语音指令：${result.transcript}`,
+            sender: 'Xiaohuan Bitable Bridge',
+          }),
+          timestamp: now().toISOString(),
+          isMention: true,
+          isGroup: false,
+        },
+      });
+      logger.info({
+        event: 'xiaohuan_bitable_draft_delivered',
+        outcome: 'ok',
+        captureId: result.captureId,
+        requestFingerprint: current.requestFingerprint,
+        attempt: current.attempt + 1,
+      });
+      return true;
+    } catch (error) {
+      releaseActiveDraft(current, 'host-ingress-failed');
+      logger.error({
+        event: 'xiaohuan_bitable_draft_failed',
+        stage: 'host-ingress',
+        outcome: 'error',
+        captureId: result.captureId,
+        code: safeErrorCode(error, 'HOST_INBOUND_FAILED'),
+      });
+      return false;
+    }
+  };
+
   const deliverResult = async (
     setup: ChannelSetup,
     result: ExperimentAudioV1,
   ): Promise<boolean> => {
-    let fields: BitableDraftFields;
     let requestFingerprint: string;
+    let fields: BitableDraftFields;
     let stableIdempotencyKey: string;
     try {
       fields = mapFields(result, config.fieldMap, {
@@ -297,60 +443,22 @@ export function createXiaohuanBitableAdapter(
       });
       return false;
     }
-
-    const envelope = createBridgeEnvelope({
-      resource: config.resource,
-      result,
-      fieldMapping: config.fieldMap,
-      fields,
+    const current: ActiveDraft = {
       requestFingerprint,
-      idempotencyKey: stableIdempotencyKey,
-    });
-
-    const current: ActiveDraft = { requestFingerprint };
+      stableIdempotencyKey,
+      fields,
+      result,
+      attempt: 0,
+      sourceMessageId: `${XIAOHUAN_BITABLE_CHANNEL_TYPE}-${requestFingerprint}-attempt-1`,
+      state: 'processing',
+    };
     activeDraft = current;
     current.timeout = setTimeout(
       () => releaseActiveDraft(current, 'timeout'),
       activeDraftMaxMs,
     );
     current.timeout.unref?.();
-    try {
-      await setup.onInboundEvent({
-        channelType: 'feishu',
-        platformId: config.platformId,
-        threadId: null,
-        authenticatedUserId: config.authenticatedUserId,
-        message: {
-          id: `${XIAOHUAN_BITABLE_CHANNEL_TYPE}-${requestFingerprint}`,
-          kind: 'chat',
-          content: JSON.stringify({
-            text: JSON.stringify(envelope),
-            displayText: `语音指令：${result.transcript}`,
-            sender: 'Xiaohuan Bitable Bridge',
-          }),
-          timestamp: now().toISOString(),
-          isMention: true,
-          isGroup: false,
-        },
-      });
-      logger.info({
-        event: 'xiaohuan_bitable_draft_delivered',
-        outcome: 'ok',
-        captureId: result.captureId,
-        requestFingerprint,
-      });
-      return true;
-    } catch (error) {
-      releaseActiveDraft(current, 'host-ingress-failed');
-      logger.error({
-        event: 'xiaohuan_bitable_draft_failed',
-        stage: 'host-ingress',
-        outcome: 'error',
-        captureId: result.captureId,
-        code: safeErrorCode(error, 'HOST_INBOUND_FAILED'),
-      });
-      return false;
-    }
+    return submitActiveDraft(setup, current);
   };
 
   const drainDraftQueue = async (): Promise<void> => {
@@ -422,6 +530,7 @@ export function createXiaohuanBitableAdapter(
       receiptRunId = createReceiptRunId();
       unsubscribeConfirmationDelivered = subscribeConfirmation(handleConfirmationDelivered);
       unsubscribeConfirmationResolved = subscribeResolution(handleConfirmationResolved);
+      unsubscribeAgentTurnResolved = subscribeAgentTurn(handleAgentTurnResolved);
       acceptingOutputs = true;
 
       const serviceDependencies: VadListeningServiceDependencies = {
@@ -475,9 +584,13 @@ export function createXiaohuanBitableAdapter(
       await Promise.allSettled([...pendingTtsAcks]);
       unsubscribeConfirmationDelivered?.();
       unsubscribeConfirmationResolved?.();
+      unsubscribeAgentTurnResolved?.();
       unsubscribeConfirmationDelivered = null;
       unsubscribeConfirmationResolved = null;
+      unsubscribeAgentTurnResolved = null;
       if (activeDraft?.timeout) clearTimeout(activeDraft.timeout);
+      if (activeDraft?.settleTimeout) clearTimeout(activeDraft.settleTimeout);
+      if (activeDraft?.retryTimeout) clearTimeout(activeDraft.retryTimeout);
       activeDraft = null;
       receiptRunId = null;
       hostSetup = null;

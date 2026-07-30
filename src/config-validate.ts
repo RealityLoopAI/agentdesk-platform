@@ -63,6 +63,7 @@ const INSPECTED_KEYS = [
   'OPENAI_TIMEOUT_MS',
   'OPENAI_FORCE_TRANSPORT',
   'OPENAI_COMPACT_MODEL',
+  'OPENAI_MAX_REQUEST_CONTEXT_CHARS',
   'OTEL_CAPTURE_CONTENT',
   // ADR-0035: in vault mode the host needs ONECLI_URL (not OPENAI_API_KEY).
   'AGENTDESK_OPENAI_VIA_ONECLI',
@@ -149,7 +150,8 @@ export function validateStartupConfig(): void {
     !!get('OPENAI_REASONING_EFFORT') ||
     !!get('OPENAI_TIMEOUT_MS') ||
     !!get('OPENAI_FORCE_TRANSPORT') ||
-    !!get('OPENAI_COMPACT_MODEL');
+    !!get('OPENAI_COMPACT_MODEL') ||
+    !!get('OPENAI_MAX_REQUEST_CONTEXT_CHARS');
   // ADR-0035 vault mode flips the requirement: the OpenAI key is intentionally
   // NOT on the host (the OneCLI vault holds + injects it), so requiring it here
   // would block the secure setup from booting and push the key back onto disk.

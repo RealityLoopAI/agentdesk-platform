@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { initTestSessionDb } from '../db/connection.js';
 import { getContinuation, setContinuation } from '../db/session-state.js';
 import type { ProviderEvent } from './types.js';
-import { OpenAIProvider } from './openai.js';
+import { estimateFullRequestChars, OpenAIProvider } from './openai.js';
 
 const originalFetch = globalThis.fetch;
 
@@ -100,7 +100,7 @@ describe('OpenAIProvider', () => {
     }
 
     expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toBe('Responses API is unavailable');
+    expect((failure as Error).message).toBe('Responses API is unavailable (status 404)');
     expect(requests).toEqual(['https://example.com/v1/responses']);
   });
 
@@ -153,6 +153,55 @@ describe('OpenAIProvider', () => {
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toMatch(/routing.*tool call/i);
     expect(requests).toEqual(['https://example.com/v1/responses']);
+  });
+
+  it('counts instructions and tool schemas in the full request budget', () => {
+    const transcript = [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+    ];
+    const withoutFixed = estimateFullRequestChars(transcript, undefined, []);
+    const withFixed = estimateFullRequestChars(
+      transcript,
+      's'.repeat(1_000),
+      [{
+        type: 'function',
+        name: 'large_tool',
+        description: 'd'.repeat(2_000),
+        parameters: { type: 'object', properties: {} },
+      }],
+    );
+
+    expect(withFixed.fixedChars).toBeGreaterThan(withoutFixed.fixedChars + 2_500);
+    expect(withFixed.totalChars - withoutFixed.totalChars).toBe(
+      withFixed.fixedChars - withoutFixed.fixedChars,
+    );
+  });
+
+  it('fails locally when fixed instructions exceed the configured request budget', async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return jsonResponse({});
+    }) as typeof fetch;
+    const provider = new OpenAIProvider({
+      env: {
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_BASE_URL: 'https://example.com',
+        OPENAI_MAX_REQUEST_CONTEXT_CHARS: '16000',
+      },
+    });
+    const query = provider.query({
+      prompt: 'hello',
+      cwd: '/tmp',
+      systemContext: { instructions: 's'.repeat(20_000) },
+    });
+
+    await expect((async () => {
+      for await (const _event of query.events) {
+        // Drain until the provider reports the local budget failure.
+      }
+    })()).rejects.toThrow(/fixed request context exceeds configured budget/);
+    expect(fetchCalls).toBe(0);
   });
 
   it('falls back to stateless replay when previous_response_id is unsupported', async () => {

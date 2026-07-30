@@ -15,6 +15,9 @@
 - 单句失败隔离、持续监听、有界队列、安全日志和默认不启用。
 - 在本机完成一句切句并校验完整 WAV 后，通过设备离线 TTS HTTP 接口尽早播报一次“收到”。
 - 当前 Bridge 草稿的确认流程结束前，不向同一会话投递后续语句。
+- 区分“Agent turn 已结束”和“确认流程已结束”，使未产卡、Provider 失败和正常产卡都能终止当前草稿状态。
+- 对可重试的上游模型失败进行同源幂等的有界重试，并保证所有错误回复仍绑定原始入站消息。
+- 按完整模型请求而非仅 transcript 管理上下文预算，避免语音入口复用长会话后触发超大请求。
 
 **Non-Goals:**
 
@@ -112,6 +115,40 @@ Bridge 只有在 resolved 事件的 confirmation ID、可信用户和路由全�
 15 分钟后安全释放，避免永久死锁；队列溢出时丢弃新草稿并记录内容安全错误，不绕过单飞。
 关闭服务时停止投递排队草稿，不等待人工确认。
 
+### 9. 把 Agent turn 终态作为独立的 Host 观察事件
+
+Runner 在每个可信入站 turn 结束时写出带 `in_reply_to` 的
+`agent-turn-resolved` system action，状态为 `completed`、`provider-failed`、
+`cancelled` 或 `timed-out`。Host 将其转换为只读进程内事件，携带 session、
+原始入站消息 ID、错误分类和 retryable 标志；它不承载授权能力，也不能代替确认。
+
+Bridge 的 active draft 使用两阶段状态：`processing` 等待 Agent turn 结果；
+若收到匹配的 confirmation delivered，则进入 `awaiting-confirmation` 并继续等待现有
+resolved 事件；若 turn 正常结束且短暂 settle 窗口内没有确认卡，则释放当前草稿；
+若 turn 失败则进入重试或失败终态。选择独立终态事件而不是缩短 15 分钟确认超时，
+是为了避免慢 Agent 的迟到确认卡与下一句重叠。
+
+### 10. Provider 失败采用相关键稳定、attempt ID 唯一的有界重试
+
+Runner 的 provider error、用户可见错误、`/clear` 回执和 turn 终态消息都必须携带
+当前 `turnRouting.inReplyTo`，确保 Host 可把错误投递到原始飞书会话，并让 Bridge
+可靠关联本次尝试。
+
+Bridge 对 `gateway_5xx`、`server_5xx`、`timeout` 和 `rate_limited` 最多追加两次
+重试，默认退避 5 秒和 30 秒。重试保留相同 capture、request fingerprint 和最终
+Create 幂等来源，但每次 Host 入站使用唯一 attempt message ID，避免消息去重吞掉重试。
+不可重试错误或耗尽重试后释放 active，报告内容安全错误并继续 FIFO 下一句。
+
+### 11. 上下文保护按完整 OpenAI 请求预算触发
+
+OpenAI provider 在发送请求前计算 transcript、system instructions 和序列化 tools 的
+总字符预算。总量超过可配置阈值时，先压缩旧 transcript；压缩失败或压缩后仍超限时，
+按扣除 system/tools 固定开销后的剩余预算硬裁剪 transcript。这样语音 turn 即使落入
+已有会话，也不会因为只检查 transcript 而把超大请求直接交给上游。
+
+独立的 machine-ingress Frontdesk/session 仍是推荐部署拓扑，但本轮不引入第二条身份或
+Gateway 路径；在该拓扑完成前，完整请求预算是兼容现有飞书 P2P 绑定的运行时保护。
+
 ## Risks / Trade-offs
 
 - [Host 扩展与当前独立监听器同时绑定 UDP 50020] → 切换到 Bridge 前必须停止独立进程；启动端口冲突时失败关闭。
@@ -125,6 +162,9 @@ Bridge 只有在 resolved 事件的 confirmation ID、可信用户和路由全�
 - [Agent 伪造或重放相关键提前释放队列] → 相关键无授权能力；卡片投递只绑定 Host 生成的 confirmation ID，释放还必须命中 Host resolved 事件、规范用户和 P2P 路由。
 - [TTS 播放暂停设备麦克风/RTP] → 仅在完整切句已经本地落盘后播报短句“收到”；设备播放结束后按硬件服务约定恢复 RTP，不影响已经完整接收的本句。
 - [确认前持续说话造成结构化草稿积压] → 模型处理可继续，但 Agent 入站严格单飞且 FIFO 有界；超限失败关闭，不并发启动新确认。
+- [Agent 正常结束但未产确认卡导致队列卡住] → turn 终态后保留短 settle 窗口；未绑定确认才释放，迟到或无关事件不能推进队列。
+- [上游 5xx 重试造成重复写入] → 保持 request fingerprint/Create 幂等来源不变，只改变 attempt message ID；确认和 Gateway 幂等仍是最终防线。
+- [system/tools 本身占用大量上下文] → 预算计算覆盖完整请求；固定开销已经超过阈值时失败关闭并报告配置问题，而不是无限裁剪用户输入。
 
 ## Migration Plan
 
@@ -134,6 +174,8 @@ Bridge 只有在 resolved 事件的 confirmation ID、可信用户和路由全�
 4. 停止独立监听器，加载 Bridge，先用模拟结果验证入站与零直连，再用真实小环完成一次取消和一次确认 Create。
 5. 可选启用 TTS 回执，先检查 `/healthz`，再验证本地完整 WAV 就绪后、方舟结果返回前只播报一次“收到”。
 6. 回滚时禁用 TTS 回执或整个 Bridge 并恢复独立监听器；无 DB Schema 或 Gateway 契约迁移需要撤销。
+7. 部署 turn 终态和重试后，先以模拟 provider-failed/无确认完成事件验证队列推进，再开启真实小环连续五句测试。
+8. 将旧语音会话执行一次 `/clear`；后续可把 Bridge 迁移到独立 machine-ingress Frontdesk/session，回复仍通过可信 `replyTo` 返回飞书。
 
 ## Open Questions
 

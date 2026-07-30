@@ -141,6 +141,14 @@ export function classifyProviderError(errMsg: string, sessionInvalid: boolean): 
   return 'unknown';
 }
 
+export function isRetryableProviderErrorCode(code: string): boolean {
+  return code === 'gateway_5xx' ||
+    code === 'server_5xx' ||
+    code === 'timeout' ||
+    code === 'rate_limited' ||
+    code === 'session_invalid';
+}
+
 function formatUserFacingError(errMsg: string): string {
   const normalized = errMsg.toLowerCase();
   if (
@@ -486,6 +494,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           platform_id: turnRouting.platformId,
           channel_type: turnRouting.channelType,
           thread_id: turnRouting.threadId,
+          in_reply_to: turnRouting.inReplyTo,
           content: JSON.stringify({ text: 'Session cleared.' }),
         });
         commandIds.push(msg.id);
@@ -551,6 +560,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // batch — not from "the latest inbound row at call time" — to avoid
     // cross-user misattribution in group/shared sessions.
     setRequestIdentity(resolveBatchIdentity(keep));
+    let turnStatus: 'completed' | 'provider-failed' = 'completed';
+    let turnErrorCode: string | undefined;
     try {
       let enforcedDecision: EnforcedRoutingDecision | undefined;
       if (routingEnabledForTurn(config, keep, turnRouting)) {
@@ -640,6 +651,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation = undefined;
         clearContinuation(config.providerName);
       }
+      turnStatus = 'provider-failed';
+      turnErrorCode = classifyProviderError(errMsg, sessionInvalid);
 
       // Emit a provider_error system action so the host can bump the
       // <namespace>_provider_errors_total metric. Without this, dashboards
@@ -648,10 +661,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       writeMessageOut({
         id: generateId(),
         kind: 'system',
+        in_reply_to: turnRouting.inReplyTo,
         content: JSON.stringify({
           action: 'provider_error',
           provider: config.providerName,
-          code: classifyProviderError(errMsg, sessionInvalid),
+          code: turnErrorCode,
           message: errMsg.slice(0, 500),
         }),
       });
@@ -666,9 +680,21 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         platform_id: turnRouting.platformId,
         channel_type: turnRouting.channelType,
         thread_id: turnRouting.threadId,
+        in_reply_to: turnRouting.inReplyTo,
         content: JSON.stringify({ text: formatUserFacingError(errMsg) }),
       });
     } finally {
+      writeMessageOut({
+        id: generateId(),
+        kind: 'system',
+        in_reply_to: turnRouting.inReplyTo,
+        content: JSON.stringify({
+          action: 'agent_turn_resolved',
+          status: turnStatus,
+          ...(turnErrorCode ? { code: turnErrorCode } : {}),
+          retryable: turnErrorCode ? isRetryableProviderErrorCode(turnErrorCode) : false,
+        }),
+      });
       clearCurrentInReplyTo();
       clearRequestIdentity();
       clearCurrentClassificationId();

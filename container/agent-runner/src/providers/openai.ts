@@ -32,6 +32,8 @@ const DEFAULT_MAX_REQUEST_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = 1_500;
 const MAX_REPLAY_TRANSCRIPT_ITEMS = 128;
 const MAX_REPLAY_TRANSCRIPT_CHARS = 120_000;
+const DEFAULT_MAX_REQUEST_CONTEXT_CHARS = 240_000;
+const MIN_MAX_REQUEST_CONTEXT_CHARS = 16_000;
 // Soft threshold (chars of JSON-serialized transcript) above which we trigger
 // summary-based compaction *before* the next API call. Sits between the
 // 120k hard trim ceiling and Claude's 165k-token auto-compact window so the
@@ -352,6 +354,22 @@ function totalTranscriptChars(items: JsonObject[]): number {
   let total = 0;
   for (const item of items) total += transcriptSize(item);
   return total;
+}
+
+export function estimateFullRequestChars(
+  transcript: JsonObject[],
+  instructions: string | undefined,
+  tools: OpenAIFunctionTool[],
+): { fixedChars: number; totalChars: number } {
+  // Include field names and a small body envelope allowance so this cheap
+  // character proxy errs on the safe side for both Responses and Chat
+  // Completions transports.
+  const fixedChars =
+    JSON.stringify({ model: '', instructions: instructions ?? '', tools }).length + 2_048;
+  return {
+    fixedChars,
+    totalChars: fixedChars + totalTranscriptChars(transcript),
+  };
 }
 
 /**
@@ -929,6 +947,7 @@ export class OpenAIProvider implements AgentProvider {
   private readonly forceTransport?: OpenAITransport;
   private readonly compactModel: string;
   private readonly compactArchive: boolean;
+  private readonly maxRequestContextChars: number;
   private readonly bridge: OpenAIMcpBridge;
 
   constructor(options: ProviderOptions = {}) {
@@ -951,6 +970,15 @@ export class OpenAIProvider implements AgentProvider {
     // main model. Archiving the dropped window to markdown is opt-in.
     this.compactModel = readString(env.OPENAI_COMPACT_MODEL) || this.model;
     this.compactArchive = /^(1|true|yes|on)$/i.test(readString(env.OPENAI_COMPACT_ARCHIVE) || '');
+    const configuredRequestBudget = Number.parseInt(
+      readString(env.OPENAI_MAX_REQUEST_CONTEXT_CHARS) || '',
+      10,
+    );
+    this.maxRequestContextChars =
+      Number.isFinite(configuredRequestBudget) &&
+      configuredRequestBudget >= MIN_MAX_REQUEST_CONTEXT_CHARS
+        ? configuredRequestBudget
+        : DEFAULT_MAX_REQUEST_CONTEXT_CHARS;
     this.bridge = new OpenAIMcpBridge(options.mcpServers ?? {}, env);
   }
 
@@ -1128,7 +1156,11 @@ export class OpenAIProvider implements AgentProvider {
     // soft threshold, replace the stale window with a single summary message.
     // A successful compaction forces stateless replay (see runCompaction).
     const preCompactSize = totalTranscriptChars(transcript);
-    if (preCompactSize > COMPACT_TRIGGER_CHARS) {
+    const preCompactRequest = estimateFullRequestChars(transcript, params.instructions, tools);
+    if (
+      preCompactSize > COMPACT_TRIGGER_CHARS ||
+      preCompactRequest.totalChars > this.maxRequestContextChars
+    ) {
       const result = await this.runCompaction(transcript, params.instructions, usages, params.signal);
       if (result) {
         transcript = result.transcript;
@@ -1147,6 +1179,25 @@ export class OpenAIProvider implements AgentProvider {
         // bounded. No `compacted` event — the turn completes as before.
         transcript = trimTranscript(transcript);
       }
+    }
+
+    const requestBudget = estimateFullRequestChars(transcript, params.instructions, tools);
+    const transcriptBudget = this.maxRequestContextChars - requestBudget.fixedChars;
+    if (transcriptBudget <= 0) {
+      throw new Error(
+        `OpenAI fixed request context exceeds configured budget (${requestBudget.fixedChars}/${this.maxRequestContextChars} chars)`,
+      );
+    }
+    if (requestBudget.totalChars > this.maxRequestContextChars) {
+      transcript = trimTranscriptTo(transcript, transcriptBudget);
+      const trimmedRequest = estimateFullRequestChars(transcript, params.instructions, tools);
+      if (trimmedRequest.totalChars > this.maxRequestContextChars) {
+        throw new Error(
+          `OpenAI request context exceeds configured budget after compaction (${trimmedRequest.totalChars}/${this.maxRequestContextChars} chars)`,
+        );
+      }
+      mode = 'stateless';
+      previousResponseId = undefined;
     }
 
     let nextInput: unknown =
@@ -1534,7 +1585,9 @@ export class OpenAIProvider implements AgentProvider {
             await sleep(RETRY_BACKOFF_MS * attempt);
             continue;
           }
-          throw new Error(message);
+          throw new Error(
+            /\bstatus\s+\d{3}\b/i.test(message) ? message : `${message} (status ${response.status})`,
+          );
         }
 
         if (!isRecord(parsed)) {
@@ -1629,7 +1682,9 @@ export class OpenAIProvider implements AgentProvider {
             await sleep(RETRY_BACKOFF_MS * attempt);
             continue;
           }
-          throw new Error(message);
+          throw new Error(
+            /\bstatus\s+\d{3}\b/i.test(message) ? message : `${message} (status ${response.status})`,
+          );
         }
 
         if (!isRecord(parsed)) {

@@ -24,6 +24,10 @@ import type {
   GatewayConfirmationResolvedEvent,
   GatewayConfirmationResolvedListener,
 } from '../src/modules/gateway-confirmation/events.js';
+import type {
+  AgentTurnResolvedEvent,
+  AgentTurnResolvedListener,
+} from '../src/modules/agent-turn/events.js';
 import { createTtsReceiptKey } from '../examples/xiaohuan-bitable-bridge/tts-ack.js';
 
 const summary: VadServiceSummary = {
@@ -258,7 +262,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
         isGroup: false,
       },
     });
-    expect(event.message.id).toMatch(/^xiaohuan-bitable-[a-f0-9]{64}$/);
+    expect(event.message.id).toMatch(/^xiaohuan-bitable-[a-f0-9]{64}-attempt-1$/);
     const chat = JSON.parse(event.message.content) as {
       text: string;
       displayText: string;
@@ -437,7 +441,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     resolvedListener?.(resolved);
     await flushPromises();
     expect(host.events).toHaveLength(2);
-    expect(host.events[1]?.message.id).toBe(`xiaohuan-bitable-${'b'.repeat(64)}`);
+    expect(host.events[1]?.message.id).toBe(`xiaohuan-bitable-${'b'.repeat(64)}-attempt-1`);
 
     await adapter.teardown();
   });
@@ -474,8 +478,256 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     await flushPromises();
     expect(host.events).toHaveLength(2);
-    expect(host.events[1]?.message.id).toBe(`xiaohuan-bitable-${'b'.repeat(64)}`);
+    expect(host.events[1]?.message.id).toBe(`xiaohuan-bitable-${'b'.repeat(64)}-attempt-1`);
 
+    await adapter.teardown();
+  });
+
+  it('releases the next draft when an Agent turn completes without a confirmation', async () => {
+    const service = serviceHarness();
+    const host = setupHarness();
+    let turnListener: AgentTurnResolvedListener | undefined;
+    const fingerprints = ['a'.repeat(64), 'b'.repeat(64)];
+    const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
+      validateBinding: vi.fn(),
+      validateVadConfig: vi.fn().mockResolvedValue(undefined),
+      runVadService: service.run,
+      logger: loggerHarness().logger,
+      fingerprint: () => fingerprints.shift()!,
+      turnSettleMs: 1,
+      onAgentTurnResolved: (listener) => {
+        turnListener = listener;
+        return () => undefined;
+      },
+    });
+
+    await adapter.setup(host.setup);
+    service.dependencies().onOutput?.(output(experiment('bridge-test-000001')));
+    service.dependencies().onOutput?.(output(experiment('bridge-test-000002')));
+    await flushPromises();
+    expect(host.events).toHaveLength(1);
+
+    const turn: AgentTurnResolvedEvent = {
+      sessionId: 'session-1',
+      sourceMessageId: `${host.events[0]!.message.id}:frontdesk-group`,
+      status: 'completed',
+      retryable: false,
+    };
+    turnListener?.(turn);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await flushPromises();
+
+    expect(host.events).toHaveLength(2);
+    expect(host.events[1]?.message.id).toBe(`xiaohuan-bitable-${'b'.repeat(64)}-attempt-1`);
+    await adapter.teardown();
+  });
+
+  it('retries a transient provider failure with one fingerprint and a unique attempt id', async () => {
+    const service = serviceHarness();
+    const host = setupHarness();
+    let turnListener: AgentTurnResolvedListener | undefined;
+    const fingerprint = 'a'.repeat(64);
+    const fingerprintFn = vi.fn(() => fingerprint);
+    const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
+      validateBinding: vi.fn(),
+      validateVadConfig: vi.fn().mockResolvedValue(undefined),
+      runVadService: service.run,
+      logger: loggerHarness().logger,
+      fingerprint: fingerprintFn,
+      retryDelaysMs: [1, 1],
+      onAgentTurnResolved: (listener) => {
+        turnListener = listener;
+        return () => undefined;
+      },
+    });
+
+    await adapter.setup(host.setup);
+    service.dependencies().onOutput?.(output(experiment()));
+    await flushPromises();
+    expect(host.events[0]?.message.id).toBe(`xiaohuan-bitable-${fingerprint}-attempt-1`);
+
+    turnListener?.({
+      sessionId: 'session-1',
+      sourceMessageId: `${host.events[0]!.message.id}:frontdesk-group`,
+      status: 'provider-failed',
+      code: 'gateway_5xx',
+      retryable: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await flushPromises();
+
+    expect(host.events).toHaveLength(2);
+    expect(host.events[1]?.message.id).toBe(`xiaohuan-bitable-${fingerprint}-attempt-2`);
+    expect(fingerprintFn).toHaveBeenCalledOnce();
+    const firstEnvelope = JSON.parse(
+      (JSON.parse(host.events[0]!.message.content) as { text: string }).text,
+    ) as XiaohuanBitableBridgeEnvelope;
+    const secondEnvelope = JSON.parse(
+      (JSON.parse(host.events[1]!.message.content) as { text: string }).text,
+    ) as XiaohuanBitableBridgeEnvelope;
+    expect(secondEnvelope.requestFingerprint).toBe(firstEnvelope.requestFingerprint);
+    expect(secondEnvelope.idempotencyKey).toBe(firstEnvelope.idempotencyKey);
+    await adapter.teardown();
+  });
+
+  it('serializes five completed turns without leaving a stale active draft', async () => {
+    const service = serviceHarness();
+    const host = setupHarness();
+    let turnListener: AgentTurnResolvedListener | undefined;
+    const fingerprints = Array.from({ length: 5 }, (_, index) =>
+      String(index + 1).repeat(64),
+    );
+    const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
+      validateBinding: vi.fn(),
+      validateVadConfig: vi.fn().mockResolvedValue(undefined),
+      runVadService: service.run,
+      logger: loggerHarness().logger,
+      fingerprint: () => fingerprints.shift()!,
+      turnSettleMs: 1,
+      onAgentTurnResolved: (listener) => {
+        turnListener = listener;
+        return () => undefined;
+      },
+    });
+
+    await adapter.setup(host.setup);
+    for (let index = 1; index <= 5; index += 1) {
+      service.dependencies().onOutput?.(output(experiment(`bridge-test-${index}`)));
+    }
+    await flushPromises();
+    expect(host.events).toHaveLength(1);
+
+    for (let index = 0; index < 5; index += 1) {
+      const current = host.events[index];
+      expect(current).toBeDefined();
+      turnListener?.({
+        sessionId: 'session-1',
+        sourceMessageId: `${current!.message.id}:frontdesk-group`,
+        status: 'completed',
+        retryable: false,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await flushPromises();
+      expect(host.events).toHaveLength(Math.min(index + 2, 5));
+    }
+
+    expect(host.events.map((event) => event.message.id)).toEqual(
+      Array.from(
+        { length: 5 },
+        (_, index) => `xiaohuan-bitable-${String(index + 1).repeat(64)}-attempt-1`,
+      ),
+    );
+    await adapter.teardown();
+  });
+
+  it('keeps the queue blocked when a confirmation arrives during the completion settle window', async () => {
+    const service = serviceHarness();
+    const host = setupHarness();
+    let turnListener: AgentTurnResolvedListener | undefined;
+    let deliveredListener: GatewayConfirmationDeliveredListener | undefined;
+    let resolvedListener: GatewayConfirmationResolvedListener | undefined;
+    const fingerprints = ['a'.repeat(64), 'b'.repeat(64)];
+    const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
+      validateBinding: vi.fn(),
+      validateVadConfig: vi.fn().mockResolvedValue(undefined),
+      runVadService: service.run,
+      logger: loggerHarness().logger,
+      fingerprint: () => fingerprints.shift()!,
+      turnSettleMs: 10,
+      onAgentTurnResolved: (listener) => {
+        turnListener = listener;
+        return () => undefined;
+      },
+      onConfirmationDelivered: (listener) => {
+        deliveredListener = listener;
+        return () => undefined;
+      },
+      onConfirmationResolved: (listener) => {
+        resolvedListener = listener;
+        return () => undefined;
+      },
+    });
+
+    await adapter.setup(host.setup);
+    service.dependencies().onOutput?.(output(experiment('bridge-test-1')));
+    service.dependencies().onOutput?.(output(experiment('bridge-test-2')));
+    await flushPromises();
+    turnListener?.({
+      sessionId: 'session-1',
+      sourceMessageId: host.events[0]!.message.id,
+      status: 'completed',
+      retryable: false,
+    });
+    deliveredListener?.({
+      confirmationId: 'confirm-late',
+      kind: 'create',
+      requesterUserId: 'canonical-user-1',
+      channelType: 'feishu',
+      platformId: 'feishu:p2p:ou_canonical1',
+      threadId: null,
+      resource: 'lab.experiments',
+      correlationId: 'a'.repeat(64),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(host.events).toHaveLength(1);
+
+    resolvedListener?.({
+      confirmationId: 'confirm-late',
+      kind: 'create',
+      status: 'approved',
+      requesterUserId: 'canonical-user-1',
+      channelType: 'feishu',
+      platformId: 'feishu:p2p:ou_canonical1',
+      threadId: null,
+    });
+    await flushPromises();
+    expect(host.events).toHaveLength(2);
+    await adapter.teardown();
+  });
+
+  it('releases the next queued draft after transient retries are exhausted', async () => {
+    const service = serviceHarness();
+    const host = setupHarness();
+    let turnListener: AgentTurnResolvedListener | undefined;
+    const fingerprints = ['a'.repeat(64), 'b'.repeat(64)];
+    const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
+      validateBinding: vi.fn(),
+      validateVadConfig: vi.fn().mockResolvedValue(undefined),
+      runVadService: service.run,
+      logger: loggerHarness().logger,
+      fingerprint: () => fingerprints.shift()!,
+      retryDelaysMs: [1, 1],
+      onAgentTurnResolved: (listener) => {
+        turnListener = listener;
+        return () => undefined;
+      },
+    });
+
+    await adapter.setup(host.setup);
+    service.dependencies().onOutput?.(output(experiment('bridge-test-1')));
+    service.dependencies().onOutput?.(output(experiment('bridge-test-2')));
+    await flushPromises();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = host.events[attempt]!;
+      turnListener?.({
+        sessionId: 'session-1',
+        sourceMessageId: current.message.id,
+        status: 'provider-failed',
+        code: 'gateway_5xx',
+        retryable: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await flushPromises();
+    }
+
+    expect(host.events).toHaveLength(4);
+    expect(host.events.slice(0, 3).map((event) => event.message.id)).toEqual([
+      `xiaohuan-bitable-${'a'.repeat(64)}-attempt-1`,
+      `xiaohuan-bitable-${'a'.repeat(64)}-attempt-2`,
+      `xiaohuan-bitable-${'a'.repeat(64)}-attempt-3`,
+    ]);
+    expect(host.events[3]?.message.id).toBe(`xiaohuan-bitable-${'b'.repeat(64)}-attempt-1`);
     await adapter.teardown();
   });
 
@@ -523,7 +775,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     await flushPromises();
 
     expect(host.events).toHaveLength(2);
-    expect(host.events[1]?.message.id).toBe(`xiaohuan-bitable-${'b'.repeat(64)}`);
+    expect(host.events[1]?.message.id).toBe(`xiaohuan-bitable-${'b'.repeat(64)}-attempt-1`);
     const serializedLogs = JSON.stringify(logs.events);
     expect(serializedLogs).toContain('INVALID_STRUCTURED_OUTPUT');
     expect(serializedLogs).toContain('FIELD_VALUE_TOO_LARGE');

@@ -31,4 +31,5 @@ import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './gateway-audit/index.js';
 import './provider-errors/index.js';
+import './agent-turn/index.js';
 import './classification-log/index.js';

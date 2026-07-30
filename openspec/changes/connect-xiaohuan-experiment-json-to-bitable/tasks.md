@@ -45,3 +45,13 @@
 - [ ] 5.2 在用户提供测试表逻辑资源与字段映射后，完成一次取消和一次确认 Create，核对 record ID、Get 结果与 audit ID
 - [x] 5.3 检查真实设备 healthz，并验证旧版确认卡时序可触发一次“收到”回执（已由 5.4 的提前时序取代）
 - [ ] 5.4 真实验证本地完整 WAV 后立即播报“收到”，且连续两句在第一条确认解决前不投递第二个 Agent turn
+
+## 6. Agent 终态、重试与上下文保护
+
+- [x] 6.1 Runner 为 provider error、用户错误、`/clear` 回执和 turn 终态补齐可信 `in_reply_to`，并发出可分类的 `agent-turn-resolved` system action
+- [x] 6.2 Host 注册只读 Agent turn 终态观察事件，按 session 与原始入站消息 ID 向 Bridge 提供 completed/provider-failed 关联
+- [x] 6.3 Bridge 实现 processing/awaiting-confirmation 两阶段状态、短 settle 窗口、无确认正常释放和无关事件隔离
+- [x] 6.4 Bridge 对可重试 provider 失败实现最多两次 5 秒/30 秒退避，保持 fingerprint 稳定并使用唯一 attempt message ID
+- [x] 6.5 OpenAI provider 按 transcript + system instructions + tools 的完整请求预算触发压缩和动态硬裁剪，固定开销超限时失败关闭
+- [x] 6.6 添加 Runner/Host/Bridge/provider 回归测试，覆盖连续五句、502、无确认完成、迟到确认、重试耗尽、错误路由和完整请求预算
+- [x] 6.7 更新运行手册与 ADR，执行 typecheck、全量测试和 OpenSpec strict validation
