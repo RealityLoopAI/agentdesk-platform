@@ -30,6 +30,10 @@ import {
   describeResponseSchema,
   memorySearchResponseSchema,
 } from './gateway-contract.js';
+import {
+  clearGatewayConfirmationPreviewCache,
+  resolveGatewayConfirmationPreview,
+} from './gateway-confirmation-preview-cache.js';
 
 const runtime = {
   assistantName: 'Frontdesk',
@@ -52,11 +56,13 @@ function sessionIdentity(overrides: Partial<RequestIdentity> = {}): RequestIdent
 
 beforeEach(() => {
   globalThis.fetch = originalFetch;
+  clearGatewayConfirmationPreviewCache();
   initTestSessionDb();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  clearGatewayConfirmationPreviewCache();
   clearRequestIdentity();
   closeSessionDb();
 });
@@ -880,6 +886,54 @@ describe('gateway contract hardening', () => {
     });
 
     expect(body?.idempotencyKey).toBeNull();
+  });
+
+  it('keeps a Bitable update confirmation request private and returns only the display preview to the model', async () => {
+    setRequestIdentity(sessionIdentity());
+    const bindingHash = `sha256:${'b'.repeat(64)}`;
+    const fullPreview = {
+      recordId: 'rec-preview-1',
+      diff: [{ field: '状态', before: '待办', after: '完成' }],
+      expectedRecordFingerprint: `sha256:${'a'.repeat(64)}`,
+      bindingHash,
+      confirmationRequest: 'gateway-signed-opaque-request',
+      expiresAt: Date.now() + 30_000,
+      auditId: 'preview-audit-1',
+    };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true, preview: fullPreview }), { status: 200 })) as typeof fetch;
+
+    const result = await handleGatewayExecute(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      operation: 'feishu.bitable.record.update',
+      input: { resource: 'pilot.records', recordId: 'rec-preview-1', fields: { 状态: '完成' } },
+      dryRun: true,
+    });
+
+    expect(result.isError).toBeUndefined();
+    const text = result.content[0]?.type === 'text' ? result.content[0].text : '{}';
+    const response = JSON.parse(text) as { preview: Record<string, unknown> };
+    expect(response.preview).not.toHaveProperty('confirmationRequest');
+    expect(text).not.toContain('gateway-signed-opaque-request');
+    expect(resolveGatewayConfirmationPreview('update', response.preview)).toEqual(fullPreview);
+  });
+
+  it('fails closed on a malformed Gateway-owned Bitable preview instead of exposing it to the model', async () => {
+    setRequestIdentity(sessionIdentity());
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true, preview: { recordId: 'rec-preview-1' } }), {
+        status: 200,
+      })) as typeof fetch;
+
+    const result = await handleGatewayExecute(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      operation: 'feishu.bitable.record.delete',
+      input: { resource: 'pilot.records', recordId: 'rec-preview-1' },
+      dryRun: true,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.type === 'text' ? result.content[0].text : '').toContain(
+      'invalid or expired Bitable confirmation preview',
+    );
   });
 
   it('parses a structured error response into code/retryable for the agent', async () => {

@@ -138,6 +138,7 @@ async function main(): Promise<void> {
           operations: [
             { name: 'feishu.bitable.record.create', mutating: true },
             { name: 'feishu.bitable.record.update', mutating: true, approval: 'user-confirmation' },
+            { name: 'feishu.bitable.record.delete', mutating: true, approval: 'user-confirmation' },
           ],
         }),
       );
@@ -160,6 +161,25 @@ async function main(): Promise<void> {
               highImpactFields: [],
             },
             auditId: 'gateway-e2e-preview-audit',
+          }),
+        );
+        return;
+      }
+      if (body.operation === 'feishu.bitable.record.delete' && body.dryRun === true) {
+        response.end(
+          JSON.stringify({
+            contractVersion: body.contractVersion,
+            ok: true,
+            preview: {
+              recordId: 'rec-e2e-created',
+              fields: { Name: 'Container A2A E2E', Status: 'New' },
+              expectedRecordFingerprint: E2E_FINGERPRINT,
+              bindingHash: E2E_BINDING_HASH,
+              confirmationRequest: 'opaque-e2e-delete-preview',
+              expiresAt: Date.now() + 60_000,
+              auditId: 'gateway-e2e-delete-preview-audit',
+            },
+            auditId: 'gateway-e2e-delete-preview-audit',
           }),
         );
         return;
@@ -193,7 +213,7 @@ async function main(): Promise<void> {
         requester?.userId !== 'user-e2e' ||
         agent?.agentGroupId !== 'worker-e2e' ||
         body.requesterSource !== 'session' ||
-        body.confirmationRequest !== 'opaque-e2e-update-preview'
+        !['opaque-e2e-update-preview', 'opaque-e2e-delete-preview'].includes(String(body.confirmationRequest))
       ) {
         response.statusCode = 403;
         response.end(JSON.stringify({ code: 'BACKEND_UNAUTHORIZED', message: 'confirmation identity mismatch' }));
@@ -419,63 +439,65 @@ async function main(): Promise<void> {
     );
     await delivery.deliverSessionMessages(worker);
 
-    const pending = central
-      .prepare(
-        `SELECT confirmation_id, requester_user_id, agent_group_id, status
-         FROM pending_gateway_confirmations
-         WHERE confirmation_id = 'container-a2a-update-confirmation'`,
-      )
-      .get() as
-      | {
-          confirmation_id: string;
-          requester_user_id: string;
-          agent_group_id: string;
-          status: string;
-        }
-      | undefined;
-    if (
-      !pending ||
-      pending.requester_user_id !== 'user-e2e' ||
-      pending.agent_group_id !== 'worker-e2e' ||
-      pending.status !== 'pending'
-    ) {
-      throw new Error(`Host confirmation did not preserve the A2A actor: ${JSON.stringify(pending)}`);
-    }
-    const confirmationDecision = await confirmationBroker.resolveGatewayConfirmationDecision(
-      pending.confirmation_id,
-      'user-e2e',
-      'approve',
-    );
-    if (!confirmationDecision.resolved) {
-      throw new Error(`Host confirmation approval failed: ${JSON.stringify(confirmationDecision)}`);
-    }
-    const confirmationResponse = await waitFor('private worker confirmation response', () => {
-      const db = new Database(workerInboundPath, { readonly: true });
-      try {
-        return db
-          .prepare(
-            `SELECT content FROM messages_in
-             WHERE kind = 'system'
-               AND json_extract(content, '$.type') = 'gateway_confirmation_response'
-               AND json_extract(content, '$.confirmationId') = 'container-a2a-update-confirmation'
-             LIMIT 1`,
-          )
-          .get() as { content: string } | undefined;
-      } finally {
-        db.close();
+    for (const confirmationId of ['container-a2a-update-confirmation', 'container-a2a-delete-confirmation']) {
+      const pending = central
+        .prepare(
+          `SELECT confirmation_id, requester_user_id, agent_group_id, status
+           FROM pending_gateway_confirmations
+           WHERE confirmation_id = ?`,
+        )
+        .get(confirmationId) as
+        | {
+            confirmation_id: string;
+            requester_user_id: string;
+            agent_group_id: string;
+            status: string;
+          }
+        | undefined;
+      if (
+        !pending ||
+        pending.requester_user_id !== 'user-e2e' ||
+        pending.agent_group_id !== 'worker-e2e' ||
+        pending.status !== 'pending'
+      ) {
+        throw new Error(`Host confirmation did not preserve the A2A actor: ${JSON.stringify(pending)}`);
       }
-    });
-    const confirmationBody = JSON.parse(confirmationResponse.content) as {
-      status?: string;
-      confirmation?: string;
-      bindingHash?: string;
-    };
-    if (
-      confirmationBody.status !== 'approved' ||
-      confirmationBody.confirmation !== 'e2e-private-confirmation-token' ||
-      confirmationBody.bindingHash !== E2E_BINDING_HASH
-    ) {
-      throw new Error('private worker confirmation response was not correctly bound');
+      const confirmationDecision = await confirmationBroker.resolveGatewayConfirmationDecision(
+        pending.confirmation_id,
+        'user-e2e',
+        'approve',
+      );
+      if (!confirmationDecision.resolved) {
+        throw new Error(`Host confirmation approval failed: ${JSON.stringify(confirmationDecision)}`);
+      }
+      const confirmationResponse = await waitFor(`private worker confirmation response ${confirmationId}`, () => {
+        const db = new Database(workerInboundPath, { readonly: true });
+        try {
+          return db
+            .prepare(
+              `SELECT content FROM messages_in
+               WHERE kind = 'system'
+                 AND json_extract(content, '$.type') = 'gateway_confirmation_response'
+                 AND json_extract(content, '$.confirmationId') = ?
+               LIMIT 1`,
+            )
+            .get(confirmationId) as { content: string } | undefined;
+        } finally {
+          db.close();
+        }
+      });
+      const confirmationBody = JSON.parse(confirmationResponse.content) as {
+        status?: string;
+        confirmation?: string;
+        bindingHash?: string;
+      };
+      if (
+        confirmationBody.status !== 'approved' ||
+        confirmationBody.confirmation !== 'e2e-private-confirmation-token' ||
+        confirmationBody.bindingHash !== E2E_BINDING_HASH
+      ) {
+        throw new Error(`private worker confirmation response was not correctly bound: ${confirmationId}`);
+      }
     }
 
     const audit = central
@@ -506,8 +528,8 @@ async function main(): Promise<void> {
       throw new Error(`Host gateway audit assertion failed: ${JSON.stringify(audit)}`);
     }
     const executeRequests = gatewayRequests.filter((request) => request.path === '/execute');
-    if (executeRequests.length !== 3) {
-      throw new Error(`Gateway expected create, replay and update preview, got ${executeRequests.length}`);
+    if (executeRequests.length !== 4) {
+      throw new Error(`Gateway expected create, replay and update/delete previews, got ${executeRequests.length}`);
     }
     const createRequests = executeRequests.filter(
       (request) => request.body.operation === 'feishu.bitable.record.create',
@@ -524,12 +546,12 @@ async function main(): Promise<void> {
       throw new Error(`Gateway HTTP identity/idempotency assertion failed: ${JSON.stringify(executeRequests)}`);
     }
     const issueRequests = gatewayRequests.filter((request) => request.path === '/confirmation/issue');
-    if (issueRequests.length !== 1) {
-      throw new Error(`Gateway expected one Host confirmation issue call, got ${issueRequests.length}`);
+    if (issueRequests.length !== 2) {
+      throw new Error(`Gateway expected two Host confirmation issue calls, got ${issueRequests.length}`);
     }
 
     console.log(
-      '✓ e2e-container-a2a-gateway PASSED — Web identity survived real-container A2A; create replay and Host-mediated update confirmation stayed bound.',
+      '✓ e2e-container-a2a-gateway PASSED — Web identity survived real-container A2A; create replay and Host-mediated update/delete confirmations stayed bound.',
     );
   } finally {
     if (stopAllContainers) await stopAllContainers('e2e-cleanup');

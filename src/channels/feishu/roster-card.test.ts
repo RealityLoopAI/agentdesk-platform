@@ -16,17 +16,17 @@ import { parseRosterOptIn } from './roster-consent.js';
 
 interface CardButton {
   tag: string;
-  value: Record<string, unknown>;
+  behaviors?: Array<{ type: string; value: Record<string, unknown> }>;
 }
 interface CardCard {
   schema: string;
   header: { title: { content: string } };
-  body: { elements: Array<{ tag: string; actions?: CardButton[] }> };
+  body: { elements: CardButton[] };
 }
 
 function optInButtonValue(card: CardCard): unknown {
-  const action = card.body.elements.find((e) => e.tag === 'action');
-  return action?.actions?.[0]?.value;
+  const button = card.body.elements.find((e) => e.tag === 'button');
+  return button?.behaviors?.find((behavior) => behavior.type === 'callback')?.value;
 }
 
 describe('buildFeishuRosterOptInCard', () => {
@@ -42,6 +42,7 @@ describe('buildFeishuRosterOptInCard', () => {
   it('embeds the host-stamped opt-in payload as the button value, verbatim', () => {
     const card = buildFeishuRosterOptInCard({ slotLabel: 'approver', optIn }) as unknown as CardCard;
     expect(card.schema).toBe('2.0');
+    expect(card.body.elements.some((element) => element.tag === 'action')).toBe(false);
     expect(optInButtonValue(card)).toEqual(optIn);
   });
 

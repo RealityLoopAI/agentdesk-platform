@@ -1,4 +1,4 @@
-export type PipelineStage = 'configuration' | 'input' | 'multimodal';
+export type PipelineStage = 'configuration' | 'input' | 'multimodal' | 'realtime';
 
 export class AudioPipelineError extends Error {
   readonly stage: PipelineStage;
@@ -6,6 +6,7 @@ export class AudioPipelineError extends Error {
   readonly retryable: boolean;
   readonly transcriptAvailable: boolean;
   readonly requestId?: string;
+  readonly detailCode?: string;
 
   constructor(
     stage: PipelineStage,
@@ -15,6 +16,7 @@ export class AudioPipelineError extends Error {
       retryable?: boolean;
       transcriptAvailable?: boolean;
       requestId?: string;
+      detailCode?: string;
       cause?: unknown;
     } = {},
   ) {
@@ -25,6 +27,7 @@ export class AudioPipelineError extends Error {
     this.retryable = options.retryable ?? false;
     this.transcriptAvailable = options.transcriptAvailable ?? false;
     this.requestId = options.requestId;
+    this.detailCode = options.detailCode;
   }
 
   toSafeJSON(): Record<string, unknown> {
@@ -35,6 +38,7 @@ export class AudioPipelineError extends Error {
       retryable: this.retryable,
       transcriptAvailable: this.transcriptAvailable,
       ...(this.requestId ? { requestId: this.requestId } : {}),
+      ...(this.detailCode ? { detailCode: this.detailCode } : {}),
     };
   }
 }

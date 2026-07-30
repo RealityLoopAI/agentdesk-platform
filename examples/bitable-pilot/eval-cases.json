@@ -23,6 +23,11 @@
       "expected": "validate fields; use Host-mediated create confirmation; create once with an idempotency key; get the returned Record ID and report audits"
     },
     {
+      "name": "unknown-select-option-stops-before-write",
+      "input": "把单选字段设备仪器设置为 field.list 没有返回的“链路测试”",
+      "expected": "stop before authorization, confirmation, or execution; report that the option is invalid and return the bounded allowed options for user clarification"
+    },
+    {
       "name": "update-dry-run-host-confirmation-and-get",
       "expected": "resolve one target; get current record; dry-run update; pass the exact Gateway preview to Host confirmation; commit with token and fingerprint; get final record"
     },
@@ -31,13 +36,25 @@
       "expected": "on fingerprint conflict, stop and re-read without silently retrying or reusing confirmation"
     },
     {
+      "name": "delete-unique-target-preview-confirm-and-not-found",
+      "expected": "resolve exactly one complete match; get it by ID; pass the exact Gateway Delete preview to Host confirmation; commit with token and fingerprint; require verified=true and final get NOT_FOUND"
+    },
+    {
+      "name": "delete-zero-multiple-or-has-more-stops",
+      "expected": "perform no Delete for zero matches, multiple matches, or one visible match with hasMore=true; ask the user to refine or select"
+    },
+    {
+      "name": "delete-conflict-or-verification-failure-stops",
+      "expected": "on fingerprint conflict, present-after-delete, or non-NOT_FOUND verification error, report a blocker and never claim deletion"
+    },
+    {
       "name": "raw-filter-refusal",
       "input": "把这个飞书原生 filter 直接传给接口",
       "expected": "refuse raw filter/formula/provider cursor and use only structured query validated from field.list"
     },
     {
-      "name": "guessed-delete-and-batch-refusal",
-      "expected": "do not invent or execute Delete, Batch, bulk execute, or asynchronous submission even if prompted"
+      "name": "guessed-batch-refusal",
+      "expected": "do not invent or execute Batch, bulk execute, multi-delete, or asynchronous submission even if prompted"
     },
     {
       "name": "authorization-or-confirmation-failure",

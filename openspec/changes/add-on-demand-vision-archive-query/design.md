@@ -9,7 +9,7 @@ pattern.
 The only external fact this change depends on is that VisionCortex
 asynchronously writes experiment archives below:
 
-`smb://192.168.66.149/video_database/VisionCortex实验档案库`
+`smb://192.168.66.149/video_database/VisionCortexExperimentArchive`
 
 The share may contain the documented human-readable layout
 `{实验名称}_{YYYYMMDD}/{关键帧|关键片段|专业报告|结构化数据}`. The production
@@ -79,7 +79,7 @@ would require a new authorization surface.
 
 The operator mounts `smb://192.168.66.149/video_database` read-only using the
 host OS and configures `VISION_ARCHIVE_ROOT` to the mounted
-`VisionCortex实验档案库` directory. The adapter uses Node filesystem APIs against
+`VisionCortexExperimentArchive` directory. The adapter uses Node filesystem APIs against
 that local mount.
 
 SMB credentials stay in the OS credential facility and are never copied into
@@ -115,8 +115,8 @@ The first version advertises:
 1. `vision.archive.experiment.search`
    - filters first-level directories by optional normalized experiment name and
      explicit date range or `relativeDayOffset + timezone`;
-   - parses either the final `_YYYYMMDD` suffix or the recognized legacy
-     `exp_YYYYMMDD_HHMMSS_id` form;
+   - parses the final `_YYYYMMDD` suffix, portable final `-YYYY-MM-DD` suffix,
+     or the recognized legacy `exp_YYYYMMDD_HHMMSS_id` form;
    - for a legacy archive, reads only its bounded `experiment_manifest.json`
      during that user-triggered search to obtain `experiment_name`, falling
      back to the directory name if the manifest is unavailable;
@@ -124,7 +124,8 @@ The first version advertises:
 2. `vision.archive.file.list`
    - lists regular files inside one selected archive and optional category;
    - maps the four logical Chinese categories onto the legacy `analysis`
-     layout without exposing physical paths;
+     layout or portable English category layout without exposing physical
+     paths;
    - filters by a closed category vocabulary and bounded extension list;
    - returns opaque file handles and safe metadata.
 3. `vision.archive.json.read`

@@ -198,4 +198,40 @@ describe('ConversationPage', () => {
     await user.click(screen.getByRole('button', { name: '确认修改' }));
     await waitFor(() => expect(submitted).toEqual({ decision: 'approve' }));
   });
+
+  it('renders the Gateway-owned Delete target and submits only the user decision', async () => {
+    let submitted: Record<string, unknown> = {};
+    server.use(
+      http.get('/api/conversations/lane-1/confirmations', () =>
+        HttpResponse.json({
+          confirmations: [
+            {
+              id: 'confirm-delete-1',
+              kind: 'delete',
+              title: '确认删除多维表格记录',
+              display: {
+                recordId: 'rec-delete-1',
+                fields: { 名称: '仅删除这一条', 状态: '测试数据' },
+              },
+              expiresAt: '2026-07-30T10:00:00.000Z',
+              status: 'pending',
+            },
+          ],
+        }),
+      ),
+      http.post('/api/conversations/lane-1/confirmations/confirm-delete-1', async ({ request }) => {
+        submitted = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({
+          confirmation: { id: 'confirm-delete-1', status: 'approved', errorCode: null },
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByRole('heading', { name: '确认删除多维表格记录' })).toBeInTheDocument();
+    expect(screen.getByText('仅删除这一条')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(submitted).toEqual({ decision: 'approve' }));
+  });
 });

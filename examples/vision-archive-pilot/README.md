@@ -6,8 +6,8 @@ an independent asynchronous producer.
 
 The worker enables only its group-private `vision-archive-query` Skill. That
 Skill translates natural-language archive questions into the minimum Gateway
-query sequence and selects known structured JSON such as
-`experiment_summary.json`. It does not access SMB or authorize requests.
+query sequence and selects only files returned by the current Gateway request.
+It does not access SMB or authorize requests.
 
 The invariant is simple: **no user query, no archive access**. Gateway startup,
 discovery, authorization, idle time, handle expiry, and shutdown do not stat,
@@ -25,7 +25,7 @@ macOS example (password is obtained by the OS, not stored in this repository):
 ```bash
 mkdir -p /Volumes/visioncortex-video
 mount_smbfs -o rdonly //SMB_USER@192.168.66.149/video_database /Volumes/visioncortex-video
-export VISION_ARCHIVE_ROOT='/Volumes/visioncortex-video/VisionCortex实验档案库'
+export VISION_ARCHIVE_ROOT='/Volumes/visioncortex-video/VisionCortexExperimentArchive'
 ```
 
 Linux example:
@@ -34,7 +34,7 @@ Linux example:
 sudo mkdir -p /mnt/visioncortex-video
 sudo mount -t cifs //192.168.66.149/video_database /mnt/visioncortex-video \
   -o ro,credentials=/root/.visioncortex-smb,vers=3.0,nosuid,nodev,noexec
-export VISION_ARCHIVE_ROOT='/mnt/visioncortex-video/VisionCortex实验档案库'
+export VISION_ARCHIVE_ROOT='/mnt/visioncortex-video/VisionCortexExperimentArchive'
 ```
 
 Verify the mount itself is read-only using OS mount inspection. Do not test by
@@ -69,6 +69,12 @@ Additional knobs are documented in
 [`../../docs/vision-archive-gateway.md`](../../docs/vision-archive-gateway.md).
 The Gateway accepts only logical resource aliases and opaque handles; it never
 returns the SMB URL or Host mount path.
+
+The adapter accepts the readable `{实验名称}_{YYYYMMDD}` layout, the legacy
+`exp_YYYYMMDD_HHMMSS_id` layout, and the portable
+`{English-Experiment-Name}-{YYYY-MM-DD}` layout currently present beneath
+`VisionCortexExperimentArchive`. All three expose the same four logical Chinese
+categories to the worker.
 
 ## 3. Configure the worker and start the Gateway
 

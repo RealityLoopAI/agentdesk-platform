@@ -24,11 +24,18 @@ const TEMPORARY_NAME = /(^\.|~$|\.tmp$|\.temp$|\.part$|\.partial$|\.crdownload$)
 const CONTROL = /[\u0000-\u001f\u007f]/u;
 const ARCHIVE_NAME = /^(.*)_([0-9]{8})$/u;
 const LEGACY_ARCHIVE_NAME = /^exp_([0-9]{8})_([0-9]{6})_([a-z0-9-]+)$/iu;
+const PORTABLE_ARCHIVE_NAME = /^(.*)-([0-9]{4}-[0-9]{2}-[0-9]{2})$/u;
 const LEGACY_CATEGORY_COMPONENTS = new Map([
   ['关键帧', ['analysis', 'keyframes']],
   ['关键片段', ['analysis', 'segments']],
   ['专业报告', ['analysis']],
   ['结构化数据', ['analysis']],
+]);
+const PORTABLE_CATEGORY_COMPONENTS = new Map([
+  ['关键帧', ['Key-Materials', 'Key-Frames']],
+  ['关键片段', ['Key-Materials', 'Key-Clips']],
+  ['专业报告', ['Professional-PDFs']],
+  ['结构化数据', ['JSON-Config-Files']],
 ]);
 
 export const VISION_ARCHIVE_OPERATION_DESCRIPTORS = [
@@ -340,14 +347,15 @@ export function createVisionArchiveAdapter(options = {}) {
       throw new ArchiveError('BACKEND_UNAUTHORIZED', 'category is not allowed by this resource policy', 403);
     }
     const parsedArchive = parseArchiveName(archive.components[0]);
-    const categoryPath =
-      category && parsedArchive?.layout === 'legacy'
+    const categoryPath = category
+      ? parsedArchive?.layout === 'legacy'
         ? LEGACY_CATEGORY_COMPONENTS.get(category)
-        : category
-          ? [category]
-          : [];
+        : parsedArchive?.layout === 'portable'
+          ? PORTABLE_CATEGORY_COMPONENTS.get(category)
+          : [category]
+      : [];
     if (category && !categoryPath) {
-      throw new ArchiveError('RESOURCE_NOT_READY', 'requested legacy archive category is not available', 409, true);
+      throw new ArchiveError('RESOURCE_NOT_READY', 'requested archive category is not available', 409, true);
     }
     const baseComponents = [...archive.components, ...categoryPath];
     let basePath;
@@ -750,6 +758,19 @@ function parseArchiveName(name) {
       return null;
     }
     return { name: name.normalize('NFC'), date, layout: 'legacy' };
+  }
+  const portableMatch = PORTABLE_ARCHIVE_NAME.exec(name);
+  if (portableMatch?.[1]) {
+    try {
+      validateIsoDate(portableMatch[2], 'archive date');
+    } catch {
+      return null;
+    }
+    return {
+      name: portableMatch[1].normalize('NFC'),
+      date: portableMatch[2],
+      layout: 'portable',
+    };
   }
   const match = ARCHIVE_NAME.exec(name);
   if (!match || !match[1]) return null;

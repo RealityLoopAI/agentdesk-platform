@@ -1091,11 +1091,23 @@ export async function buildContainerArgs(
   injectTraceContext(traceCarrier);
   args.push(...buildRunnerTracingEnvArgs(traceCarrier, process.env));
 
+  // A model is the only provider-owned setting that a group may override.
+  // Keep credentials, relay endpoints, proxy/vault flags, and every other
+  // provider contribution intact (ADR-0080).
+  const modelEnvKey = provider === 'openai' || provider === 'codex' ? 'OPENAI_MODEL' : undefined;
+  const providerEnv = { ...providerContribution.env };
+  if (containerConfig.providerModel && modelEnvKey) {
+    providerEnv[modelEnvKey] = containerConfig.providerModel;
+  } else if (containerConfig.providerModel && !modelEnvKey) {
+    log.warn('Ignoring providerModel for provider without a model override mapping', {
+      provider,
+      containerName,
+    });
+  }
+
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
-  if (providerContribution.env) {
-    for (const [key, value] of Object.entries(providerContribution.env)) {
-      args.push('-e', `${key}=${value}`);
-    }
+  for (const [key, value] of Object.entries(providerEnv)) {
+    args.push('-e', `${key}=${value}`);
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls

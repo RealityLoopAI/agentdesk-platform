@@ -54,8 +54,9 @@ on Agent-supplied identity fields.
 The system SHALL provide `vision.archive.experiment.search` to enumerate only
 the configured archive root's first-level directories and filter them by
 optional normalized experiment name and explicit date range or
-`relativeDayOffset + timezone`. It SHALL interpret a final `_YYYYMMDD` suffix
-or the date segment in a recognized `exp_YYYYMMDD_HHMMSS_id` legacy directory
+`relativeDayOffset + timezone`. It SHALL interpret a final `_YYYYMMDD` suffix,
+a final `-YYYY-MM-DD` suffix, or the date segment in a recognized
+`exp_YYYYMMDD_HHMMSS_id` legacy directory
 as the archive date and SHALL return bounded, paginated results. For the legacy
 layout, it MAY read the bounded root `experiment_manifest.json` during the
 user-triggered search to resolve `experiment_name`; it SHALL NOT scan other
@@ -76,6 +77,10 @@ archive content.
 #### Scenario: Legacy producer directory is searched by experiment name
 - **WHEN** a first-level directory matches `exp_YYYYMMDD_HHMMSS_id` and its bounded manifest contains `experiment_name`
 - **THEN** the Gateway uses the directory's date segment and manifest experiment name for filtering without scanning the archive recursively
+
+#### Scenario: Portable producer directory uses an ISO date suffix
+- **WHEN** a first-level directory ends in a valid `-YYYY-MM-DD` suffix
+- **THEN** the Gateway preserves the preceding name, returns the ISO archive date, and identifies the portable layout without using modification time
 
 #### Scenario: Same-name same-date directories exist
 - **WHEN** multiple distinct directories match the same name and date
@@ -106,7 +111,9 @@ result limits, and pagination. It SHALL not recursively enumerate unrelated
 archives. For a recognized legacy archive, the logical categories SHALL map
 `关键帧` to `analysis/keyframes`, `关键片段` to `analysis/segments`, and both
 `专业报告` and `结构化数据` to `analysis`, with extension filters separating the
-last two.
+last two. For a recognized portable archive, it SHALL map `关键帧` to
+`Key-Materials/Key-Frames`, `关键片段` to `Key-Materials/Key-Clips`,
+`专业报告` to `Professional-PDFs`, and `结构化数据` to `JSON-Config-Files`.
 
 #### Scenario: List professional reports
 - **WHEN** an authorized user lists the `专业报告` category of a valid archive handle with a `.pdf` filter

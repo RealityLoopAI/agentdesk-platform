@@ -588,12 +588,12 @@ describe('buildContainerArgs — real argv assembly (integration-bug class)', ()
     created_at: '2026-01-01T00:00:00Z',
   } as never;
 
-  const containerConfig = {
+  const containerConfig: ContainerConfig = {
     mcpServers: {},
     packages: { apt: [], npm: [] },
     additionalMounts: [],
     skills: 'all',
-  } as never;
+  };
 
   const mounts = [
     { hostPath: '/h/ro', containerPath: '/workspace/agent/container.json', readonly: true },
@@ -646,5 +646,54 @@ describe('buildContainerArgs — real argv assembly (integration-bug class)', ()
     const args = await buildContainerArgs(mounts, 'c-3', agentGroup, containerConfig, 'mock', {}, 'ag1');
     expect(findInjectedEnvValue(args, 'AGENTDESK_GATEWAY_PROXY_URL')).toBeUndefined();
     expect(findInjectedEnvValue(args, 'AGENTDESK_GATEWAY_PROXY_TOKEN')).toBeUndefined();
+  });
+
+  it('overrides only OPENAI_MODEL for an OpenAI-compatible group', async () => {
+    const providerEnv = {
+      OPENAI_MODEL: 'global-model',
+      OPENAI_BASE_URL: 'https://relay.example/v1',
+      OPENAI_API_KEY: 'unchanged-secret',
+      OPENAI_TIMEOUT_MS: '30000',
+    };
+    const args = await buildContainerArgs(
+      mounts,
+      'c-model',
+      agentGroup,
+      { ...containerConfig, providerModel: 'glm-5.2' },
+      'openai',
+      { env: providerEnv },
+      'ag1',
+    );
+
+    expect(findInjectedEnvValue(args, 'OPENAI_MODEL')).toBe('glm-5.2');
+    expect(findInjectedEnvValue(args, 'OPENAI_BASE_URL')).toBe(providerEnv.OPENAI_BASE_URL);
+    expect(findInjectedEnvValue(args, 'OPENAI_API_KEY')).toBe(providerEnv.OPENAI_API_KEY);
+    expect(findInjectedEnvValue(args, 'OPENAI_TIMEOUT_MS')).toBe(providerEnv.OPENAI_TIMEOUT_MS);
+  });
+
+  it('keeps the provider contribution unchanged when no override is configured', async () => {
+    const args = await buildContainerArgs(
+      mounts,
+      'c-global-model',
+      agentGroup,
+      containerConfig,
+      'openai',
+      { env: { OPENAI_MODEL: 'global-model' } },
+      'ag1',
+    );
+    expect(findInjectedEnvValue(args, 'OPENAI_MODEL')).toBe('global-model');
+  });
+
+  it('does not inject a model variable for a provider without a declared mapping', async () => {
+    const args = await buildContainerArgs(
+      mounts,
+      'c-unsupported-model',
+      agentGroup,
+      { ...containerConfig, providerModel: 'glm-5.2' },
+      'mock',
+      {},
+      'ag1',
+    );
+    expect(findInjectedEnvValue(args, 'OPENAI_MODEL')).toBeUndefined();
   });
 });

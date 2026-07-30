@@ -41,6 +41,7 @@ import { migration041 } from './041-web-events.js';
 import { migration042 } from './042-cross-channel-delivery.js';
 import { migration043 } from './043-gateway-audit-logical-resource.js';
 import { migration044 } from './044-gateway-confirmations.js';
+import { migration045 } from './045-gateway-confirmation-delete-kind.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 
@@ -93,6 +94,7 @@ const migrations: Migration[] = [
   migration042,
   migration043,
   migration044,
+  migration045,
 ];
 
 function runMigrationPlan(db: Database.Database, plan: readonly Migration[]): void {

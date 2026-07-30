@@ -61,3 +61,9 @@
 - [x] 8.4 Add the worker-private `vision-archive-query` Skill, narrow the Archive worker Skill allowlist, and update the idempotent topology reconciler and tests to deploy it.
 - [x] 8.5 Add focused natural-language eval coverage for report lookup plus `experiment_summary.json` field discovery and document the provider/Skill loading model for operators.
 - [x] 8.6 Rotate the local pilot signing key, run typecheck and full host/reference/container regressions, then repeat the authorized Feishu message and verify Frontdesk delegation, Archive Gateway audit calls, NAS-backed answer content, and successful Feishu delivery.
+
+## 9. Portable Archive Root Compatibility
+
+- [x] 9.1 Point the local deployment and operator documentation at `VisionCortexExperimentArchive` while preserving OS-mounted, request-driven, read-only access.
+- [x] 9.2 Support the observed `{English-Experiment-Name}-{YYYY-MM-DD}` layout and map its English category directories to the existing logical Chinese category contract.
+- [x] 9.3 Add focused regression coverage, redeploy the worker-private query Skill, and perform a read-only smoke query against the new mounted root.

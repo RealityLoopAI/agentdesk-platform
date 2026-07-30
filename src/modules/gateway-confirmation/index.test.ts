@@ -60,6 +60,10 @@ const { runMigrations } = await import('../../db/migrations/index.js');
 const { createAgentGroup } = await import('../../db/agent-groups.js');
 const { createSession } = await import('../../db/sessions.js');
 const { getPendingGatewayConfirmation } = await import('../../db/gateway-confirmations.js');
+const {
+  onGatewayConfirmationDelivered,
+  onGatewayConfirmationResolved,
+} = await import('./events.js');
 
 const HASH_A = `sha256:${'a'.repeat(64)}`;
 const HASH_B = `sha256:${'b'.repeat(64)}`;
@@ -158,6 +162,22 @@ function updateIntent(expiresAt = Date.now() + 60_000): Record<string, unknown> 
       expiresAt,
       auditId: 'preview-audit-1',
       highImpactFields: [],
+    },
+  };
+}
+
+function deleteIntent(expiresAt = Date.now() + 60_000): Record<string, unknown> {
+  return {
+    action: 'gateway_confirmation_request',
+    kind: 'delete',
+    preview: {
+      recordId: 'rec-delete-1',
+      fields: { 名称: '仅删除这一条', 状态: '测试数据' },
+      expectedRecordFingerprint: HASH_A,
+      bindingHash: HASH_B,
+      confirmationRequest: 'opaque-delete-preview',
+      expiresAt,
+      auditId: 'preview-delete-audit-1',
     },
   };
 }
@@ -362,6 +382,55 @@ describe('Host-mediated Gateway confirmation broker', () => {
     expect(getPendingGatewayConfirmation('confirm-1')).toBeUndefined();
   });
 
+  it('renders and issues an actor-bound Delete confirmation without exposing its bearer request', async () => {
+    const handler = harness.actions.get('gateway_confirmation_request') as DeliveryActionHandler;
+    const db = inbound();
+    await handler(deleteIntent(), session(), db, { messageOutId: 'confirm-1', inReplyTo: 'input-1' });
+    db.close();
+
+    expect(getPendingGatewayConfirmation('confirm-1')).toMatchObject({
+      kind: 'delete',
+      requester_user_id: 'feishu:ou_requester',
+      confirmation_request: 'opaque-delete-preview',
+      status: 'pending',
+    });
+    const card = String(harness.delivered.mock.calls[0]?.[4]);
+    expect(card).toContain('确认删除');
+    expect(card).toContain('仅删除这一条');
+    expect(card).not.toContain('opaque-delete-preview');
+    expect(card).not.toContain('secret-update-token');
+
+    await broker.resolveGatewayConfirmationDecision('confirm-1', 'ou_requester', 'approve');
+    expect(harness.issue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentGroupId: 'ag-1',
+        body: expect.objectContaining({
+          confirmationRequest: 'opaque-delete-preview',
+          display: {
+            recordId: 'rec-delete-1',
+            fields: { 名称: '仅删除这一条', 状态: '测试数据' },
+            expectedRecordFingerprint: HASH_A,
+            expiresAt: expect.any(Number),
+          },
+        }),
+      }),
+    );
+    const body = JSON.parse(harness.writeSessionMessage.mock.calls[0]?.[2].content as string);
+    expect(body).toMatchObject({ status: 'approved', confirmation: 'secret-update-token' });
+  });
+
+  it('rejects a container-forged Delete display before creating Pending state', async () => {
+    const handler = harness.actions.get('gateway_confirmation_request') as DeliveryActionHandler;
+    const forged = deleteIntent();
+    (forged.preview as Record<string, unknown>).fields = { 名称: Number.POSITIVE_INFINITY };
+    const db = inbound();
+    await expect(handler(forged, session(), db, { messageOutId: 'confirm-1', inReplyTo: 'input-1' })).rejects.toThrow(
+      'invalid Gateway confirmation intent',
+    );
+    db.close();
+    expect(getPendingGatewayConfirmation('confirm-1')).toBeUndefined();
+  });
+
   it('uses the same actor-bound Pending flow for create without issuing an update token', async () => {
     const handler = harness.actions.get('gateway_confirmation_request') as DeliveryActionHandler;
     const db = inbound();
@@ -386,5 +455,88 @@ describe('Host-mediated Gateway confirmation broker', () => {
     const body = JSON.parse(harness.writeSessionMessage.mock.calls[0]?.[2].content as string);
     expect(body).toMatchObject({ status: 'approved' });
     expect(body).not.toHaveProperty('confirmation');
+  });
+
+  it('emits a terminal observation after a Create confirmation resolves', async () => {
+    const resolved = vi.fn();
+    const unsubscribe = onGatewayConfirmationResolved(resolved);
+    try {
+      const handler = harness.actions.get('gateway_confirmation_request') as DeliveryActionHandler;
+      const db = inbound();
+      await handler(
+        {
+          action: 'gateway_confirmation_request',
+          kind: 'create',
+          preview: {
+            operation: 'feishu.bitable.record.create',
+            resource: 'pilot.records',
+            fields: { 待办事项: '测试新增' },
+            expiresAt: Date.now() + 60_000,
+          },
+        },
+        session(),
+        db,
+        { messageOutId: 'confirm-resolved', inReplyTo: 'input-1' },
+      );
+      db.close();
+      await broker.resolveGatewayConfirmationDecision(
+        'confirm-resolved',
+        'ou_requester',
+        'approve',
+      );
+      expect(resolved).toHaveBeenCalledWith({
+        confirmationId: 'confirm-resolved',
+        kind: 'create',
+        status: 'approved',
+        requesterUserId: 'feishu:ou_requester',
+        channelType: 'feishu',
+        platformId: 'feishu:p2p:ou_requester',
+        threadId: null,
+      });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('emits correlation-only metadata after a Create card is delivered', async () => {
+    const delivered = vi.fn();
+    const unsubscribe = onGatewayConfirmationDelivered(delivered);
+    try {
+      const handler = harness.actions.get('gateway_confirmation_request') as DeliveryActionHandler;
+      const db = inbound();
+      await handler(
+        {
+          action: 'gateway_confirmation_request',
+          kind: 'create',
+          preview: {
+            operation: 'feishu.bitable.record.create',
+            resource: 'pilot.records',
+            fields: { 待办事项: '测试新增' },
+            correlationId: 'a'.repeat(64),
+            expiresAt: Date.now() + 60_000,
+          },
+        },
+        session(),
+        db,
+        { messageOutId: 'confirm-correlated', inReplyTo: 'input-1' },
+      );
+      db.close();
+
+      expect(delivered).toHaveBeenCalledWith({
+        confirmationId: 'confirm-correlated',
+        kind: 'create',
+        requesterUserId: 'feishu:ou_requester',
+        channelType: 'feishu',
+        platformId: 'feishu:p2p:ou_requester',
+        threadId: null,
+        resource: 'pilot.records',
+        correlationId: 'a'.repeat(64),
+      });
+      const card = String(harness.delivered.mock.calls[0]?.[4]);
+      expect(card).not.toContain('correlationId');
+      expect(card).not.toContain('a'.repeat(64));
+    } finally {
+      unsubscribe();
+    }
   });
 });

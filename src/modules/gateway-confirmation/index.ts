@@ -29,6 +29,11 @@ import { registerResponseHandler, type ResponsePayload } from '../../response-re
 import { resolveSender, setMessageInterceptor } from '../../router.js';
 import { openInboundDb, writeSessionMessage } from '../../session-manager.js';
 import type { PendingGatewayConfirmation, Session } from '../../types.js';
+import {
+  emitGatewayConfirmationDelivered,
+  emitGatewayConfirmationResolved,
+  type GatewayConfirmationResolution,
+} from './events.js';
 
 const MAX_PENDING_MS = 15 * 60_000;
 const SHA256 = /^sha256:[a-f0-9]{64}$/;
@@ -56,10 +61,22 @@ interface CreatePreview {
   resource: string;
   fields: Record<string, unknown>;
   expiresAt: number;
+  correlationId?: string;
+}
+
+interface DeletePreview {
+  recordId: string;
+  fields: Record<string, unknown>;
+  expectedRecordFingerprint: string;
+  bindingHash: string;
+  confirmationRequest: string;
+  expiresAt: number;
+  auditId: string;
 }
 
 type ConfirmationIntent =
   | { action: 'gateway_confirmation_request'; kind: 'update'; title?: string; preview: UpdatePreview }
+  | { action: 'gateway_confirmation_request'; kind: 'delete'; title?: string; preview: DeletePreview }
   | { action: 'gateway_confirmation_request'; kind: 'create'; title?: string; preview: CreatePreview };
 
 interface IssuedConfirmation {
@@ -85,6 +102,14 @@ function boundedString(value: unknown, max: number): value is string {
 
 function validTitle(value: unknown): value is string | undefined {
   return value === undefined || boundedString(value, 120);
+}
+
+function isJsonValue(value: unknown, depth = 0): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (depth >= 10) return false;
+  if (Array.isArray(value)) return value.every((item) => isJsonValue(item, depth + 1));
+  return isObject(value) && Object.values(value).every((item) => isJsonValue(item, depth + 1));
 }
 
 function parseIntent(value: Record<string, unknown>): ConfirmationIntent | null {
@@ -162,11 +187,54 @@ function parseIntent(value: Record<string, unknown>): ConfirmationIntent | null 
       },
     };
   }
+  if (value.kind === 'delete') {
+    if (
+      !hasOnlyKeys(preview, [
+        'recordId',
+        'fields',
+        'expectedRecordFingerprint',
+        'bindingHash',
+        'confirmationRequest',
+        'expiresAt',
+        'auditId',
+      ]) ||
+      !boundedString(preview.recordId, 128) ||
+      !isObject(preview.fields) ||
+      Object.keys(preview.fields).length > 200 ||
+      Object.keys(preview.fields).some((field) => !boundedString(field, 256)) ||
+      !Object.values(preview.fields).every((field) => isJsonValue(field)) ||
+      typeof preview.expectedRecordFingerprint !== 'string' ||
+      !SHA256.test(preview.expectedRecordFingerprint) ||
+      typeof preview.bindingHash !== 'string' ||
+      !SHA256.test(preview.bindingHash) ||
+      !boundedString(preview.confirmationRequest, 16_384) ||
+      !Number.isSafeInteger(preview.expiresAt) ||
+      (preview.expiresAt as number) <= 0 ||
+      !boundedString(preview.auditId, 512)
+    ) {
+      return null;
+    }
+    return {
+      action: 'gateway_confirmation_request',
+      kind: 'delete',
+      ...(value.title ? { title: value.title } : {}),
+      preview: {
+        recordId: preview.recordId,
+        fields: preview.fields,
+        expectedRecordFingerprint: preview.expectedRecordFingerprint,
+        bindingHash: preview.bindingHash,
+        confirmationRequest: preview.confirmationRequest,
+        expiresAt: preview.expiresAt as number,
+        auditId: preview.auditId,
+      },
+    };
+  }
   if (
     value.kind !== 'create' ||
-    !hasOnlyKeys(preview, ['operation', 'resource', 'fields', 'expiresAt']) ||
+    !hasOnlyKeys(preview, ['operation', 'resource', 'fields', 'expiresAt', 'correlationId']) ||
     preview.operation !== 'feishu.bitable.record.create' ||
     !boundedString(preview.resource, 256) ||
+    (preview.correlationId !== undefined && !boundedString(preview.correlationId, 128)) ||
     !isObject(preview.fields) ||
     Object.keys(preview.fields).length > 200 ||
     Object.keys(preview.fields).some((field) => !boundedString(field, 256)) ||
@@ -184,6 +252,7 @@ function parseIntent(value: Record<string, unknown>): ConfirmationIntent | null 
       resource: preview.resource,
       fields: preview.fields,
       expiresAt: preview.expiresAt as number,
+      ...(preview.correlationId === undefined ? {} : { correlationId: preview.correlationId }),
     },
   };
 }
@@ -297,7 +366,7 @@ function displayValue(value: unknown): string {
   return bounded.replaceAll('\\', '\\\\').replaceAll('|', '\\|').replace(/\r?\n/g, '<br>');
 }
 
-function renderQuestion(kind: 'update' | 'create', display: Record<string, unknown>): string {
+function renderQuestion(kind: 'update' | 'create' | 'delete', display: Record<string, unknown>): string {
   if (kind === 'update') {
     const diff = display.diff as Array<{ field: string; before: unknown; after: unknown; highImpact: boolean }>;
     const rows = diff.map(
@@ -312,6 +381,18 @@ function renderQuestion(kind: 'update' | 'create', display: Record<string, unkno
       ...rows,
       '',
       '确认仅对本次显示的记录、字段和值有效；记录若已变化，提交会失败并要求重新预览。',
+    ].join('\n');
+  }
+  if (kind === 'delete') {
+    const fields = display.fields as Record<string, unknown>;
+    return [
+      `请确认是否删除记录 \`${String(display.recordId)}\`：`,
+      '',
+      '| 字段 | 当前值 |',
+      '|---|---|',
+      ...Object.entries(fields).map(([name, value]) => `| ${name} | ${displayValue(value)} |`),
+      '',
+      '删除仅对本次显示的记录及其当前版本有效；记录若已变化，提交会失败并要求重新预览。',
     ].join('\n');
   }
   const fields = display.fields as Record<string, unknown>;
@@ -334,6 +415,15 @@ function updateDisplay(preview: UpdatePreview): Record<string, unknown> {
   };
 }
 
+function deleteDisplay(preview: DeletePreview): Record<string, unknown> {
+  return {
+    recordId: preview.recordId,
+    fields: preview.fields,
+    expectedRecordFingerprint: preview.expectedRecordFingerprint,
+    expiresAt: preview.expiresAt,
+  };
+}
+
 function notifyWeb(row: PendingGatewayConfirmation, eventType: 'available' | 'resolved'): void {
   if (!row.conversation_lane_id) return;
   appendWebEvent({
@@ -341,6 +431,21 @@ function notifyWeb(row: PendingGatewayConfirmation, eventType: 'available' | 're
     laneId: row.conversation_lane_id,
     eventType: `conversation.confirmation.${eventType}`,
     resourceId: row.confirmation_id,
+  });
+}
+
+async function notifyResolved(
+  row: PendingGatewayConfirmation,
+  status: GatewayConfirmationResolution,
+): Promise<void> {
+  await emitGatewayConfirmationResolved({
+    confirmationId: row.confirmation_id,
+    kind: row.kind,
+    status,
+    requesterUserId: row.requester_user_id,
+    channelType: row.channel_type,
+    platformId: row.platform_id,
+    threadId: row.thread_id,
   });
 }
 
@@ -413,6 +518,7 @@ export async function resolveGatewayConfirmationDecision(
     if (claimed.reason === 'expired') {
       await sendWorkerResponse(existing, { status: 'expired', errorCode: 'confirmation_expired' });
       notifyWeb(existing, 'resolved');
+      await notifyResolved(existing, 'expired');
     }
     return { resolved: claimed.reason === 'expired', reason: claimed.reason };
   }
@@ -421,6 +527,7 @@ export async function resolveGatewayConfirmationDecision(
   if (decision === 'reject') {
     await sendWorkerResponse(row, { status: 'rejected', errorCode: 'user_rejected' });
     notifyWeb(row, 'resolved');
+    await notifyResolved(row, 'rejected');
     recordEnterpriseAudit({
       eventType: 'gateway_confirmation_rejected',
       agentGroupId: row.agent_group_id,
@@ -434,6 +541,7 @@ export async function resolveGatewayConfirmationDecision(
     await sendWorkerResponse(row, { status: 'approved' });
     finalizeGatewayConfirmation(row.confirmation_id, 'approved');
     notifyWeb(row, 'resolved');
+    await notifyResolved(row, 'approved');
     recordEnterpriseAudit({
       eventType: 'gateway_confirmation_approved',
       agentGroupId: row.agent_group_id,
@@ -450,6 +558,7 @@ export async function resolveGatewayConfirmationDecision(
     finalizeGatewayConfirmation(row.confirmation_id, 'failed', 'invalid_persisted_display');
     await sendWorkerResponse(row, { status: 'failed', errorCode: 'invalid_persisted_display' });
     notifyWeb(row, 'resolved');
+    await notifyResolved(row, 'failed');
     return { resolved: true, reason: 'invalid_persisted_display' };
   }
 
@@ -484,6 +593,7 @@ export async function resolveGatewayConfirmationDecision(
     finalizeGatewayConfirmation(row.confirmation_id, 'failed', errorCode);
     await sendWorkerResponse(row, { status: 'failed', errorCode });
     notifyWeb(row, 'resolved');
+    await notifyResolved(row, 'failed');
     recordEnterpriseAudit({
       eventType: 'gateway_confirmation_failed',
       agentGroupId: row.agent_group_id,
@@ -502,6 +612,7 @@ export async function resolveGatewayConfirmationDecision(
   });
   finalizeGatewayConfirmation(row.confirmation_id, 'approved');
   notifyWeb(row, 'resolved');
+  await notifyResolved(row, 'approved');
   recordEnterpriseAudit({
     eventType: 'gateway_confirmation_approved',
     agentGroupId: row.agent_group_id,
@@ -535,17 +646,26 @@ async function handleGatewayConfirmationIntent(
   const display =
     intent.kind === 'update'
       ? updateDisplay(intent.preview)
-      : {
-          operation: intent.preview.operation,
-          resource: intent.preview.resource,
-          fields: intent.preview.fields,
-          expiresAt: intent.preview.expiresAt,
-        };
+      : intent.kind === 'delete'
+        ? deleteDisplay(intent.preview)
+        : {
+            operation: intent.preview.operation,
+            resource: intent.preview.resource,
+            fields: intent.preview.fields,
+            expiresAt: intent.preview.expiresAt,
+          };
+  const approveLabel = intent.kind === 'update' ? '确认修改' : intent.kind === 'delete' ? '确认删除' : '确认新增';
   const options = normalizeOptions([
-    { label: intent.kind === 'update' ? '确认修改' : '确认新增', selectedLabel: '已确认', value: 'approve' },
+    { label: approveLabel, selectedLabel: '已确认', value: 'approve' },
     { label: '拒绝', selectedLabel: '已拒绝', value: 'reject' },
   ]);
-  const title = intent.title ?? (intent.kind === 'update' ? '确认修改多维表格记录' : '确认新增多维表格记录');
+  const title =
+    intent.title ??
+    (intent.kind === 'update'
+      ? '确认修改多维表格记录'
+      : intent.kind === 'delete'
+        ? '确认删除多维表格记录'
+        : '确认新增多维表格记录');
   const inserted = createPendingGatewayConfirmation({
     confirmationId: context.messageOutId,
     sessionId: session.id,
@@ -557,7 +677,7 @@ async function handleGatewayConfirmationIntent(
     channelType: origin.channelType,
     platformId: origin.platformId,
     threadId: origin.threadId,
-    confirmationRequest: intent.kind === 'update' ? intent.preview.confirmationRequest : null,
+    confirmationRequest: intent.kind === 'create' ? null : intent.preview.confirmationRequest,
     displayJson: JSON.stringify(display),
     title,
     optionsJson: JSON.stringify(options),
@@ -596,6 +716,22 @@ async function handleGatewayConfirmationIntent(
         expectedUserId: approverExpectedUserId(row.requester_user_id),
       }),
     );
+    await emitGatewayConfirmationDelivered({
+      confirmationId: row.confirmation_id,
+      kind: row.kind,
+      requesterUserId: row.requester_user_id,
+      channelType: origin.channelType,
+      platformId: origin.platformId,
+      threadId: origin.threadId,
+      ...(intent.kind === 'create'
+        ? {
+            resource: intent.preview.resource,
+            ...(intent.preview.correlationId === undefined
+              ? {}
+              : { correlationId: intent.preview.correlationId }),
+          }
+        : {}),
+    });
   }
 }
 
@@ -616,8 +752,8 @@ function readText(event: InboundEvent): string | undefined {
   }
 }
 
-const APPROVE_TEXT = new Set(['确认', '确认修改', '确认新增', 'approve', 'confirm']);
-const REJECT_TEXT = new Set(['拒绝', '取消修改', '取消新增', 'reject']);
+const APPROVE_TEXT = new Set(['确认', '确认修改', '确认新增', '确认删除', 'approve', 'confirm']);
+const REJECT_TEXT = new Set(['拒绝', '取消修改', '取消新增', '取消删除', 'reject']);
 
 setMessageInterceptor(async (event): Promise<boolean> => {
   const text = readText(event);
@@ -641,6 +777,7 @@ export async function sweepExpiredGatewayConfirmations(now = new Date()): Promis
   for (const row of expired) {
     await sendWorkerResponse(row, { status: 'expired', errorCode: 'confirmation_expired' });
     notifyWeb(row, 'resolved');
+    await notifyResolved(row, 'expired');
   }
   return expired.length;
 }

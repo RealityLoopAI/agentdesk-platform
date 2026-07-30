@@ -559,6 +559,90 @@ describe('⑤ deliver branches route to the right Feishu API path + body shape',
     expect(JSON.parse(body.content as string)).toEqual({ text: 'plain hi' });
   });
 
+  it('Markdown text → POST /im/v1/messages as an interactive Markdown card', async () => {
+    const { calls } = installCapturingFetch();
+    const adapter = await setupAdapter();
+    const markdown = '# Experiment report\n\n- **Status:** ready';
+    await adapter.deliver('feishu:p2p:ou_x', null, {
+      kind: 'chat',
+      content: { text: markdown },
+    });
+
+    const send = calls.find((c) => c.url.includes('/im/v1/messages'));
+    expect(send).toBeDefined();
+    const body = send!.body as Record<string, unknown>;
+    expect(body.msg_type).toBe('interactive');
+    const card = JSON.parse(body.content as string) as {
+      schema: string;
+      body: { elements: unknown[] };
+    };
+    expect(card.schema).toBe('2.0');
+    expect(card.body.elements).toContainEqual({ tag: 'markdown', content: markdown });
+  });
+
+  it('an explicit markdown field uses an interactive card without syntax markers', async () => {
+    const { calls } = installCapturingFetch();
+    const adapter = await setupAdapter();
+    await adapter.deliver('feishu:p2p:ou_x', null, {
+      kind: 'chat',
+      content: { markdown: 'render this' },
+    });
+
+    const send = calls.find((c) => c.url.includes('/im/v1/messages'));
+    expect(send).toBeDefined();
+    const body = send!.body as Record<string, unknown>;
+    expect(body.msg_type).toBe('interactive');
+    const card = JSON.parse(body.content as string) as {
+      body: { elements: unknown[] };
+    };
+    expect(card.body.elements).toContainEqual({ tag: 'markdown', content: 'render this' });
+  });
+
+  it('falls back to msg_type=text when Feishu rejects a Markdown card', async () => {
+    const sends: Array<Record<string, unknown>> = [];
+    const sendUrls: string[] = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/auth/v3/tenant_access_token/internal')) {
+        return new Response(JSON.stringify({ code: 0, tenant_access_token: 'tok', expire: 7200 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      sends.push(body);
+      sendUrls.push(u);
+      const response =
+        sends.length === 1 ? { code: 230099, msg: 'invalid card' } : { code: 0, data: { message_id: 'om_fallback' } };
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const adapter = await setupAdapter();
+    const markdown = '**Report:** ready';
+    await expect(
+      adapter.deliver('feishu:p2p:ou_x', null, {
+        kind: 'chat',
+        content: { text: markdown },
+        source: {
+          messageId: 'xcd-markdown-fallback',
+          sessionId: 'session-1',
+          originId: 'xco-origin',
+        },
+      }),
+    ).resolves.toBe('om_fallback');
+
+    expect(sends.map((body) => body.msg_type)).toEqual(['interactive', 'text']);
+    expect(JSON.parse(sends[1]!.content as string)).toEqual({ text: markdown });
+    const requestUuids = sendUrls.map((url) => new URL(url).searchParams.get('uuid'));
+    expect(requestUuids[0]).toBeTruthy();
+    expect(requestUuids[1]).toBeTruthy();
+    expect(requestUuids[0]).not.toBe(requestUuids[1]);
+  });
+
   it('cross-channel mirror retries reuse a stable Feishu uuid no longer than 50 characters', async () => {
     const { calls } = installCapturingFetch();
     const adapter = await setupAdapter();

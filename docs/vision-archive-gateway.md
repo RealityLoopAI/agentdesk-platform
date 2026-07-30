@@ -1,7 +1,7 @@
 # Vision Archive Gateway operator guide
 
 The optional Vision Archive adapter reads an operator-mounted view of
-`smb://192.168.66.149/video_database/VisionCortex实验档案库` through the existing
+`smb://192.168.66.149/video_database/VisionCortexExperimentArchive` through the existing
 Backend Gateway contract. Agent containers receive neither the mount nor SMB
 credentials. VisionCortex code, APIs, callbacks, and schemas are not required.
 
@@ -82,7 +82,10 @@ Two producer layouts are supported:
 - legacy: `exp_YYYYMMDD_HHMMSS_id`, whose bounded
   `experiment_manifest.json` supplies `experiment_name`; logical categories map
   to `analysis/keyframes`, `analysis/segments`, and `analysis` for report/JSON
-  files.
+  files;
+- portable: `{English-Experiment-Name}-{YYYY-MM-DD}`, whose logical categories
+  map to `Key-Materials/Key-Frames`, `Key-Materials/Key-Clips`,
+  `Professional-PDFs`, and `JSON-Config-Files`.
 
 The legacy manifest is opened only as part of an authorized, user-triggered
 search. This compatibility does not add startup scanning, monitoring, or a

@@ -11,7 +11,8 @@ import { getOutboundDb } from '../db/connection.js';
 import { findGatewayConfirmationResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { bitableUpdatePreviewSchema } from './feishu-bitable-contract.js';
+import { bitableDeletePreviewDisplaySchema, bitableUpdatePreviewDisplaySchema } from './feishu-bitable-contract.js';
+import { resolveGatewayConfirmationPreview } from './gateway-confirmation-preview-cache.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -22,6 +23,7 @@ const createPreviewSchema = z
     operation: z.literal('feishu.bitable.record.create'),
     resource: z.string().min(1).max(256),
     fields: z.record(z.string().min(1).max(256), z.unknown()),
+    correlationId: z.string().min(1).max(128).optional(),
     expiresAt: z.number().int().positive().optional(),
   })
   .strict();
@@ -31,7 +33,7 @@ const requestSchema = z.discriminatedUnion('kind', [
     .object({
       kind: z.literal('update'),
       title: z.string().min(1).max(120).optional(),
-      preview: bitableUpdatePreviewSchema,
+      preview: bitableUpdatePreviewDisplaySchema,
     })
     .strict(),
   z
@@ -39,6 +41,13 @@ const requestSchema = z.discriminatedUnion('kind', [
       kind: z.literal('create'),
       title: z.string().min(1).max(120).optional(),
       preview: createPreviewSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('delete'),
+      title: z.string().min(1).max(120).optional(),
+      preview: bitableDeletePreviewDisplaySchema,
     })
     .strict(),
 ]);
@@ -74,32 +83,27 @@ export const gatewayRequestConfirmation: McpToolDefinition = {
   tool: {
     name: 'gateway_request_confirmation',
     description:
-      'Ask the original user to confirm one Feishu Bitable record create or update. ' +
-      'For update, pass the exact dryRun preview returned by the Gateway; never recalculate or edit its diff. ' +
+      'Ask the original user to confirm one Feishu Bitable record create, update, or delete. ' +
+      'For update/delete, pass the exact model-visible dryRun preview returned by the Gateway; never recalculate or edit it. ' +
       'This call blocks until the Host verifies the actor and returns approve/reject/expiry. ' +
-      'Only an approved update response contains the short-lived confirmation token required by gateway_execute.',
+      'Only an approved update/delete response contains the short-lived confirmation token required by gateway_execute.',
     inputSchema: {
       type: 'object' as const,
-      oneOf: [
-        {
-          properties: {
-            kind: { const: 'update' },
-            title: { type: 'string', maxLength: 120 },
-            preview: { type: 'object' },
-          },
-          required: ['kind', 'preview'],
-          additionalProperties: false,
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['update', 'create', 'delete'],
         },
-        {
-          properties: {
-            kind: { const: 'create' },
-            title: { type: 'string', maxLength: 120 },
-            preview: { type: 'object' },
-          },
-          required: ['kind', 'preview'],
-          additionalProperties: false,
+        title: { type: 'string', maxLength: 120 },
+        preview: {
+          type: 'object',
+          description:
+            'For create, pass operation/resource/fields and optional correlationId. For update/delete, pass the exact Gateway dryRun preview.',
+          additionalProperties: true,
         },
-      ],
+      },
+      required: ['kind', 'preview'],
+      additionalProperties: false,
     },
   },
   async handler(args) {
@@ -111,12 +115,20 @@ export const gatewayRequestConfirmation: McpToolDefinition = {
 
     const confirmationId = generateId();
     const route = getSessionRouting();
-    const expiresAt =
-      parsed.data.kind === 'create'
-        ? (parsed.data.preview.expiresAt ?? Date.now() + MAX_CONFIRMATION_WAIT_MS)
-        : parsed.data.preview.expiresAt;
+    let expiresAt: number;
+    let preview: Record<string, unknown>;
+    if (parsed.data.kind === 'create') {
+      expiresAt = parsed.data.preview.expiresAt ?? Date.now() + MAX_CONFIRMATION_WAIT_MS;
+      preview = { ...parsed.data.preview, expiresAt };
+    } else {
+      const trustedPreview = resolveGatewayConfirmationPreview(parsed.data.kind, parsed.data.preview);
+      if (!trustedPreview) {
+        return err('Gateway preview is missing, expired, or changed; rerun gateway_execute with dryRun=true');
+      }
+      expiresAt = trustedPreview.expiresAt;
+      preview = { ...trustedPreview };
+    }
     if (expiresAt <= Date.now()) return err('confirmation preview has expired');
-    const preview = { ...parsed.data.preview, expiresAt };
 
     writeMessageOut({
       id: confirmationId,
@@ -161,7 +173,7 @@ export const gatewayRequestConfirmation: McpToolDefinition = {
             status: 'approved',
             confirmationId,
             confirmation:
-              parsed.data.kind === 'update' && typeof body.confirmation === 'string' ? body.confirmation : undefined,
+              parsed.data.kind !== 'create' && typeof body.confirmation === 'string' ? body.confirmation : undefined,
             expiresAt: body.expiresAt,
             bindingHash: body.bindingHash,
             auditId: body.auditId,

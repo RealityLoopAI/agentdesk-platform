@@ -67,14 +67,18 @@ describe('Vision Archive pilot topology', () => {
     for (const required of [
       'Do not ask for a storage location',
       'resource: "vision"',
-      'experiment_summary.json',
       'vision.archive.experiment.search',
       'vision.archive.file.list',
       'vision.archive.json.read',
       'does not read or attach PDF bytes',
+      'current user request',
+      'successful Gateway tool result',
     ]) {
       expect(instructions).toContain(required);
     }
+    expect(instructions).not.toMatch(
+      /experiment_id|experiment_name|processed_at|total_keyframes|total_detections|duration_seconds|cameras_summary/,
+    );
     expect(fs.existsSync(path.join(ROOT, 'container/skills/vision-archive-query'))).toBe(false);
   });
 

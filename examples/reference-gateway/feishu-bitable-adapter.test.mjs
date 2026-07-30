@@ -119,6 +119,15 @@ function confirmationDisplay(preview) {
   };
 }
 
+function deleteConfirmationDisplay(preview) {
+  return {
+    recordId: preview.recordId,
+    fields: preview.fields,
+    expectedRecordFingerprint: preview.expectedRecordFingerprint,
+    expiresAt: preview.expiresAt,
+  };
+}
+
 async function previewAndIssue(adapter, input, overrides = {}) {
   const previewResponse = await adapter.execute(
     request('feishu.bitable.record.update', input, {
@@ -134,6 +143,28 @@ async function previewAndIssue(adapter, input, overrides = {}) {
     requesterSource: overrides.requesterSource ?? 'session',
     confirmationRequest: previewResponse.preview.confirmationRequest,
     display: confirmationDisplay(previewResponse.preview),
+    context: {},
+  });
+  assert.equal(issued.ok, true);
+  assert.equal(issued.bindingHash, previewResponse.preview.bindingHash);
+  return { previewResponse, issued };
+}
+
+async function previewDeleteAndIssue(adapter, input, overrides = {}) {
+  const previewResponse = await adapter.execute(
+    request('feishu.bitable.record.delete', input, {
+      dryRun: true,
+      idempotencyKey: null,
+      ...overrides,
+    }),
+  );
+  assert.equal(previewResponse.ok, true);
+  const issued = await adapter.issueConfirmationRequest({
+    requester: overrides.requester ?? { userId: ALICE },
+    agent: overrides.agent ?? { agentGroupId: 'bitable-worker' },
+    requesterSource: overrides.requesterSource ?? 'session',
+    confirmationRequest: previewResponse.preview.confirmationRequest,
+    display: deleteConfirmationDisplay(previewResponse.preview),
     context: {},
   });
   assert.equal(issued.ok, true);
@@ -288,7 +319,7 @@ test('Bitable feature flags are opt-in and fail closed on invalid or missing con
   );
 });
 
-test('query-create-update pilot exposes only the intended operation subset to every trusted canonical user', async () => {
+test('single-record CRUD pilot exposes only the intended operation subset to every trusted canonical user', async () => {
   let createCalls = 0;
   const { adapter, calls } = makeHarness(
     ({ url, body }) => {
@@ -318,6 +349,7 @@ test('query-create-update pilot exposes only the intended operation subset to ev
             'feishu.bitable.record.get',
             'feishu.bitable.record.create',
             'feishu.bitable.record.update',
+            'feishu.bitable.record.delete',
           ],
         },
       },
@@ -332,6 +364,7 @@ test('query-create-update pilot exposes only the intended operation subset to ev
       'feishu.bitable.record.get',
       'feishu.bitable.record.create',
       'feishu.bitable.record.update',
+      'feishu.bitable.record.delete',
     ],
   );
 
@@ -363,7 +396,6 @@ test('query-create-update pilot exposes only the intended operation subset to ev
   assert.equal(unknownField.body.code, 'VALIDATION_FAILED');
 
   for (const operation of [
-    'feishu.bitable.record.delete',
     'feishu.bitable.record.batch_create',
     'feishu.bitable.record.batch_update',
     'feishu.bitable.record.batch_delete',
@@ -681,6 +713,7 @@ test('structured cursors bind query, order, resource view and field projection',
 test('pilot query-create-update lifecycle is bounded, idempotent, conflict-safe and Get-verified', async () => {
   let createCalls = 0;
   let updateCalls = 0;
+  let deleteCalls = 0;
   let searchCalls = 0;
   let revision = 1;
   const records = new Map([
@@ -761,6 +794,11 @@ test('pilot query-create-update lifecycle is bounded, idempotent, conflict-safe 
         records.set(match[1], updated);
         return json({ code: 0, data: { record: updated } });
       }
+      if (match && init.method === 'DELETE') {
+        deleteCalls += 1;
+        records.delete(match[1]);
+        return json({ code: 0, data: {} });
+      }
       throw new Error(`unexpected provider request ${init.method ?? 'GET'} ${url.pathname}`);
     },
     {
@@ -778,6 +816,7 @@ test('pilot query-create-update lifecycle is bounded, idempotent, conflict-safe 
             'feishu.bitable.record.get',
             'feishu.bitable.record.create',
             'feishu.bitable.record.update',
+            'feishu.bitable.record.delete',
           ],
         },
       },
@@ -888,8 +927,42 @@ test('pilot query-create-update lifecycle is bounded, idempotent, conflict-safe 
   assert.ok(updated.result.verification.getAuditId);
   assert.equal(updateReplay.replayed, true);
   assert.equal(updateCalls, 1);
+
+  const { previewResponse: deletePreview, issued: deleteIssued } = await previewDeleteAndIssue(adapter, {
+    resource: 'pilot.records',
+    recordId: 'rec-created',
+  });
+  const deleteRequest = request(
+    'feishu.bitable.record.delete',
+    {
+      resource: 'pilot.records',
+      recordId: 'rec-created',
+      expectedRecordFingerprint: deletePreview.preview.expectedRecordFingerprint,
+      confirmation: deleteIssued.confirmation,
+    },
+    { idempotencyKey: 'lifecycle-delete' },
+  );
+  const deleted = await adapter.execute(deleteRequest);
+  const deleteReplay = await adapter.execute({
+    ...deleteRequest,
+    input: { ...deleteRequest.input, confirmation: 'replay-does-not-reuse-token' },
+  });
+  assert.equal(deleted.result.deleted, true);
+  assert.equal(deleted.result.verification.verified, true);
+  assert.ok(deleted.result.verification.getAuditId);
+  assert.equal(deleteReplay.replayed, true);
+  assert.equal(deleteCalls, 1);
+  const deletedGet = await adapter.execute(
+    request(
+      'feishu.bitable.record.get',
+      { resource: 'pilot.records', recordId: 'rec-created' },
+      { idempotencyKey: null },
+    ),
+  );
+  assert.equal(deletedGet.body.code, 'NOT_FOUND');
   assert.ok(audits.some((event) => event.phase === 'execute' && event.idempotencyKey === 'lifecycle-create'));
   assert.ok(audits.some((event) => event.phase === 'execute' && event.idempotencyKey === 'lifecycle-update'));
+  assert.ok(audits.some((event) => event.phase === 'execute' && event.idempotencyKey === 'lifecycle-delete'));
 });
 
 test('record search rejects provider pages larger than the requested bound', async () => {
@@ -1038,15 +1111,10 @@ test('idempotency replay returns the first committed record and rejects key rebi
   assert.equal(createCalls, 1);
 });
 
-test('delete keeps legacy confirmation while every Update uses Preview and Host-mediated confirmation', async () => {
-  let deleteCalls = 0;
+test('every Update uses Preview and Host-mediated confirmation', async () => {
   let updateCalls = 0;
   let currentFields = { Name: 'Initial', Status: 'Open' };
   const { adapter } = makeHarness(({ url, init, body }) => {
-    if (url.pathname.endsWith('/records/rec-1') && init.method === 'DELETE') {
-      deleteCalls += 1;
-      return json({ code: 0, data: {} });
-    }
     if (url.pathname.endsWith('/records/rec-1') && (init.method ?? 'GET') === 'GET') {
       return json({ code: 0, data: { record: { record_id: 'rec-1', fields: currentFields } } });
     }
@@ -1057,41 +1125,6 @@ test('delete keeps legacy confirmation while every Update uses Preview and Host-
     }
     throw new Error(`unexpected path ${url.pathname}`);
   });
-  const without = await adapter.execute(
-    request(
-      'feishu.bitable.record.delete',
-      { resource: 'sales.pipeline', recordId: 'rec-1' },
-      { idempotencyKey: 'delete-key' },
-    ),
-  );
-  assert.equal(without.body.code, 'CONFIRMATION_REQUIRED');
-  assert.equal(deleteCalls, 0);
-
-  const confirmation = adapter.issueConfirmation({
-    requesterUserId: ALICE,
-    operation: 'feishu.bitable.record.delete',
-    resource: 'sales.pipeline',
-    recordIds: ['rec-1'],
-  });
-  const committed = await adapter.execute(
-    request(
-      'feishu.bitable.record.delete',
-      { resource: 'sales.pipeline', recordId: 'rec-1', confirmation },
-      { idempotencyKey: 'delete-key' },
-    ),
-  );
-  assert.equal(committed.result.deleted, true);
-  assert.equal(deleteCalls, 1);
-
-  const wrongRecord = await adapter.execute(
-    request(
-      'feishu.bitable.record.delete',
-      { resource: 'sales.pipeline', recordId: 'rec-2', confirmation },
-      { idempotencyKey: 'delete-other-key' },
-    ),
-  );
-  assert.equal(wrongRecord.body.code, 'CONFIRMATION_REQUIRED');
-  assert.equal(deleteCalls, 1);
 
   const highImpactWithout = await adapter.execute(
     request(
@@ -1416,6 +1449,316 @@ test('Update confirmation binds actor, group, record, patch, fingerprint, expiry
   assert.match(successAudit.confirmationBindingHash, /^sha256:[a-f0-9]{64}$/);
   assert.match(successAudit.expectedRecordFingerprint, /^sha256:[a-f0-9]{64}$/);
   assert.match(successAudit.currentRecordFingerprint, /^sha256:[a-f0-9]{64}$/);
+});
+
+test('Delete confirmation binds actor, group, record, fingerprint, expiry, nonce and idempotency', async () => {
+  let clock = 1_800_000_000_000;
+  let deleteCalls = 0;
+  let deleted = false;
+  let current = {
+    record_id: 'rec-secure',
+    fields: { Name: 'Delete only this test record', Status: 'Open', Done: false },
+    revision: '1',
+    last_modified_time: clock,
+  };
+  const { adapter, audits } = makeHarness(
+    ({ url, init }) => {
+      if (url.pathname.endsWith('/records/rec-secure') && (init.method ?? 'GET') === 'GET') {
+        return deleted
+          ? json({ code: 1254043, msg: 'RecordNotFound' }, 404)
+          : json({ code: 0, data: { record: current } });
+      }
+      if (url.pathname.endsWith('/records/rec-other') && (init.method ?? 'GET') === 'GET') {
+        return json({
+          code: 0,
+          data: {
+            record: {
+              record_id: 'rec-other',
+              fields: { Name: 'Other', Status: 'Open', Done: false },
+              revision: '1',
+              last_modified_time: clock,
+            },
+          },
+        });
+      }
+      if (url.pathname.endsWith('/records/rec-secure') && init.method === 'DELETE') {
+        deleteCalls += 1;
+        deleted = true;
+        return json({ code: 0, data: {} });
+      }
+      throw new Error(`unexpected path ${init.method ?? 'GET'} ${url.pathname}`);
+    },
+    {
+      now: () => clock,
+      confirmationTtlMs: 1_000,
+      resources: {
+        'sales.pipeline': {
+          appToken: APP_TOKEN,
+          tableId: TABLE_ID,
+          readers: ['*'],
+          writers: ['*'],
+          requiredFields: ['Name'],
+          highImpactFields: ['Status'],
+          allowedOperations: [
+            'feishu.bitable.field.list',
+            'feishu.bitable.record.list',
+            'feishu.bitable.record.get',
+            'feishu.bitable.record.create',
+            'feishu.bitable.record.update',
+            'feishu.bitable.record.delete',
+          ],
+        },
+      },
+    },
+  );
+
+  const unconfirmed = await adapter.execute(
+    request(
+      'feishu.bitable.record.delete',
+      { resource: 'sales.pipeline', recordId: 'rec-secure' },
+      { idempotencyKey: 'delete-unconfirmed' },
+    ),
+  );
+  assert.equal(unconfirmed.body.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(deleteCalls, 0);
+
+  const preview = await adapter.execute(
+    request(
+      'feishu.bitable.record.delete',
+      { resource: 'sales.pipeline', recordId: 'rec-secure' },
+      { dryRun: true, idempotencyKey: null },
+    ),
+  );
+  assert.equal(preview.ok, true);
+  assert.deepEqual(preview.preview.fields, current.fields);
+  assert.match(preview.preview.expectedRecordFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.match(preview.preview.bindingHash, /^sha256:[a-f0-9]{64}$/);
+  assert.doesNotMatch(preview.preview.confirmationRequest, /Delete only this test record|Open/);
+
+  const wrongIssuer = await adapter.issueConfirmationRequest({
+    requester: { userId: BOB },
+    agent: { agentGroupId: 'bitable-worker' },
+    requesterSource: 'session',
+    confirmationRequest: preview.preview.confirmationRequest,
+    display: deleteConfirmationDisplay(preview.preview),
+    context: {},
+  });
+  assert.equal(wrongIssuer.body.code, 'BACKEND_UNAUTHORIZED');
+  const wrongGroupIssuer = await adapter.issueConfirmationRequest({
+    requester: { userId: ALICE },
+    agent: { agentGroupId: 'other-worker' },
+    requesterSource: 'session',
+    confirmationRequest: preview.preview.confirmationRequest,
+    display: deleteConfirmationDisplay(preview.preview),
+    context: {},
+  });
+  assert.equal(wrongGroupIssuer.body.code, 'BACKEND_UNAUTHORIZED');
+  const forgedDisplay = await adapter.issueConfirmationRequest({
+    requester: { userId: ALICE },
+    agent: { agentGroupId: 'bitable-worker' },
+    requesterSource: 'session',
+    confirmationRequest: preview.preview.confirmationRequest,
+    display: { ...deleteConfirmationDisplay(preview.preview), fields: { Name: 'Different record' } },
+    context: {},
+  });
+  assert.equal(forgedDisplay.body.code, 'CONFIRMATION_REQUIRED');
+
+  const issued = await adapter.issueConfirmationRequest({
+    requester: { userId: ALICE },
+    agent: { agentGroupId: 'bitable-worker' },
+    requesterSource: 'session',
+    confirmationRequest: preview.preview.confirmationRequest,
+    display: deleteConfirmationDisplay(preview.preview),
+    context: {},
+  });
+  assert.equal(issued.ok, true);
+
+  const baseConfirmedInput = {
+    resource: 'sales.pipeline',
+    recordId: 'rec-secure',
+    expectedRecordFingerprint: preview.preview.expectedRecordFingerprint,
+    confirmation: issued.confirmation,
+  };
+  const legacyConfirmation = adapter.issueConfirmation({
+    requesterUserId: ALICE,
+    operation: 'feishu.bitable.record.delete',
+    resource: 'sales.pipeline',
+    recordIds: ['rec-secure'],
+  });
+  const legacy = await adapter.execute(
+    request(
+      'feishu.bitable.record.delete',
+      { ...baseConfirmedInput, confirmation: legacyConfirmation },
+      { idempotencyKey: 'delete-legacy-token' },
+    ),
+  );
+  assert.equal(legacy.body.code, 'CONFIRMATION_REQUIRED');
+  const wrongActor = await adapter.execute(
+    request('feishu.bitable.record.delete', baseConfirmedInput, {
+      requester: { userId: BOB },
+      idempotencyKey: 'delete-wrong-actor',
+    }),
+  );
+  assert.equal(wrongActor.body.code, 'CONFIRMATION_REQUIRED');
+  const wrongGroup = await adapter.execute(
+    request('feishu.bitable.record.delete', baseConfirmedInput, {
+      agent: { agentGroupId: 'other-worker' },
+      idempotencyKey: 'delete-wrong-group',
+    }),
+  );
+  assert.equal(wrongGroup.body.code, 'CONFIRMATION_REQUIRED');
+  const wrongRecord = await adapter.execute(
+    request(
+      'feishu.bitable.record.delete',
+      { ...baseConfirmedInput, recordId: 'rec-other' },
+      { idempotencyKey: 'delete-wrong-record' },
+    ),
+  );
+  assert.equal(wrongRecord.body.code, 'CONFIRMATION_REQUIRED');
+  const wrongFingerprint = await adapter.execute(
+    request(
+      'feishu.bitable.record.delete',
+      { ...baseConfirmedInput, expectedRecordFingerprint: `sha256:${'f'.repeat(64)}` },
+      { idempotencyKey: 'delete-wrong-fingerprint' },
+    ),
+  );
+  assert.equal(wrongFingerprint.body.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(deleteCalls, 0);
+
+  clock += 1_001;
+  const expired = await adapter.execute(
+    request('feishu.bitable.record.delete', baseConfirmedInput, {
+      idempotencyKey: 'delete-expired',
+    }),
+  );
+  assert.equal(expired.body.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(deleteCalls, 0);
+
+  const { previewResponse: conflictPreview, issued: conflictIssued } = await previewDeleteAndIssue(adapter, {
+    resource: 'sales.pipeline',
+    recordId: 'rec-secure',
+  });
+  current = {
+    ...current,
+    fields: { ...current.fields, Name: 'External edit' },
+    revision: '2',
+    last_modified_time: clock + 1,
+  };
+  const conflicted = await adapter.execute(
+    request(
+      'feishu.bitable.record.delete',
+      {
+        resource: 'sales.pipeline',
+        recordId: 'rec-secure',
+        expectedRecordFingerprint: conflictPreview.preview.expectedRecordFingerprint,
+        confirmation: conflictIssued.confirmation,
+      },
+      { idempotencyKey: 'delete-fingerprint-conflict' },
+    ),
+  );
+  assert.equal(conflicted.body.code, 'CONFLICT');
+  assert.equal(deleteCalls, 0);
+
+  const { previewResponse: freshPreview, issued: freshIssued } = await previewDeleteAndIssue(adapter, {
+    resource: 'sales.pipeline',
+    recordId: 'rec-secure',
+  });
+  const committedRequest = request(
+    'feishu.bitable.record.delete',
+    {
+      resource: 'sales.pipeline',
+      recordId: 'rec-secure',
+      expectedRecordFingerprint: freshPreview.preview.expectedRecordFingerprint,
+      confirmation: freshIssued.confirmation,
+    },
+    { idempotencyKey: 'delete-stable-key' },
+  );
+  const committed = await adapter.execute(committedRequest);
+  assert.equal(committed.ok, true);
+  assert.equal(committed.result.deleted, true);
+  assert.equal(committed.result.verification.verified, true);
+  assert.equal(committed.result.verification.deleteAuditId, committed.auditId);
+  assert.ok(committed.result.verification.getAuditId);
+  assert.equal(deleteCalls, 1);
+
+  const replay = await adapter.execute({
+    ...committedRequest,
+    input: { ...committedRequest.input, confirmation: 'malformed-but-ignored-on-replay' },
+  });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.result.verification.deleteAuditId, committed.auditId);
+  assert.equal(deleteCalls, 1);
+
+  const rebound = await adapter.execute({
+    ...committedRequest,
+    input: {
+      ...committedRequest.input,
+      recordId: 'rec-other',
+      confirmation: 'malformed-but-conflict-precedes-confirmation',
+    },
+  });
+  assert.equal(rebound.body.code, 'CONFLICT');
+  assert.equal(deleteCalls, 1);
+
+  const reusedByOtherKey = await adapter.execute({
+    ...committedRequest,
+    idempotencyKey: 'delete-other-key',
+  });
+  assert.equal(reusedByOtherKey.body.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(deleteCalls, 1);
+
+  assert.doesNotMatch(JSON.stringify(audits), /Delete only this test record|External edit|Different record/);
+  const successAudit = audits.find(
+    (event) => event.phase === 'execute' && event.idempotencyKey === 'delete-stable-key',
+  );
+  assert.equal(successAudit.fingerprintResult, 'match');
+  assert.match(successAudit.confirmationBindingHash, /^sha256:[a-f0-9]{64}$/);
+  assert.match(successAudit.expectedRecordFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.match(successAudit.currentRecordFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.ok(
+    audits.some(
+      (event) =>
+        event.phase === 'delete_verify_get' &&
+        event.parentAuditId === committed.auditId &&
+        event.outcome === 'not_found',
+    ),
+  );
+});
+
+test('Delete fails closed when provider verification still finds the record', async () => {
+  let deleteCalls = 0;
+  const current = { record_id: 'rec-sticky', fields: { Name: 'Sticky record' }, revision: '1' };
+  const { adapter, audits } = makeHarness(({ url, init }) => {
+    if (url.pathname.endsWith('/records/rec-sticky') && (init.method ?? 'GET') === 'GET') {
+      return json({ code: 0, data: { record: current } });
+    }
+    if (url.pathname.endsWith('/records/rec-sticky') && init.method === 'DELETE') {
+      deleteCalls += 1;
+      return json({ code: 0, data: {} });
+    }
+    throw new Error(`unexpected path ${init.method ?? 'GET'} ${url.pathname}`);
+  });
+  const { previewResponse, issued } = await previewDeleteAndIssue(adapter, {
+    resource: 'sales.pipeline',
+    recordId: 'rec-sticky',
+  });
+  const result = await adapter.execute(
+    request(
+      'feishu.bitable.record.delete',
+      {
+        resource: 'sales.pipeline',
+        recordId: 'rec-sticky',
+        expectedRecordFingerprint: previewResponse.preview.expectedRecordFingerprint,
+        confirmation: issued.confirmation,
+      },
+      { idempotencyKey: 'delete-verification-failure' },
+    ),
+  );
+  assert.equal(result.status, 502);
+  assert.equal(result.body.code, 'BACKEND_UNAVAILABLE');
+  assert.equal(result.body.retryable, true);
+  assert.equal(deleteCalls, 1);
+  assert.ok(audits.some((event) => event.phase === 'delete_verify_get' && event.outcome === 'present'));
 });
 
 test('rate limits and timeouts map to bounded retryable closed errors', async () => {

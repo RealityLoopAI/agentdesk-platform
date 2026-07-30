@@ -364,7 +364,7 @@ CREATE TABLE pending_gateway_confirmations (
   confirmation_id      TEXT PRIMARY KEY,
   session_id           TEXT NOT NULL REFERENCES sessions(id),
   message_out_id       TEXT NOT NULL UNIQUE,
-  kind                 TEXT NOT NULL CHECK(kind IN ('update', 'create')),
+  kind                 TEXT NOT NULL CHECK(kind IN ('update', 'create', 'delete')),
   requester_user_id    TEXT NOT NULL REFERENCES users(id),
   agent_group_id       TEXT NOT NULL REFERENCES agent_groups(id),
   conversation_lane_id TEXT REFERENCES conversation_lanes(id),

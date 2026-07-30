@@ -41,7 +41,7 @@ configured bot name.
 Behavior:
 
 - `webhook`: current default, HTTP callback only
-- `long-connection`: receive `im.message.receive_v1` over Feishu's long connection
+- `long-connection`: receive subscribed message, card-action, and roster events over Feishu's long connection
 - `hybrid`: start the long connection client and also keep webhook callbacks
 
 Use `long-connection` or `hybrid` when your Feishu app is configured to use
@@ -68,8 +68,12 @@ Webhook mode requires `FEISHU_ENCRYPT_KEY`. The adapter verifies
 `x-lark-signature` before it parses the JSON body, and it accepts encrypted
 webhook payloads.
 
-Long-connection mode does not require a public callback URL for message
-events, but webhook callbacks are still useful for interactive card actions.
+Long-connection mode does not require a public callback URL for subscribed
+events, including interactive-card actions. The Feishu developer console must
+still subscribe the app to `card.action.trigger`; the Host registers that event
+on the WebSocket dispatcher and acknowledges each click within Feishu's
+three-second callback window. Webhook callbacks are only needed when the app is
+configured for `webhook` or `hybrid` transport.
 
 ## Event support
 
@@ -80,6 +84,10 @@ Current scope:
 - `url_verification`
 - `im.chat.member.user.deleted_v1` (roster-DM leave revoke, best-effort; ADR-0023 item 11b)
 - `im.chat.disbanded_v1` (roster-DM disband revoke, best-effort; ADR-0023 item 11b)
+
+Subscribe the app to `card.action.trigger` in the Feishu developer console
+whenever interactive confirmation or roster cards are enabled. Sending a card
+does not implicitly subscribe its callback event.
 
 Subscribe the bot to the two `im.chat.*` events in the Feishu developer console
 if you enable roster DMs and want the best-effort leave/disband revoke (the

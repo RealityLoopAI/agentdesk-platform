@@ -550,32 +550,39 @@ Create、Update、Delete 和三个 Batch Operation 的提交调用都必须携�
 “幂等键 + 规范用户 + Operation + 逻辑资源 + 输入 Hash”及首次提交结果；相同请求重放时返回第一次
 的结果，不再次写飞书。同一幂等键绑定到不同输入时返回 `CONFLICT`。
 
-### Update Preview 与 Host-mediated 确认
+### Update/Delete Preview 与 Host-mediated 确认
 
-当前试点的每一次单条 Update 都要求显式确认；`highImpactFields` 只决定风险标识，不再让普通字段
-绕过确认。Update 使用两阶段协议：
+当前试点的每一次单条 Update/Delete 都要求显式确认；`highImpactFields` 只决定 Update 风险标识，
+不再让普通字段绕过确认。两者都使用两阶段协议：
 
-1. Worker 用 `dryRun=true` 提交 `{resource, recordId, fields}`。
-2. Gateway 读取完整当前 Record，生成字段级 Before/After Diff、稳定 Record Fingerprint、
-   Binding Hash、过期时间、后端 `auditId` 和 opaque `confirmationRequest`。
-3. Runner 的 `gateway_request_confirmation` 把 opaque Request 和未经重算的展示数据写入
-   Outbound。Host 从可信 Session/Inbound 链重新解析原规范用户和来源路由，并创建持久化 Pending。
+1. Worker 对 Update 用 `dryRun=true` 提交 `{resource, recordId, fields}`，对 Delete 提交
+   `{resource, recordId}`。
+2. Gateway 读取完整当前 Record；Update 生成字段级 Before/After Diff，Delete 生成有界当前字段摘要。
+   两者都返回稳定 Record Fingerprint、Binding Hash、过期时间、后端 `auditId` 和 opaque
+   `confirmationRequest`。
+3. Runner 严格验证并在当前 MCP Session 的有界 TTL Cache 中私有保存完整 Preview，返回模型前
+   删除 opaque Request。`gateway_request_confirmation` 只接受模型可见展示 Preview；按 Binding
+   Hash 命中缓存且逐字段一致时，才把原始 opaque Request 和未经重算的展示数据写入 Outbound。
+   缓存缺失、过期或展示漂移都要求重新 dry-run。Host 从可信 Session/Inbound 链重新解析原规范
+   用户和来源路由，并创建持久化 Pending。
 4. 飞书按钮、飞书文本或 Web 决策都必须匹配 Pending 的原请求者；群聊其他成员不能批准。
 5. 批准后 Host Signing Proxy 调用 `POST /confirmation/issue`。Gateway 验证自身 opaque Request、
    精确展示摘要、用户、Agent Group 和有效期，再签发 Token。
-6. Commit 必须携带原 Patch、Preview Fingerprint 和 Token。Gateway 先命中相同幂等 Replay，
-   否则验证 Token、重新 Get 并比较 Fingerprint；变化返回 `CONFLICT` 且不 PUT。成功后再次 Get，
-   返回核验结果和关联 Update/Get `auditId`。
+6. Commit 必须携带原目标、Preview Fingerprint 和 Token；Update 还必须携带原 Patch。Gateway
+   先命中相同幂等 Replay，否则验证 Token、重新 Get 并比较 Fingerprint；变化返回 `CONFLICT`，
+   不执行 PUT/DELETE。Update 成功后 Get 并核对 Patch；Delete 成功后只有 Get 明确返回
+   `NOT_FOUND` 才报告 `deleted=true` 和 `verification.verified=true`，并返回关联审计 ID。
 
-Token 至少绑定规范用户、Agent Group、Operation、Resource、`recordId`、Patch Hash、
-Fingerprint、过期时间和 Nonce。Nonce 只允许在同一幂等绑定中重放；不同输入或不同幂等键复用
-必须拒绝。Token 只能进入等待中的 Worker 私有系统响应，不得进入飞书卡片、Web API、日志或
-审计明文。
+Update Token 至少绑定规范用户、Agent Group、Operation、Resource、`recordId`、Patch Hash、
+Fingerprint、过期时间和 Nonce；Delete Token 使用独立 Purpose，绑定相同主体与目标但不伪造
+Patch Hash。Nonce 只允许在同一幂等绑定中重放；不同输入或不同幂等键复用必须拒绝。Token 只能
+进入等待中的 Worker 私有系统响应。opaque Request 不得进入外部模型上下文；Request 和 Token
+都不得进入飞书卡片、Web API、日志或审计明文。
 
 旧 Gateway 对 `/confirmation/issue` 返回 404、Host 签名失败、用户不匹配、Preview 被篡改、
-过期或 Fingerprint 冲突时，Update 都保持 Fail Closed，不能降级为 Prompt 中的
-`confirmed=true`。Create 可复用同一 Host Pending 交互，但低风险试点暂不要求 Update Token。
-Delete 仍始终确认，且本试点不发布 Delete/Batch。
+过期或 Fingerprint 冲突时，Update/Delete 都保持 Fail Closed，不能降级为 Prompt 中的
+`confirmed=true`。Create 可复用同一 Host Pending 交互，但低风险试点不要求 Gateway Token。
+单条 Delete 可以发布；所有 Batch Operation 仍关闭。
 
 ### 批量语义
 

@@ -31,6 +31,10 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 import {
+  rememberGatewayConfirmationPreview,
+  type BitableConfirmationKind,
+} from './gateway-confirmation-preview-cache.js';
+import {
   CONTRACT_VERSION,
   classifyHttpError,
   defaultRetryable,
@@ -949,6 +953,24 @@ export async function handleGatewayExecute(
   const result = await callGateway(runtime, '/execute', body);
   if (!result.ok) return gatewayErr(result);
   log(`gateway_execute: ${operation} for ${requester.userId ?? 'anonymous'} (${requesterSource})`);
+  if (dryRun && (operation === 'feishu.bitable.record.update' || operation === 'feishu.bitable.record.delete')) {
+    let response: Record<string, unknown>;
+    try {
+      const parsedResponse = JSON.parse(result.text) as unknown;
+      if (!parsedResponse || typeof parsedResponse !== 'object' || Array.isArray(parsedResponse)) {
+        return err('Gateway returned a malformed Bitable confirmation preview');
+      }
+      response = parsedResponse as Record<string, unknown>;
+    } catch {
+      return err('Gateway returned a malformed Bitable confirmation preview');
+    }
+    const kind: BitableConfirmationKind = operation === 'feishu.bitable.record.update' ? 'update' : 'delete';
+    const displayPreview = rememberGatewayConfirmationPreview(kind, response.preview);
+    if (!displayPreview) {
+      return err('Gateway returned an invalid or expired Bitable confirmation preview');
+    }
+    return ok(JSON.stringify({ ...response, preview: displayPreview }));
+  }
   return ok(result.text);
 }
 
@@ -1452,10 +1474,10 @@ export const erpMemorySearch: McpToolDefinition = {
     inputSchema: {
       type: 'object' as const,
       properties: {
-        namespace: {
-          type: 'string',
-          description:
-            'Stable memory namespace to search within, e.g. "user.profile", "persona", or this agent\'s compaction-summary namespace ("conversation.summary.<agentGroupId>" — the exact name appears in your Memory policy section).',
+          namespace: {
+            type: 'string',
+            description:
+              'Stable memory namespace to search within, e.g. "user.profile", "persona", or this agent\'s compaction-summary namespace ("conversation.summary.<agentGroupId>" — the exact name appears in your Memory policy section).',
         },
         query: { type: 'string', description: 'Free-text search/recall query. Required.' },
         subjectType: { type: 'string', description: 'Memory subject type. Default: "user".' },

@@ -372,7 +372,7 @@ export interface PendingGatewayConfirmation {
   confirmation_id: string;
   session_id: string;
   message_out_id: string;
-  kind: 'update' | 'create';
+  kind: 'update' | 'create' | 'delete';
   requester_user_id: string;
   agent_group_id: string;
   conversation_lane_id: string | null;

@@ -306,3 +306,27 @@ describe('container runner idle-exit normalization', () => {
     expect(readContainerConfig('idle-invalid').idleExitMs).toBeUndefined();
   });
 });
+
+describe('provider model normalization', () => {
+  function writeRaw(folder: string, providerModel: unknown): void {
+    const groupDir = path.join(tmpState.root, 'groups', folder);
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(path.join(groupDir, 'container.json'), JSON.stringify({ providerModel }));
+  }
+
+  it('accepts a trimmed bounded model identifier', () => {
+    writeRaw('model-valid', '  glm-5.2  ');
+    expect(readContainerConfig('model-valid').providerModel).toBe('glm-5.2');
+  });
+
+  it.each([
+    ['empty', '   '],
+    ['overlong', 'm'.repeat(129)],
+    ['newline', 'glm-5.2\nOPENAI_API_KEY=attacker'],
+    ['control', `glm-5.2${String.fromCharCode(0)}`],
+    ['non-string', 52],
+  ])('drops an invalid %s provider model', (_label, value) => {
+    writeRaw(`model-${_label}`, value);
+    expect(readContainerConfig(`model-${_label}`).providerModel).toBeUndefined();
+  });
+});

@@ -1,4 +1,4 @@
-# Bitable Query + Create + Update pilot topology
+# Bitable single-record CRUD pilot topology
 
 This example keeps the platform core business-agnostic while provisioning a
 dedicated `agentdesk-bitable-worker`.
@@ -16,7 +16,7 @@ The reconciler is idempotent. It:
 - exposes Frontdesk back to the Worker as destination `frontdesk`;
 - refreshes destination files for active Frontdesk sessions;
 - teaches the Worker bounded structured queries and Host-confirmed single
-  Create/Update while keeping Delete and Batch operations closed.
+  Create/Update/Delete while keeping Batch operations closed.
 
 Worker configuration and instructions live in
 `groups/agentdesk-bitable-worker/`. Gateway secrets and physical Feishu
@@ -36,5 +36,7 @@ credentials. The local reconciler and launcher also share a purpose-separated
 HMAC key: `GATEWAY_SIGNING_KEY` wins when configured; otherwise both derive the
 same pilot-only key from the Feishu app secret. With
 `AGENTDESK_GATEWAY_SIGNING_PROXY=true`, the Host keeps that key out of the Agent
-container and signs on its behalf. Use dedicated app credentials and a
-dedicated random `GATEWAY_SIGNING_KEY` for a production deployment.
+container and signs on its behalf. Re-running the reconciler replaces a stale
+materialized Worker key with the key selected by this precedence. Use dedicated
+app credentials and a dedicated random `GATEWAY_SIGNING_KEY` for a production
+deployment.

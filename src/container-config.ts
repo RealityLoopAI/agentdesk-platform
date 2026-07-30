@@ -122,6 +122,8 @@ export interface ContainerConfig {
   skills: string[] | 'all';
   /** Agent provider name (e.g. "claude", "opencode"). Default: "claude". */
   provider?: string;
+  /** Optional non-secret model identifier for this group's provider. */
+  providerModel?: string;
   /** Optional frontdesk-only split between enforced Routing and Execution LLM roles. */
   llm?: DualLlmConfig;
   /** Agent group display name (used in transcript archiving). */
@@ -237,6 +239,16 @@ function normalizeMemoryMode(value: unknown): MemoryMode | undefined {
 
 function normalizeA2aSessionMode(value: unknown): A2aSessionMode | undefined {
   return value === 'agent-shared' || value === 'root-session' ? value : undefined;
+}
+
+function normalizeProviderModel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 128) return undefined;
+  // Docker receives argv directly, but control characters can still split or
+  // corrupt environment entries and logs. Printable Unicode is otherwise
+  // accepted because OpenAI-compatible relays own their model naming scheme.
+  return /[\u0000-\u001f\u007f]/u.test(trimmed) ? undefined : trimmed;
 }
 
 /**
@@ -507,6 +519,7 @@ export function readContainerConfig(folder: string): ContainerConfig {
     additionalMounts: raw.additionalMounts ?? [],
     skills: normalizeSkills(raw.skills),
     provider: raw.provider,
+    providerModel: normalizeProviderModel(raw.providerModel),
     // normalizeDualLlmConfig returns undefined for a block it can't fully model
     // (routing with enabled!==true, or execution without a provider) — but an
     // ENABLED-invalid block still throws, so fail-closed is preserved. When it

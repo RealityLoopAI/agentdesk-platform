@@ -30,6 +30,9 @@ describe('Bitable pilot topology', () => {
     expect(worker).toContain('feishu.bitable.field.list');
     expect(worker).toContain('feishu.bitable.record.list');
     expect(worker).toContain('feishu.bitable.record.update');
+    expect(worker).toContain('feishu.bitable.record.delete');
+    expect(worker).toContain('the submitted value must exactly equal one returned');
+    expect(worker).toContain('before authorization/confirmation/execution');
     expect(worker).toContain('Copy Operation names verbatim');
     expect(worker).toContain('Never claim that an Operation was attempted');
     expect(worker).toContain('gateway_request_confirmation');
@@ -38,20 +41,34 @@ describe('Bitable pilot topology', () => {
     expect(worker).toContain('one visible match with `hasMore=true`');
     expect(worker).toContain('Never choose the first match');
     expect(worker).toContain('stable idempotency key');
-    expect(worker).toContain('Never use Record Delete, Batch Create, Batch Update, Batch Delete');
+    expect(worker).toContain('preliminary partial draft');
+    expect(worker).toContain('`批次测试四号` → `测试四号`');
+    expect(worker).toContain('`列路测试` → the live option `链路测试`');
+    expect(worker).toContain('never default, calculate, or convert');
+    expect(worker).toContain('one option is plausible');
+    expect(worker).toContain('Never add a target absent from `fieldMapping`');
+    expect(worker).toContain('Never use Batch Create, Batch Update, Batch Delete');
+    expect(worker).toContain('Never turn a multi-match Delete into a series of');
+    expect(worker).toContain('require `NOT_FOUND`');
     expect(worker).toContain('Never submit a raw Feishu filter');
     expect(worker).toContain('post-write verification fails');
     expect(worker).toContain('<message to="frontdesk">');
     expect(reconciler).toContain("const PILOT_ALIAS = 'bitable'");
     expect(reconciler).toContain('Do not claim an operation is available');
     expect(reconciler).toContain('structured record queries');
-    expect(reconciler).toContain('Host renders trusted Create/Update confirmations');
+    expect(reconciler).toContain('Host renders trusted Create/Update/Delete confirmations');
+    expect(reconciler).toContain('xiaohuan-bitable-bridge.v1');
+    expect(reconciler).toContain('delegate the complete JSON unchanged');
     expect(reconciler).toContain('derivePilotSigningKey');
     expect(reconciler).toContain('GATEWAY_SIGNING_KEY');
     expect(reconciler).toContain('agentdesk-bitable-pilot:gateway-signing');
+    expect(reconciler).not.toContain('readContainerConfig(workerFolder).backendGateway?.signingKey');
+    expect(reconciler.indexOf("const configured = value('GATEWAY_SIGNING_KEY')")).toBeLessThan(
+      reconciler.indexOf("const appSecret = value('FEISHU_BITABLE_APP_SECRET')"),
+    );
   });
 
-  it('ships focused behavioral eval cases for query/create/update safety', () => {
+  it('ships focused behavioral eval cases for single-record CRUD safety', () => {
     const evals = JSON.parse(fs.readFileSync(path.join(ROOT, 'examples/bitable-pilot/eval-cases.json'), 'utf8'));
     expect(evals.cases.map((item: { name: string }) => item.name)).toEqual([
       'structured-query-unique-result',
@@ -59,15 +76,19 @@ describe('Bitable pilot topology', () => {
       'multiple-match-disambiguation',
       'has-more-does-not-imply-unique',
       'confirmed-create-and-get-verification',
+      'unknown-select-option-stops-before-write',
       'update-dry-run-host-confirmation-and-get',
       'update-conflict-stops-write',
+      'delete-unique-target-preview-confirm-and-not-found',
+      'delete-zero-multiple-or-has-more-stops',
+      'delete-conflict-or-verification-failure-stops',
       'raw-filter-refusal',
-      'guessed-delete-and-batch-refusal',
+      'guessed-batch-refusal',
       'authorization-or-confirmation-failure',
     ]);
   });
 
-  it('keeps the pilot resource open to trusted users without enabling delete or batch', () => {
+  it('keeps single-record CRUD open to trusted users without enabling batch', () => {
     const envTemplate = fs.readFileSync(
       path.join(ROOT, 'examples/reference-gateway/bitable-query-create-update.env.example'),
       'utf8',
@@ -75,7 +96,7 @@ describe('Bitable pilot topology', () => {
     expect(envTemplate).toContain('"readers":["*"]');
     expect(envTemplate).toContain('"writers":["*"]');
     expect(envTemplate).toContain('"feishu.bitable.record.update"');
-    expect(envTemplate).not.toContain('"feishu.bitable.record.delete"');
+    expect(envTemplate).toContain('"feishu.bitable.record.delete"');
     expect(envTemplate).not.toContain('"feishu.bitable.record.batch_create"');
     expect(envTemplate).not.toContain('"feishu.bitable.record.batch_update"');
     expect(envTemplate).not.toContain('"feishu.bitable.record.batch_delete"');

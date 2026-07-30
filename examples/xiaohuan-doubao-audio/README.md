@@ -65,15 +65,53 @@ stdout 只包含最终 JSON：
 }
 ```
 
-## 从小环 RTP 生成真实测试 WAV
+## 在本机 macOS 实时接收小环 RTP
 
-小环向 Windows `192.168.66.32:50020` 持续发送 RTP/UDP Opus，48 kHz、20 ms 帧、payload type 96。先按硬件说明放行 UDP 50020，并确认 VLC 使用配套 SDP 可以听到声音。
+当前本机局域网地址是 `192.168.66.113`。仓库内的
+`xiaohuan-realtime-macos.sdp` 监听该地址的 UDP 50020，声明 payload type
+96、Opus 48 kHz。硬件发送目标也必须是 `192.168.66.113:50020`；旧文档里的
+Windows 地址 `192.168.66.32` 不再适用。
 
-在 SDP 所在目录用 FFmpeg 录制并转换为 16 kHz、单声道、16-bit PCM：
+先确认依赖和端口：
 
-```powershell
-ffmpeg -protocol_whitelist file,udp,rtp -i ".\小环实时音频_50020.sdp" -t 8 -vn -ac 1 -ar 16000 -c:a pcm_s16le ".\xiaohuan-smoke.wav"
+```bash
+ffmpeg -version
+lsof -nP -iUDP:50020
+/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
 ```
+
+默认 capture-only，不读取方舟 Key，也不上传音频。下面接收一个 8 秒分段并保存在指定目录：
+
+```bash
+node --import tsx \
+  examples/xiaohuan-doubao-audio/realtime-cli.ts \
+  --sdp examples/xiaohuan-doubao-audio/xiaohuan-realtime-macos.sdp \
+  --segment-seconds 8 \
+  --max-segments 1 \
+  --output-dir /tmp/xiaohuan-captures
+```
+
+接收到的分段固定转换成 16 kHz、单声道、16-bit PCM WAV。没有 `--output-dir`
+时使用程序临时目录，并在结束后清理；加 `--keep-segments` 可保留该临时目录。
+30 秒内没有完成首段会返回 `NO_AUDIO_RECEIVED`，空 WAV Header 不算成功。
+
+只有已确认现场音频允许发往方舟时，才同时提供两个显式开关：
+
+```bash
+node \
+  --env-file=examples/xiaohuan-doubao-audio/.env \
+  --import tsx \
+  examples/xiaohuan-doubao-audio/realtime-cli.ts \
+  --sdp examples/xiaohuan-doubao-audio/xiaohuan-realtime-macos.sdp \
+  --segment-seconds 8 \
+  --max-segments 1 \
+  --process \
+  --allow-external-upload
+```
+
+process 模式串行处理完成分段，并把每段的 `experiment-audio.v1` 作为一行
+JSON 写 stdout。`--max-queue` 默认 4；如果方舟处理慢于分段产生速度导致积压
+超过上限，程序停止接收并返回 `QUEUE_OVERFLOW`，不会静默丢音频。
 
 录制时说一句批准的非敏感测试话术：
 
@@ -81,29 +119,92 @@ ffmpeg -protocol_whitelist file,udp,rtp -i ".\小环实时音频_50020.sdp" -t 8
 样品测试一号，在二十五摄氏度静置三十分钟，观察到溶液变蓝。
 ```
 
-检查文件：
+检查保留的文件：
 
-```powershell
-ffprobe -v error -show_entries stream=codec_name,sample_rate,channels,bits_per_sample -show_entries format=duration,size -of default=noprint_wrappers=1 ".\xiaohuan-smoke.wav"
+```bash
+ffprobe -v error \
+  -show_entries stream=codec_name,sample_rate,channels,bits_per_sample \
+  -show_entries format=duration,size \
+  -of default=noprint_wrappers=1 \
+  /tmp/xiaohuan-captures/segment-000000.wav
 ```
 
 不要用设备自身的 `POST /api/tts/speak` 播放测试话术：设备播报期间会暂停 USB 麦克风采集和 RTP 推流。
+
+## 常驻监听与 VAD 自动切句
+
+`vad-service-cli.ts` 保持一个 FFmpeg RTP 连接长期运行。看到
+`xiaohuan_vad_ready` 后可以直接说实验句；服务检测到起句和尾静音后自动生成
+WAV，不需要人工同步启动，也不按固定 20 秒切段。
+
+默认 capture-only：
+
+```bash
+node --import tsx \
+  examples/xiaohuan-doubao-audio/vad-service-cli.ts \
+  --sdp examples/xiaohuan-doubao-audio/xiaohuan-realtime-macos.sdp \
+  --output-dir /tmp/xiaohuan-vad-captures
+```
+
+服务会一直运行，按 `Ctrl-C` 优雅停止。每句输出一行
+`xiaohuan_vad_utterance` JSON，并把 WAV 保留在指定目录。调试时可用
+`--max-utterances 2` 在检测两句后自动结束。
+
+经过当前小环样本校准的默认 VAD 参数：
+
+- 20 ms PCM 帧；
+- `-43 dBFS` 起句门限；
+- 连续 5 帧（100 ms）超过门限才起句；
+- 300 ms 预录；
+- 800 ms 尾静音；
+- 400 ms 最短有效语音；
+- 20 秒最长单句；
+- 最多排队 4 句。
+- 写 WAV 前归一化到 `-3 dBFS` 峰值，最大只增加 30 dB。
+
+可用 `--threshold-db`、`--start-frames`、`--pre-roll-ms`、
+`--trailing-silence-ms`、`--min-speech-ms`、`--max-utterance-ms` 和
+`--max-queue` 覆盖。归一化可用 `--normalize-peak-db` 和
+`--max-normalize-gain-db` 调整。持续噪声误触发时提高门限，例如从 `-43` 改成 `-38`；
+轻声无法触发时降低门限，例如改成 `-46`。
+
+只有明确同意本次服务生命周期内检测到的每句话都发送到方舟时，才启动 process
+模式：
+
+```bash
+node \
+  --env-file=examples/xiaohuan-doubao-audio/.env \
+  --import tsx \
+  examples/xiaohuan-doubao-audio/vad-service-cli.ts \
+  --sdp examples/xiaohuan-doubao-audio/xiaohuan-realtime-macos.sdp \
+  --process \
+  --allow-external-upload
+```
+
+监听与模型 worker 解耦：方舟处理上一句时仍继续接收下一句，但模型调用严格串行。
+单句失败不会停止监听；队列满会返回 `QUEUE_OVERFLOW` 并停止，绝不静默丢句。
+不要在实验句前说“你好小环”，避免触发设备本机行为影响麦克风推流。
 
 ## 错误与隐私
 
 - `configuration`：Key/模型/Base URL/限制错误。
 - `input`：文件不存在、空文件、损坏、非 PCM、超出大小或时长。
 - `multimodal`：方舟鉴权、限流、超时、上游、空响应、畸形 JSON 或结构错误。
+- `realtime`：无首包、FFmpeg 启动/退出、队列溢出或实时生命周期错误。
 
 一次 `processWav` 恰好一次模型调用，不自动重试或回退。Key、Authorization、音频 Base64、完整 Prompt、完整 transcript 和原始模型响应不进入普通日志或错误消息。
 
 模型输出只做结构、schema 版本、capture ID 和非空 transcript 校验；本轮不判断实验事实是否完整或正确。
 
-本轮不实现 RTP/VAD 服务、数据库、Gateway 操作、Agent、飞书消息或多维表格写入。后续 Bitable 写入必须通过 Backend Gateway。
+实时 RTP/VAD 仍是 operator-specific 本机示例，不是平台通用 channel。本轮不实现
+数据库、Gateway 操作、Agent、飞书消息或多维表格写入。后续 Bitable 写入必须通过 Backend Gateway。
 
 ## 验证
 
 ```bash
 pnpm exec tsc -p examples/xiaohuan-doubao-audio/tsconfig.json
-pnpm exec vitest run scripts/xiaohuan-doubao-audio.test.ts
+pnpm exec vitest run \
+  scripts/xiaohuan-doubao-audio.test.ts \
+  scripts/xiaohuan-realtime-audio.test.ts \
+  scripts/xiaohuan-vad-service.test.ts
 ```

@@ -310,7 +310,7 @@ export function createFeishuBitableAdapter(options) {
         if (!idempotencyKey) {
           throw new AdapterError('VALIDATION_FAILED', 'committing writes require idempotencyKey', { status: 422 });
         }
-        if (operation === 'feishu.bitable.record.update') {
+        if (operation === 'feishu.bitable.record.update' || operation === 'feishu.bitable.record.delete') {
           if (!input.confirmation) {
             throw new AdapterError('CONFIRMATION_REQUIRED', 'a bound user confirmation is required', {
               status: 409,
@@ -333,7 +333,10 @@ export function createFeishuBitableAdapter(options) {
             });
           }
           outcome = 'replayed';
-          fingerprintResult = operation === 'feishu.bitable.record.update' ? 'replayed' : undefined;
+          fingerprintResult =
+            operation === 'feishu.bitable.record.update' || operation === 'feishu.bitable.record.delete'
+              ? 'replayed'
+              : undefined;
           return { ...cloneJson(prior.response), replayed: true };
         }
       }
@@ -374,6 +377,49 @@ export function createFeishuBitableAdapter(options) {
         }
         fingerprintResult = 'match';
         const result = await updateAndVerify(input, resource, auditId);
+        ensureResponseBound(result, maxResponseBytes);
+        const response = { ok: true, result, auditId };
+        await idempotencyStore.set(idempotencyKey, {
+          bindingHash: idempotencyBinding,
+          response: cloneJson(response),
+        });
+        outcome = 'ok';
+        return response;
+      }
+
+      if (operation === 'feishu.bitable.record.delete') {
+        if (dryRun) {
+          const preview = await createDeletePreview(req, input, resource, auditId);
+          ensureResponseBound(preview, maxResponseBytes);
+          confirmationBindingHash = preview.bindingHash;
+          expectedRecordFingerprint = preview.expectedRecordFingerprint;
+          fingerprintResult = 'previewed';
+          outcome = 'preview';
+          return { ok: true, preview, auditId };
+        }
+
+        const confirmationBinding = verifyDeleteConfirmation(
+          input.confirmation,
+          req,
+          input,
+          resource,
+          confirmationSecret,
+          confirmationUses,
+          idempotencyKey,
+          now(),
+        );
+        confirmationBindingHash = taggedHashJson(confirmationBinding);
+        expectedRecordFingerprint = confirmationBinding.expectedRecordFingerprint;
+        const current = await getRecord(input, resource);
+        currentRecordFingerprint = computeFeishuBitableRecordFingerprint(current);
+        if (currentRecordFingerprint !== expectedRecordFingerprint) {
+          fingerprintResult = 'conflict';
+          throw new AdapterError('CONFLICT', 'record changed after preview; generate a new preview and confirmation', {
+            status: 409,
+          });
+        }
+        fingerprintResult = 'match';
+        const result = await deleteAndVerify(input, resource, auditId);
         ensureResponseBound(result, maxResponseBytes);
         const response = { ok: true, result, auditId };
         await idempotencyStore.set(idempotencyKey, {
@@ -510,13 +556,22 @@ export function createFeishuBitableAdapter(options) {
       } catch {
         throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation request is invalid', { status: 409 });
       }
-      const binding = validateUpdateConfirmationBinding(envelope?.binding, now());
-      if (envelope?.purpose !== 'bitable-update-preview') {
+      let binding;
+      let display;
+      let confirmationPurpose;
+      if (envelope?.purpose === 'bitable-update-preview') {
+        binding = validateUpdateConfirmationBinding(envelope.binding, now());
+        display = validateUpdateConfirmationDisplay(req?.display);
+        confirmationPurpose = 'bitable-update-confirmation';
+      } else if (envelope?.purpose === 'bitable-delete-preview') {
+        binding = validateDeleteConfirmationBinding(envelope.binding, now());
+        display = validateDeleteConfirmationDisplay(req?.display);
+        confirmationPurpose = 'bitable-delete-confirmation';
+      } else {
         throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation request has an invalid purpose', {
           status: 409,
         });
       }
-      const display = validateUpdateConfirmationDisplay(req?.display);
       if (!isTaggedSha256(envelope?.displayHash) || envelope.displayHash !== taggedHashJson(display)) {
         throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation display does not match the Gateway preview', {
           status: 409,
@@ -548,7 +603,7 @@ export function createFeishuBitableAdapter(options) {
 
       const confirmation = signOpaque(
         {
-          purpose: 'bitable-update-confirmation',
+          purpose: confirmationPurpose,
           binding,
         },
         confirmationSecret,
@@ -616,7 +671,7 @@ export function createFeishuBitableAdapter(options) {
       }
     }
 
-    if (operation === 'feishu.bitable.record.update') {
+    if (operation === 'feishu.bitable.record.update' || operation === 'feishu.bitable.record.delete') {
       return {
         allowed: true,
         obligations: [
@@ -910,6 +965,113 @@ export function createFeishuBitableAdapter(options) {
         getAuditId,
       },
     };
+  }
+
+  async function createDeletePreview(req, input, resource, auditId) {
+    const requesterUserId = canonicalUserId(req);
+    const agentGroupId = canonicalAgentGroupId(req);
+    if (req?.requesterSource !== 'session' || !requesterUserId || !agentGroupId) {
+      throw new AdapterError(
+        'BACKEND_UNAUTHORIZED',
+        'Delete preview requires a trusted canonical user and Agent Group',
+        { status: 403 },
+      );
+    }
+
+    const current = await getRecord(input, resource);
+    if (Object.keys(current.fields).length > 200) {
+      throw new AdapterError('BACKEND_UNAVAILABLE', 'Delete preview exceeds the safe field bound', {
+        status: 502,
+      });
+    }
+    const expectedRecordFingerprint = computeFeishuBitableRecordFingerprint(current);
+    const binding = {
+      v: 2,
+      requesterUserId,
+      agentGroupId,
+      operation: 'feishu.bitable.record.delete',
+      resource: resource.alias,
+      recordId: input.recordId,
+      expectedRecordFingerprint,
+      exp: now() + confirmationTtlMs,
+      nonce: randomUUID(),
+    };
+    const bindingHash = taggedHashJson(binding);
+    const display = {
+      recordId: input.recordId,
+      fields: cloneJson(current.fields),
+      expectedRecordFingerprint,
+      expiresAt: binding.exp,
+    };
+    return {
+      ...display,
+      bindingHash,
+      confirmationRequest: signOpaque(
+        {
+          purpose: 'bitable-delete-preview',
+          binding,
+          displayHash: taggedHashJson(display),
+        },
+        confirmationSecret,
+      ),
+      auditId,
+    };
+  }
+
+  async function deleteAndVerify(input, resource, deleteAuditId) {
+    await deleteRecord(input, resource);
+    const getAuditId = randomUUID();
+    let outcome = 'present';
+    try {
+      await getRecord(input, resource);
+    } catch (error) {
+      const normalized = normalizeError(error);
+      if (normalized.code === 'NOT_FOUND') {
+        outcome = 'not_found';
+        await safeAudit(audit, {
+          phase: 'delete_verify_get',
+          auditId: getAuditId,
+          parentAuditId: deleteAuditId,
+          operation: 'feishu.bitable.record.get',
+          resource: resource.alias,
+          recordIdHash: taggedHashJson(input.recordId),
+          outcome,
+        });
+        return {
+          recordId: input.recordId,
+          deleted: true,
+          verification: {
+            verified: true,
+            deleteAuditId,
+            getAuditId,
+          },
+        };
+      }
+      outcome = normalized.code;
+      await safeAudit(audit, {
+        phase: 'delete_verify_get',
+        auditId: getAuditId,
+        parentAuditId: deleteAuditId,
+        operation: 'feishu.bitable.record.get',
+        resource: resource.alias,
+        recordIdHash: taggedHashJson(input.recordId),
+        outcome,
+      });
+      throw normalized;
+    }
+    await safeAudit(audit, {
+      phase: 'delete_verify_get',
+      auditId: getAuditId,
+      parentAuditId: deleteAuditId,
+      operation: 'feishu.bitable.record.get',
+      resource: resource.alias,
+      recordIdHash: taggedHashJson(input.recordId),
+      outcome,
+    });
+    throw new AdapterError('BACKEND_UNAVAILABLE', 'Delete verification found the record still present', {
+      status: 502,
+      retryable: true,
+    });
   }
 
   async function deleteRecord(input, resource) {
@@ -1301,7 +1463,10 @@ function validateRecordOperationInput(operation, input) {
   if (['feishu.bitable.record.create', 'feishu.bitable.record.update'].includes(operation)) {
     requireFields(input.fields);
   }
-  if (operation === 'feishu.bitable.record.update' && input.expectedRecordFingerprint !== undefined) {
+  if (
+    (operation === 'feishu.bitable.record.update' || operation === 'feishu.bitable.record.delete') &&
+    input.expectedRecordFingerprint !== undefined
+  ) {
     requireTaggedSha256(input.expectedRecordFingerprint, 'expectedRecordFingerprint');
   }
   if (operation.includes('.batch_')) {
@@ -1484,9 +1649,11 @@ function valueMatchesField(value, field) {
 }
 
 function requiredConfirmationBinding(req, operation, input, resource) {
-  // Single-record Update uses the v2 Preview → Host issue → commit flow.
-  // Keep the legacy v1 binding only for Delete and unopened batch policies.
-  if (operation === 'feishu.bitable.record.update') return null;
+  // Single-record Update/Delete use the v2 Preview → Host issue → commit flow.
+  // Keep the legacy v1 binding only for unopened batch policies.
+  if (operation === 'feishu.bitable.record.update' || operation === 'feishu.bitable.record.delete') {
+    return null;
+  }
   let highImpactFields = [];
   if (operation === 'feishu.bitable.record.batch_update') {
     highImpactFields = [
@@ -1611,6 +1778,60 @@ function validateUpdateConfirmationDisplay(display) {
   return cloneJson(display);
 }
 
+function validateDeleteConfirmationBinding(binding, currentTime) {
+  if (
+    !isPlainObject(binding) ||
+    binding.v !== 2 ||
+    binding.operation !== 'feishu.bitable.record.delete' ||
+    !canonicalBindingString(binding.requesterUserId) ||
+    !canonicalBindingString(binding.agentGroupId) ||
+    !safeResourceAlias(binding.resource) ||
+    !canonicalBindingString(binding.recordId) ||
+    !isTaggedSha256(binding.expectedRecordFingerprint) ||
+    !Number.isSafeInteger(binding.exp) ||
+    binding.exp <= currentTime ||
+    !canonicalBindingString(binding.nonce)
+  ) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation has expired or contains an invalid binding', {
+      status: 409,
+    });
+  }
+  const allowedKeys = new Set([
+    'v',
+    'requesterUserId',
+    'agentGroupId',
+    'operation',
+    'resource',
+    'recordId',
+    'expectedRecordFingerprint',
+    'exp',
+    'nonce',
+  ]);
+  if (Object.keys(binding).some((key) => !allowedKeys.has(key))) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation contains an invalid binding', { status: 409 });
+  }
+  return cloneJson(binding);
+}
+
+function validateDeleteConfirmationDisplay(display) {
+  if (!isPlainObject(display)) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation display is invalid', { status: 409 });
+  }
+  const allowedKeys = new Set(['recordId', 'fields', 'expectedRecordFingerprint', 'expiresAt']);
+  if (
+    Object.keys(display).some((key) => !allowedKeys.has(key)) ||
+    !canonicalBindingString(display.recordId) ||
+    !isPlainObject(display.fields) ||
+    Object.keys(display.fields).length > 200 ||
+    !Object.values(display.fields).every(isJsonValue) ||
+    !isTaggedSha256(display.expectedRecordFingerprint) ||
+    !Number.isSafeInteger(display.expiresAt)
+  ) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation display is invalid', { status: 409 });
+  }
+  return cloneJson(display);
+}
+
 function verifyUpdateConfirmation(token, req, input, resource, secret, uses, idempotencyKey, currentTime) {
   if (typeof token !== 'string' || !token) {
     throw new AdapterError('CONFIRMATION_REQUIRED', 'a bound user confirmation is required', { status: 409 });
@@ -1637,6 +1858,43 @@ function verifyUpdateConfirmation(token, req, input, resource, secret, uses, ide
   for (const [key, value] of Object.entries(expected)) {
     if (!value || binding[key] !== value) {
       throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation does not match this Update', { status: 409 });
+    }
+  }
+  const priorKey = uses.get(binding.nonce);
+  if (priorKey && priorKey !== idempotencyKey) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation was already used by another request', {
+      status: 409,
+    });
+  }
+  uses.set(binding.nonce, idempotencyKey);
+  return binding;
+}
+
+function verifyDeleteConfirmation(token, req, input, resource, secret, uses, idempotencyKey, currentTime) {
+  if (typeof token !== 'string' || !token) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'a bound user confirmation is required', { status: 409 });
+  }
+  let envelope;
+  try {
+    envelope = verifyOpaque(token, secret);
+  } catch {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation is invalid', { status: 409 });
+  }
+  if (envelope?.purpose !== 'bitable-delete-confirmation') {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation has an invalid purpose', { status: 409 });
+  }
+  const binding = validateDeleteConfirmationBinding(envelope.binding, currentTime);
+  const expected = {
+    requesterUserId: canonicalUserId(req),
+    agentGroupId: canonicalAgentGroupId(req),
+    operation: 'feishu.bitable.record.delete',
+    resource: resource.alias,
+    recordId: input.recordId,
+    expectedRecordFingerprint: input.expectedRecordFingerprint,
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    if (!value || binding[key] !== value) {
+      throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation does not match this Delete', { status: 409 });
     }
   }
   const priorKey = uses.get(binding.nonce);
@@ -2033,7 +2291,9 @@ function allowedInputKeys(operation) {
   if (operation === 'feishu.bitable.record.update') {
     return new Set([...common, 'recordId', 'fields', 'expectedRecordFingerprint', 'confirmation']);
   }
-  if (operation === 'feishu.bitable.record.delete') return new Set([...common, 'recordId', 'confirmation']);
+  if (operation === 'feishu.bitable.record.delete') {
+    return new Set([...common, 'recordId', 'expectedRecordFingerprint', 'confirmation']);
+  }
   if (operation === 'feishu.bitable.record.batch_create') return new Set([...common, 'mode', 'records']);
   if (operation === 'feishu.bitable.record.batch_update') {
     return new Set([...common, 'mode', 'records', 'confirmation']);

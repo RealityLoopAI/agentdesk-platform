@@ -270,6 +270,19 @@ describe('Ark multimodal WAV extractor', () => {
     await expect(client.extract(pcmWav(), captureId)).rejects.toMatchObject({ code });
   });
 
+  it('reports a content-free validation reason for an empty transcript', async () => {
+    const captureId = 'capture-empty-diagnostic';
+    const invalid = result(captureId, '');
+    const extractor = createArkMultimodalWavExtractor(
+      config(),
+      vi.fn(async () => jsonResponse(responsesPayload(invalid))),
+    );
+    await expect(extractor.extract(pcmWav(), captureId)).rejects.toMatchObject({
+      code: 'INVALID_STRUCTURED_OUTPUT',
+      detailCode: 'empty_transcript',
+    });
+  });
+
   it('aborts a timed-out request without retry', async () => {
     const hangingFetch = vi.fn(
       async (_url: string | URL | Request, init?: RequestInit): Promise<Response> =>

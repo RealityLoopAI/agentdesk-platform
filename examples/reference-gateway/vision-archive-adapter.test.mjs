@@ -225,6 +225,65 @@ test('legacy VisionCortex archives use the manifest name and logical Chinese cat
   }
 });
 
+test('portable English archives use ISO date suffixes and logical category mapping', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vision-archive-portable-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const archiveName = 'Solid-Weighing-And-Pipetting-Experiment-2026-06-18';
+  const archive = path.join(root, archiveName);
+  await fs.mkdir(path.join(archive, 'Professional-PDFs'), { recursive: true });
+  await fs.mkdir(path.join(archive, 'JSON-Config-Files'), { recursive: true });
+  await fs.mkdir(path.join(archive, 'Key-Materials', 'Key-Frames'), { recursive: true });
+  await fs.mkdir(path.join(archive, 'Key-Materials', 'Key-Clips'), { recursive: true });
+  await fs.writeFile(path.join(archive, 'Professional-PDFs', 'report.pdf'), 'not read');
+  await fs.writeFile(path.join(archive, 'JSON-Config-Files', 'experiment_summary.json'), '{}');
+  await fs.writeFile(path.join(archive, 'Key-Materials', 'Key-Frames', 'frame.jpg'), 'not read');
+  await fs.writeFile(path.join(archive, 'Key-Materials', 'Key-Clips', 'clip.mp4'), 'not read');
+
+  const adapter = makeAdapter(root);
+  const search = await adapter.execute(
+    request('vision.archive.experiment.search', {
+      name: 'Solid-Weighing',
+      dateFrom: '2026-06-18',
+      dateTo: '2026-06-18',
+    }),
+  );
+  assert.equal(search.ok, true);
+  assert.equal(search.result.archives.length, 1);
+  assert.deepEqual(
+    {
+      experimentName: search.result.archives[0].experimentName,
+      date: search.result.archives[0].date,
+      layout: search.result.archives[0].layout,
+    },
+    {
+      experimentName: 'Solid-Weighing-And-Pipetting-Experiment',
+      date: '2026-06-18',
+      layout: 'portable',
+    },
+  );
+
+  const archiveHandle = search.result.archives[0].archiveHandle;
+  for (const [category, extension, expected] of [
+    ['专业报告', '.pdf', 'report.pdf'],
+    ['结构化数据', '.json', 'experiment_summary.json'],
+    ['关键帧', '.jpg', 'frame.jpg'],
+    ['关键片段', '.mp4', 'clip.mp4'],
+  ]) {
+    const listed = await adapter.execute(
+      request('vision.archive.file.list', {
+        archiveHandle,
+        category,
+        extensions: [extension],
+      }),
+    );
+    assert.equal(listed.ok, true);
+    assert.deepEqual(
+      listed.result.files.map((file) => file.name),
+      [expected],
+    );
+  }
+});
+
 test('list is bounded, category-scoped, regular-file-only, and returns opaque handles', async (t) => {
   const { root, archive } = await fixture(t);
   await fs.symlink(path.join(archive, '专业报告', '分析报告.pdf'), path.join(archive, '专业报告', 'escape.pdf'));

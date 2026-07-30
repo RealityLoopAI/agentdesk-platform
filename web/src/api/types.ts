@@ -98,7 +98,7 @@ export interface DeliverySubscriptionState {
 
 export interface GatewayConfirmation {
   id: string;
-  kind: 'update' | 'create';
+  kind: 'update' | 'create' | 'delete';
   title: string;
   display: Record<string, unknown>;
   expiresAt: string;

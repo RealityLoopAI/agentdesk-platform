@@ -18,7 +18,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
   const [copied, setCopied] = useState(false);
   const source = textFromNode(children).replace(/\n$/, '');
   return (
-    <div className="group/code relative my-4 overflow-hidden rounded-md border border-line bg-[#f6f8f8]">
+    <div className="group/code relative my-4 min-w-0 max-w-full overflow-hidden rounded-md border border-line bg-[#f6f8f8]">
       <Button
         type="button"
         size="compact"
@@ -78,7 +78,7 @@ const components: Components = {
   pre: CodeBlock,
   table({ children }) {
     return (
-      <div className="my-4 overflow-x-auto rounded-md border border-line">
+      <div className="my-4 max-w-full overflow-x-auto rounded-md border border-line">
         <table className="w-full min-w-[520px] border-collapse text-sm">{children}</table>
       </div>
     );
@@ -106,7 +106,7 @@ const components: Components = {
 
 export function SafeMarkdown({ children }: { children: string }) {
   return (
-    <div className="markdown text-[15px] leading-7 text-ink">
+    <div className="markdown min-w-0 max-w-full text-[15px] leading-7 text-ink">
       <Markdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeSanitize, rehypeHighlight]}

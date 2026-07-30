@@ -145,6 +145,22 @@ export const bitableUpdateConfirmationBindingSchema = z
   .strict();
 export type BitableUpdateConfirmationBinding = z.infer<typeof bitableUpdateConfirmationBindingSchema>;
 
+/** Gateway-owned binding for a single-record Delete confirmation (ADR-0075). */
+export const bitableDeleteConfirmationBindingSchema = z
+  .object({
+    v: z.literal(2),
+    requesterUserId: z.string().min(1),
+    agentGroupId: z.string().min(1),
+    operation: z.literal('feishu.bitable.record.delete'),
+    resource: resourceAliasSchema,
+    recordId: recordIdSchema,
+    expectedRecordFingerprint: sha256Schema,
+    exp: z.number().int().positive(),
+    nonce: z.string().min(1).max(256),
+  })
+  .strict();
+export type BitableDeleteConfirmationBinding = z.infer<typeof bitableDeleteConfirmationBindingSchema>;
+
 const resourceInputSchema = z.object({ resource: resourceAliasSchema }).strict();
 const paginatedResourceInputSchema = z
   .object({
@@ -209,6 +225,7 @@ const recordDeleteInputSchema = z
   .object({
     resource: resourceAliasSchema,
     recordId: recordIdSchema,
+    expectedRecordFingerprint: bitableRecordFingerprintSchema.optional(),
     confirmation: confirmationSchema.optional(),
   })
   .strict();
@@ -306,6 +323,49 @@ export const bitableUpdatePreviewSchema = z
   .strict();
 export type BitableUpdatePreview = z.infer<typeof bitableUpdatePreviewSchema>;
 
+/**
+ * Model-visible Update preview. The opaque confirmation request is retained
+ * only inside the Runner process and never crosses the model boundary.
+ */
+export const bitableUpdatePreviewDisplaySchema = bitableUpdatePreviewSchema.omit({
+  confirmationRequest: true,
+});
+export type BitableUpdatePreviewDisplay = z.infer<typeof bitableUpdatePreviewDisplaySchema>;
+
+/** Gateway-owned, user-visible Delete preview (ADR-0075). */
+export const bitableDeletePreviewSchema = z
+  .object({
+    recordId: recordIdSchema,
+    fields: fieldsSchema.refine((fields) => Object.keys(fields).length <= 200, 'delete preview has too many fields'),
+    expectedRecordFingerprint: bitableRecordFingerprintSchema,
+    bindingHash: sha256Schema,
+    confirmationRequest: z.string().min(1).max(16_384),
+    expiresAt: z.number().int().positive(),
+    auditId: z.string().min(1),
+  })
+  .strict();
+export type BitableDeletePreview = z.infer<typeof bitableDeletePreviewSchema>;
+
+/** Model-visible Delete preview; see bitableUpdatePreviewDisplaySchema. */
+export const bitableDeletePreviewDisplaySchema = bitableDeletePreviewSchema.omit({
+  confirmationRequest: true,
+});
+export type BitableDeletePreviewDisplay = z.infer<typeof bitableDeletePreviewDisplaySchema>;
+
+export const bitableDeleteResultSchema = z
+  .object({
+    recordId: recordIdSchema,
+    deleted: z.literal(true),
+    verification: z
+      .object({
+        verified: z.literal(true),
+        deleteAuditId: z.string().min(1),
+        getAuditId: z.string().min(1),
+      })
+      .strict(),
+  })
+  .passthrough();
+
 export const bitablePageSchema = <T extends z.ZodType>(itemSchema: T) =>
   z
     .object({
@@ -398,7 +458,7 @@ export const FEISHU_BITABLE_OUTPUT_SCHEMAS = {
   'feishu.bitable.record.get': bitableRecordSchema,
   'feishu.bitable.record.create': bitableRecordSchema,
   'feishu.bitable.record.update': bitableRecordSchema,
-  'feishu.bitable.record.delete': z.object({ recordId: recordIdSchema, deleted: z.literal(true) }).passthrough(),
+  'feishu.bitable.record.delete': bitableDeleteResultSchema,
   'feishu.bitable.record.batch_create': bitableBatchResultSchema,
   'feishu.bitable.record.batch_update': bitableBatchResultSchema,
   'feishu.bitable.record.batch_delete': bitableBatchResultSchema,
@@ -423,7 +483,7 @@ const confirmationProperty = {
 const recordFingerprintProperty = {
   type: 'string',
   pattern: '^sha256:[a-f0-9]{64}$',
-  description: 'Gateway dry-run 返回的完整记录指纹；提交 Update 时必须原样携带。',
+  description: 'Gateway dry-run 返回的完整记录指纹；提交 Update/Delete 时必须原样携带。',
 };
 const pageProperties = {
   pageSize: { type: 'integer', minimum: 1, maximum: BITABLE_MAX_PAGE_SIZE, default: BITABLE_DEFAULT_PAGE_SIZE },
@@ -560,12 +620,17 @@ export const FEISHU_BITABLE_OPERATION_DESCRIPTORS = [
   },
   {
     name: 'feishu.bitable.record.delete',
-    summary: '删除一条记录；始终要求短期显式确认',
+    summary: '预览或删除一条记录；始终要求 Gateway 绑定的短期用户确认',
     mutating: true,
     approval: 'user-confirmation',
     requiredFields: ['resource', 'recordId'],
     schema: objectSchema(
-      { resource: commonResourceProperty, recordId: recordIdProperty, confirmation: confirmationProperty },
+      {
+        resource: commonResourceProperty,
+        recordId: recordIdProperty,
+        expectedRecordFingerprint: recordFingerprintProperty,
+        confirmation: confirmationProperty,
+      },
       ['resource', 'recordId'],
     ),
     idempotency: { required: true, replayReturnsFirstCommittedResult: true },
@@ -723,6 +788,26 @@ export const FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES = {
     expiresAt: 1_800_000_000_000,
     auditId: 'audit-preview-conformance',
     highImpactFields: [],
+  },
+  deleteConfirmationBinding: {
+    v: 2,
+    requesterUserId: 'feishu:ou_alice',
+    agentGroupId: 'bitable-worker',
+    operation: 'feishu.bitable.record.delete',
+    resource: 'sales.pipeline',
+    recordId: 'rec-conformance',
+    expectedRecordFingerprint: `sha256:${'d'.repeat(64)}`,
+    exp: 1_800_000_000_000,
+    nonce: 'nonce-delete-conformance',
+  },
+  deletePreview: {
+    recordId: 'rec-conformance',
+    fields: { Name: 'Delete me', Status: 'Test' },
+    expectedRecordFingerprint: `sha256:${'d'.repeat(64)}`,
+    bindingHash: `sha256:${'e'.repeat(64)}`,
+    confirmationRequest: 'opaque-delete-preview-request',
+    expiresAt: 1_800_000_000_000,
+    auditId: 'audit-delete-preview-conformance',
   },
 } as const;
 

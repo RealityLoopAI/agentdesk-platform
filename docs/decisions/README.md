@@ -126,7 +126,15 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0073](ADR-0073-host-mediated-gateway-confirmation.md) | Host-mediated Gateway 确认签发：Host 只收集可信用户交互，Gateway 验证 opaque Preview 并签发绑定用户、组、操作、资源、记录、Patch、Fingerprint、有效期和 Nonce 的一次性 Token；旧 Gateway 404、跨用户、过期、伪造或签名失败均 Fail Closed，且不形成平行业务授权路径 | Accepted | 2026-07-30 | `gateway`, `confirmation`, `identity-trust-chain`, `interactive`, `feishu`, `fail-closed` |
 | [ADR-0072](ADR-0072-operator-specific-doubao-wav-extraction.md) | 将豆包 WAV 实验提取实现为 operator-specific 两阶段示例 | Superseded by ADR-0074 | 2026-07-30 | `doubao`, `speech`, `structured-output`, `examples`, `privacy`, `provider` |
 | [ADR-0074](ADR-0074-single-stage-ark-multimodal-wav-extraction.md) | 用方舟原生音频模型单阶段提取 WAV 实验信息 | Accepted | 2026-07-30 | `doubao`, `ark`, `multimodal`, `audio`, `structured-output`, `examples` |
+| [ADR-0075](ADR-0075-gateway-owned-bitable-delete-confirmation.md) | Gateway-owned 单条 Bitable Delete 确认与核验 | Accepted | 2026-07-30 | `gateway`, `confirmation`, `bitable`, `delete`, `security` |
+| [ADR-0076](ADR-0076-macos-ffmpeg-xiaohuan-realtime-ingress.md) | macOS 使用 FFmpeg 接收小环实时 RTP 音频 | Accepted | 2026-07-30 | `examples`, `audio`, `rtp`, `ffmpeg`, `macos` |
+| [ADR-0077](ADR-0077-continuous-pcm-energy-vad-service.md) | 持续 PCM 能量 VAD 小环监听服务 | Accepted | 2026-07-30 | `examples`, `audio`, `vad`, `operator-service` |
+| [ADR-0078](ADR-0078-runner-private-bitable-confirmation-preview-cache.md) | Runner 私有保存 Bitable 确认预览 | Accepted | 2026-07-30 | `gateway`, `confirmation`, `agent-runner`, `security` |
 | [ADR-0079](ADR-0079-operator-voice-photo-feishu-monitor.md) | 以独立运营服务轮询图片并直发固定飞书私聊 | Accepted | 2026-07-30 | `examples`, `feishu`, `smb`, `polling`, `sqlite`, `operator-service` |
+| [ADR-0080](ADR-0080-typed-per-group-provider-model.md) | 使用类型化的组级 Provider 模型覆盖 | Accepted | 2026-07-30 | `provider`, `agent-group`, `configuration`, `vision` |
+| [ADR-0081](ADR-0081-confirmation-delivered-correlation-event.md) | 用相关键连接确认卡投递事件与设备语音回执 | Superseded by ADR-0083 | 2026-07-30 | `confirmation`, `events`, `voice`, `correlation` |
+| [ADR-0082](ADR-0082-evidence-bounded-voice-field-normalization.md) | 以原始证据和实时表 Schema 约束语音字段归一化 | Accepted | 2026-07-30 | `voice`, `bitable`, `normalization`, `evidence` |
+| [ADR-0083](ADR-0083-early-audio-ack-and-confirmation-serialized-ingress.md) | 完整 WAV 立即回执并按确认生命周期串行投递语音草稿 | Accepted | 2026-07-30 | `voice`, `confirmation`, `serialization`, `tts` |
 
 ---
 

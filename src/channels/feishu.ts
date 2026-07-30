@@ -80,6 +80,7 @@ import { revokeGrantsForLeaver } from '../db/dm-grants.js';
 import { hasTable } from '../db/connection.js';
 import { getDb } from '../db/connection.js';
 import { createFeishuOutboundImageTransport } from './feishu/outbound-image.js';
+import { shouldRenderAsMarkdownCard } from './feishu/markdown.js';
 
 // Re-export the subset of primitives that existing callers (including
 // tests) reach for via `./feishu`. Keeping the public surface stable means
@@ -631,6 +632,20 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
         }
         await handleMessageReceive(data);
       },
+      'card.action.trigger': async (data: unknown) => {
+        log.info('Feishu long-connection payload accepted', {
+          eventType: 'card.action.trigger',
+        });
+        if (!isFeishuCardActionEvent(data)) {
+          log.warn('Feishu long-connection card action ignored: unsupported payload shape');
+          return {};
+        }
+        await handleCardAction(data);
+        // The WebSocket client wraps this in a successful callback response.
+        // Returning an explicit empty body mirrors the webhook transport and
+        // satisfies Feishu's three-second acknowledgement requirement.
+        return {};
+      },
       // Roster-DM leave/disband revoke (ADR-0023 item 11b, best-effort).
       'im.chat.member.user.deleted_v1': async (data: unknown) => {
         handleChatMemberLeave(data, false);
@@ -1111,15 +1126,48 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
       if (!text.trim()) return firstId;
 
       const chunks = splitForLimit(text, DEFAULT_FEISHU_TEXT_LIMIT);
+      const renderAsMarkdownCard = shouldRenderAsMarkdownCard(content, text);
       const mirrorDeliveryId = message.source?.originId ? message.source.messageId : undefined;
       for (let index = 0; index < chunks.length; index += 1) {
-        const messageId = await createMessage(
-          target,
-          'text',
-          JSON.stringify({ text: chunks[index] }),
-          firstId ? null : index === 0 ? threadId : null,
-          mirrorDeliveryId ? feishuMirrorRequestUuid(mirrorDeliveryId, index) : undefined,
-        );
+        const replyThreadId = firstId ? null : index === 0 ? threadId : null;
+        const idempotencyKey = mirrorDeliveryId
+          ? feishuMirrorRequestUuid(mirrorDeliveryId, index)
+          : undefined;
+        let messageId: string | undefined;
+        if (renderAsMarkdownCard) {
+          try {
+            messageId = await createMessage(
+              target,
+              'interactive',
+              JSON.stringify(buildMarkdownCard(chunks[index])),
+              replyThreadId,
+              idempotencyKey,
+            );
+          } catch (err) {
+            log.warn('Feishu markdown card send failed; falling back to plain text', {
+              chunkIndex: index,
+              err,
+            });
+            const fallbackIdempotencyKey = mirrorDeliveryId
+              ? feishuMirrorRequestUuid(`${mirrorDeliveryId}\0markdown-fallback`, index)
+              : undefined;
+            messageId = await createMessage(
+              target,
+              'text',
+              JSON.stringify({ text: chunks[index] }),
+              replyThreadId,
+              fallbackIdempotencyKey,
+            );
+          }
+        } else {
+          messageId = await createMessage(
+            target,
+            'text',
+            JSON.stringify({ text: chunks[index] }),
+            replyThreadId,
+            idempotencyKey,
+          );
+        }
         if (!firstId) firstId = messageId;
       }
       return firstId;

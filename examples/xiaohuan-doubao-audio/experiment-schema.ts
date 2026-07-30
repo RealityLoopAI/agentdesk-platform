@@ -78,25 +78,36 @@ export function validateExperimentAudioV1(
   expected: { captureId: string; transcript?: string },
 ): ExperimentAudioV1 {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throwInvalid();
+    throwInvalid('root_shape');
   }
   const root = value as Record<string, unknown>;
+  if (root.schemaVersion !== 'experiment-audio.v1') {
+    throwInvalid('schema_version');
+  }
+  if (root.captureId !== expected.captureId) {
+    throwInvalid('capture_id');
+  }
+  if (typeof root.transcript !== 'string' || !root.transcript.trim()) {
+    throwInvalid('empty_transcript');
+  }
+  if (expected.transcript !== undefined && root.transcript !== expected.transcript) {
+    throwInvalid('transcript_mismatch');
+  }
   if (
-    root.schemaVersion !== 'experiment-audio.v1' ||
-    root.captureId !== expected.captureId ||
-    typeof root.transcript !== 'string' ||
-    !root.transcript.trim() ||
-    (expected.transcript !== undefined && root.transcript !== expected.transcript) ||
     !root.experiment ||
     typeof root.experiment !== 'object' ||
     Array.isArray(root.experiment)
   ) {
-    throwInvalid();
+    throwInvalid('experiment_shape');
   }
   const experiment = root.experiment as Record<string, unknown>;
+  if (!isNullableString(experiment.title)) {
+    throwInvalid('title_shape');
+  }
+  if (!isStringArray(experiment.sampleIds)) {
+    throwInvalid('sample_ids_shape');
+  }
   if (
-    !isNullableString(experiment.title) ||
-    !isStringArray(experiment.sampleIds) ||
     !Array.isArray(experiment.actions) ||
     !experiment.actions.every(
       (item) =>
@@ -104,7 +115,11 @@ export function validateExperimentAudioV1(
         typeof item === 'object' &&
         typeof (item as Record<string, unknown>).name === 'string' &&
         isNullableString((item as Record<string, unknown>).target),
-    ) ||
+    )
+  ) {
+    throwInvalid('actions_shape');
+  }
+  if (
     !Array.isArray(experiment.measurements) ||
     !experiment.measurements.every((item) => {
       if (!item || typeof item !== 'object') return false;
@@ -116,19 +131,24 @@ export function validateExperimentAudioV1(
           typeof measurement.value === 'string') &&
         isNullableString(measurement.unit)
       );
-    }) ||
-    !isStringArray(experiment.observations) ||
-    !isNullableString(experiment.notes)
+    })
   ) {
-    throwInvalid();
+    throwInvalid('measurements_shape');
+  }
+  if (!isStringArray(experiment.observations)) {
+    throwInvalid('observations_shape');
+  }
+  if (!isNullableString(experiment.notes)) {
+    throwInvalid('notes_shape');
   }
   return value as ExperimentAudioV1;
 }
 
-function throwInvalid(): never {
+function throwInvalid(detailCode: string): never {
   throw new AudioPipelineError(
     'multimodal',
     'INVALID_STRUCTURED_OUTPUT',
     'Model output does not match experiment-audio.v1',
+    { detailCode },
   );
 }

@@ -110,8 +110,38 @@ async function main(): Promise<void> {
     }),
   });
 
+  const deletePreviewed = await handleGatewayExecute(runtime, {
+    operation: 'feishu.bitable.record.delete',
+    input: {
+      resource: 'e2e.contacts',
+      recordId: 'rec-e2e-created',
+    },
+    context: { purpose: 'container-a2a-gateway-delete-confirmation-e2e' },
+    dryRun: true,
+  });
+  if (deletePreviewed.isError) fail('delete dry-run returned an error');
+  const deletePreviewBody = toolJson(deletePreviewed);
+  const deletePreview = deletePreviewBody.preview;
+  if (!deletePreview || typeof deletePreview !== 'object' || Array.isArray(deletePreview)) {
+    fail('delete dry-run omitted preview');
+  }
+  writeMessageOut({
+    id: 'container-a2a-delete-confirmation',
+    in_reply_to: row.id,
+    kind: 'system',
+    platform_id: row.platform_id,
+    channel_type: row.channel_type,
+    thread_id: row.thread_id,
+    content: JSON.stringify({
+      action: 'gateway_confirmation_request',
+      kind: 'delete',
+      title: 'E2E delete confirmation',
+      preview: deletePreview,
+    }),
+  });
+
   console.log(
-    `gateway-e2e-probe: trusted user ${identity.userId}; describe + idempotent create + update preview completed`,
+    `gateway-e2e-probe: trusted user ${identity.userId}; describe + idempotent create + update/delete previews completed`,
   );
 }
 

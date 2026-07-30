@@ -1,7 +1,7 @@
 ## Why
 
 VisionCortex asynchronously writes completed experiment archives to
-`smb://192.168.66.149/video_database/VisionCortex实验档案库`, but AgentDesk
+`smb://192.168.66.149/video_database/VisionCortexExperimentArchive`, but AgentDesk
 currently has no identity-bound, auditable way to inspect those archives when a
 user asks about an experiment, report, key frame, key clip, or structured JSON
 index. The capability must be strictly request-driven: AgentDesk must not
@@ -59,7 +59,7 @@ None.
   and execution dispatch without changing the core Gateway wire contract.
 - Requires the operator to mount
   `smb://192.168.66.149/video_database` read-only on the AgentDesk host and set
-  `VISION_ARCHIVE_ROOT` to the mounted `VisionCortex实验档案库` directory.
+  `VISION_ARCHIVE_ROOT` to the mounted `VisionCortexExperimentArchive` directory.
 - Introduces no AgentDesk database migration, channel contract change,
   container-to-host protocol change, VisionCortex dependency, SMB library, or
   direct NAS credential exposure to Agent containers.

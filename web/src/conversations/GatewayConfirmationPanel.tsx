@@ -65,6 +65,29 @@ function ConfirmationSummary({ confirmation }: { confirmation: GatewayConfirmati
     );
   }
 
+  if (confirmation.kind === 'delete') {
+    const fields =
+      confirmation.display.fields && typeof confirmation.display.fields === 'object'
+        ? Object.entries(confirmation.display.fields as Record<string, unknown>)
+        : [];
+    return (
+      <>
+        <p className="mt-1 text-sm text-muted">
+          删除记录{' '}
+          <code className="rounded bg-brand-subtle px-1 text-ink">{String(confirmation.display.recordId)}</code>
+        </p>
+        <dl className="mt-3 grid gap-2 rounded-md border border-danger/40 bg-danger/5 p-3 text-sm">
+          {fields.map(([name, value]) => (
+            <div key={name} className="grid grid-cols-[minmax(7rem,0.4fr)_1fr] gap-3">
+              <dt className="font-medium text-ink">{name}</dt>
+              <dd className="break-words text-muted">{valueText(value)}</dd>
+            </div>
+          ))}
+        </dl>
+      </>
+    );
+  }
+
   const fields =
     confirmation.display.fields && typeof confirmation.display.fields === 'object'
       ? Object.entries(confirmation.display.fields as Record<string, unknown>)
@@ -118,7 +141,7 @@ export function GatewayConfirmationPanel({ laneId }: { laneId: string }) {
                 onClick={() => resolve.mutate({ laneId, confirmationId: confirmation.id, decision: 'approve' })}
               >
                 {resolve.isPending ? <LoaderCircle aria-hidden="true" className="size-4 animate-spin" /> : null}
-                {confirmation.kind === 'update' ? '确认修改' : '确认新增'}
+                {confirmation.kind === 'update' ? '确认修改' : confirmation.kind === 'delete' ? '确认删除' : '确认新增'}
               </Button>
               <Button
                 variant="secondary"

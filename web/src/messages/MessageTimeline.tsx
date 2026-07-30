@@ -23,7 +23,7 @@ function formatTime(timestamp: string): string {
 
 function AgentMessage({ message }: { message: HistoryMessage }) {
   return (
-    <article className="flex max-w-3xl items-start gap-3">
+    <article className="flex w-full min-w-0 max-w-3xl items-start gap-3">
       <BrandLogo className="mt-1 size-8 shrink-0" decorative />
       <div className="min-w-0 flex-1">
         <div className="mb-1.5 flex items-center gap-2 text-xs text-muted">
@@ -51,8 +51,8 @@ function UserMessage({
   onRetry?: () => void;
 }) {
   return (
-    <article className="ml-auto flex max-w-[min(82%,720px)] flex-col items-end">
-      <div className="rounded-lg rounded-br-sm bg-brand px-4 py-2.5 text-[15px] leading-6 whitespace-pre-wrap text-white">
+    <article className="ml-auto flex min-w-0 max-w-[min(82%,720px)] flex-col items-end">
+      <div className="max-w-full min-w-0 rounded-lg rounded-br-sm bg-brand px-4 py-2.5 text-[15px] leading-6 whitespace-pre-wrap text-white [overflow-wrap:anywhere]">
         {text}
       </div>
       <div className="mt-1.5 flex min-h-5 items-center gap-1.5 text-xs text-muted">
@@ -128,7 +128,7 @@ export function MessageTimeline({
       aria-relevant="additions"
       className="min-h-0 flex-1 overflow-y-auto bg-canvas"
     >
-      <div className="mx-auto flex min-h-full max-w-4xl flex-col px-4 py-6 sm:px-6">
+      <div className="mx-auto flex min-h-full w-full min-w-0 max-w-4xl flex-col px-4 py-6 sm:px-6">
         {hasMore ? (
           <Button
             variant="secondary"
@@ -147,7 +147,7 @@ export function MessageTimeline({
             <p className="mt-2 text-sm leading-6 text-muted">这里发送的消息会继续进入同一段助手上下文。</p>
           </div>
         ) : (
-          <div className="mt-auto space-y-7">
+          <div className="mt-auto min-w-0 space-y-7">
             {messages.map((message) =>
               message.direction === 'agent' ? (
                 <AgentMessage key={message.id} message={message} />

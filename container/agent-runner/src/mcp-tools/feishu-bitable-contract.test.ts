@@ -11,9 +11,14 @@ import {
   FEISHU_BITABLE_OPERATION_NAMES,
   FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES,
   bitableBatchResultSchema,
+  bitableDeleteConfirmationBindingSchema,
+  bitableDeletePreviewDisplaySchema,
+  bitableDeletePreviewSchema,
+  bitableDeleteResultSchema,
   bitableOrderBySchema,
   bitableRecordQuerySchema,
   bitableUpdateConfirmationBindingSchema,
+  bitableUpdatePreviewDisplaySchema,
   bitableUpdatePreviewSchema,
   parseFeishuBitableInput,
 } from './feishu-bitable-contract.js';
@@ -128,6 +133,53 @@ describe('Feishu Bitable Gateway operation contract', () => {
       bitableUpdateConfirmationBindingSchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.updateConfirmationBinding),
     ).not.toThrow();
     expect(() => bitableUpdatePreviewSchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.updatePreview)).not.toThrow();
+    expect(() =>
+      bitableDeleteConfirmationBindingSchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.deleteConfirmationBinding),
+    ).not.toThrow();
+    expect(() => bitableDeletePreviewSchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.deletePreview)).not.toThrow();
+    expect(() =>
+      bitableDeleteResultSchema.parse({
+        recordId: 'rec-conformance',
+        deleted: true,
+        verification: {
+          verified: true,
+          deleteAuditId: 'audit-delete',
+          getAuditId: 'audit-get',
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it('requires Delete commit fingerprint and bounds the Gateway-owned preview', () => {
+    const parsed = FEISHU_BITABLE_INPUT_SCHEMAS['feishu.bitable.record.delete'].parse({
+      resource: 'sales.pipeline',
+      recordId: 'rec-conformance',
+      expectedRecordFingerprint: `sha256:${'d'.repeat(64)}`,
+      confirmation: 'opaque-delete-confirmation',
+    });
+    expect(parsed.expectedRecordFingerprint).toBe(`sha256:${'d'.repeat(64)}`);
+    expect(() =>
+      bitableDeletePreviewSchema.parse({
+        ...FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.deletePreview,
+        fields: Object.fromEntries(Array.from({ length: 201 }, (_, index) => [`Field ${index}`, index])),
+      }),
+    ).toThrow();
+  });
+
+  it('defines model-visible confirmation previews that reject the opaque Gateway request', () => {
+    const { confirmationRequest: _updateOpaque, ...updateDisplay } =
+      FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.updatePreview;
+    const { confirmationRequest: _deleteOpaque, ...deleteDisplay } =
+      FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.deletePreview;
+
+    expect(() => bitableUpdatePreviewDisplaySchema.parse(updateDisplay)).not.toThrow();
+    expect(() => bitableDeletePreviewDisplaySchema.parse(deleteDisplay)).not.toThrow();
+    expect(() =>
+      bitableUpdatePreviewDisplaySchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.updatePreview),
+    ).toThrow();
+    expect(() =>
+      bitableDeletePreviewDisplaySchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.deletePreview),
+    ).toThrow();
   });
 
   it('bounds flat structured queries and rejects operator/value ambiguity', () => {

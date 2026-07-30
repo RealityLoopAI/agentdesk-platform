@@ -11,6 +11,7 @@
   "additionalMounts": [],
   "skills": ["vision-archive-query"],
   "provider": "openai",
+  "providerModel": "glm-5.2",
   "memoryMode": "gateway",
   "a2aSessionMode": "root-session",
   "groupName": "AgentDesk Vision Archive Worker",

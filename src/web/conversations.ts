@@ -86,7 +86,7 @@ export interface WebDeliverySubscriptionState {
 
 export interface WebGatewayConfirmation {
   id: string;
-  kind: 'update' | 'create';
+  kind: 'update' | 'create' | 'delete';
   title: string;
   display: Record<string, unknown>;
   expiresAt: string;
@@ -346,7 +346,11 @@ function compareKey(left: HistoryKey, right: HistoryKey): number {
 function messageText(raw: string): string {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return typeof parsed.text === 'string' ? parsed.text : raw;
+    return typeof parsed.displayText === 'string'
+      ? parsed.displayText
+      : typeof parsed.text === 'string'
+        ? parsed.text
+        : raw;
   } catch {
     return raw;
   }

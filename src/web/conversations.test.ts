@@ -11,7 +11,7 @@ import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { listConversationBindings } from '../db/conversation-lanes.js';
 import { createPendingGatewayConfirmation } from '../db/gateway-confirmations.js';
 import { runMigrations } from '../db/migrations/index.js';
-import { openOutboundDbRw, resolveSession, writeSessionMessage } from '../session-manager.js';
+import { openInboundDb, openOutboundDbRw, resolveSession, writeSessionMessage } from '../session-manager.js';
 import {
   createWebConversation,
   getWebConversationHistory,
@@ -203,6 +203,39 @@ describe('Web conversation service', () => {
     expect(() => getWebConversationHistory({ userId: 'alice', laneId: lane.id, cursor: 'not-a-cursor' })).toThrowError(
       expect.objectContaining({ code: 'invalid_cursor' }),
     );
+  });
+
+  it('uses a presentation-safe display text without changing the Agent-visible payload', () => {
+    const lane = createWebConversation('alice', 'ag-1');
+    const binding = listConversationBindings(lane.id)[0]!;
+    const resolved = resolveSession('ag-1', binding.messaging_group_id, null, 'per-user', 'alice', null, null, lane.id);
+    const machinePayload = JSON.stringify({
+      schemaVersion: 'xiaohuan-bitable-bridge.v1',
+      transcript: '样品 A 温度为二十五度。',
+      fields: { Temperature: 25 },
+    });
+    writeSessionMessage('ag-1', resolved.session.id, {
+      id: 'in-voice',
+      kind: 'chat',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      platformId: binding.platform_id,
+      channelType: 'feishu',
+      content: JSON.stringify({
+        text: machinePayload,
+        displayText: '语音指令：样品 A 温度为二十五度。',
+      }),
+      originUserId: 'alice',
+    });
+
+    const [message] = getWebConversationHistory({ userId: 'alice', laneId: lane.id }).messages;
+    expect(message?.text).toBe('语音指令：样品 A 温度为二十五度。');
+
+    const inbound = openInboundDb('ag-1', resolved.session.id);
+    const stored = inbound.prepare('SELECT content FROM messages_in WHERE id = ?').get('in-voice') as {
+      content: string;
+    };
+    inbound.close();
+    expect(JSON.parse(stored.content)).toMatchObject({ text: machinePayload });
   });
 
   it('keeps A2A Worker results internal instead of rendering them as user-authored messages', () => {
