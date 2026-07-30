@@ -22,6 +22,8 @@ import Database from 'better-sqlite3';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WAIT_MS = 90_000;
 const POLL_MS = 250;
+const E2E_FINGERPRINT = `sha256:${'a'.repeat(64)}`;
+const E2E_BINDING_HASH = `sha256:${'b'.repeat(64)}`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -133,12 +135,35 @@ async function main(): Promise<void> {
       response.end(
         JSON.stringify({
           contractVersion: body.contractVersion,
-          operations: [{ name: 'feishu.bitable.record.create', mutating: true }],
+          operations: [
+            { name: 'feishu.bitable.record.create', mutating: true },
+            { name: 'feishu.bitable.record.update', mutating: true, approval: 'user-confirmation' },
+          ],
         }),
       );
       return;
     }
     if (request.url === '/execute') {
+      if (body.operation === 'feishu.bitable.record.update' && body.dryRun === true) {
+        response.end(
+          JSON.stringify({
+            contractVersion: body.contractVersion,
+            ok: true,
+            preview: {
+              recordId: 'rec-e2e-created',
+              diff: [{ field: 'Status', before: 'New', after: 'Confirmed', highImpact: false }],
+              expectedRecordFingerprint: E2E_FINGERPRINT,
+              bindingHash: E2E_BINDING_HASH,
+              confirmationRequest: 'opaque-e2e-update-preview',
+              expiresAt: Date.now() + 60_000,
+              auditId: 'gateway-e2e-preview-audit',
+              highImpactFields: [],
+            },
+            auditId: 'gateway-e2e-preview-audit',
+          }),
+        );
+        return;
+      }
       const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey : '';
       if (!idempotencyKey) {
         response.statusCode = 422;
@@ -159,6 +184,30 @@ async function main(): Promise<void> {
       };
       committedCreates.set(idempotencyKey, created);
       response.end(JSON.stringify(created));
+      return;
+    }
+    if (request.url === '/confirmation/issue') {
+      const requester = body.requester as { userId?: string } | undefined;
+      const agent = body.agent as { agentGroupId?: string } | undefined;
+      if (
+        requester?.userId !== 'user-e2e' ||
+        agent?.agentGroupId !== 'worker-e2e' ||
+        body.requesterSource !== 'session' ||
+        body.confirmationRequest !== 'opaque-e2e-update-preview'
+      ) {
+        response.statusCode = 403;
+        response.end(JSON.stringify({ code: 'BACKEND_UNAUTHORIZED', message: 'confirmation identity mismatch' }));
+        return;
+      }
+      response.end(
+        JSON.stringify({
+          ok: true,
+          confirmation: 'e2e-private-confirmation-token',
+          expiresAt: Date.now() + 30_000,
+          bindingHash: E2E_BINDING_HASH,
+          auditId: 'gateway-e2e-confirmation-audit',
+        }),
+      );
       return;
     }
     response.end(
@@ -201,6 +250,7 @@ async function main(): Promise<void> {
     activeContainerCount = containerRunner.getActiveContainerCount;
     const destinationDb = await import('../src/modules/agent-to-agent/db/agent-destinations.js');
     await import('../src/modules/gateway-audit/index.js');
+    const confirmationBroker = await import('../src/modules/gateway-confirmation/index.js');
 
     const central = initDb(path.join(tmp, 'central.db'));
     migrations.runMigrations(central);
@@ -239,9 +289,11 @@ async function main(): Promise<void> {
       config.provider = 'mock';
       config.skills = [];
       config.idleExitMs = 1_500;
+      config.a2aSessionMode = 'root-session';
       config.backendGateway = {
         baseUrl: `http://host.docker.internal:${gatewayPort}`,
         timeoutMs: 10_000,
+        signingKey: 'container-e2e-signing-key',
       };
     });
 
@@ -367,6 +419,65 @@ async function main(): Promise<void> {
     );
     await delivery.deliverSessionMessages(worker);
 
+    const pending = central
+      .prepare(
+        `SELECT confirmation_id, requester_user_id, agent_group_id, status
+         FROM pending_gateway_confirmations
+         WHERE confirmation_id = 'container-a2a-update-confirmation'`,
+      )
+      .get() as
+      | {
+          confirmation_id: string;
+          requester_user_id: string;
+          agent_group_id: string;
+          status: string;
+        }
+      | undefined;
+    if (
+      !pending ||
+      pending.requester_user_id !== 'user-e2e' ||
+      pending.agent_group_id !== 'worker-e2e' ||
+      pending.status !== 'pending'
+    ) {
+      throw new Error(`Host confirmation did not preserve the A2A actor: ${JSON.stringify(pending)}`);
+    }
+    const confirmationDecision = await confirmationBroker.resolveGatewayConfirmationDecision(
+      pending.confirmation_id,
+      'user-e2e',
+      'approve',
+    );
+    if (!confirmationDecision.resolved) {
+      throw new Error(`Host confirmation approval failed: ${JSON.stringify(confirmationDecision)}`);
+    }
+    const confirmationResponse = await waitFor('private worker confirmation response', () => {
+      const db = new Database(workerInboundPath, { readonly: true });
+      try {
+        return db
+          .prepare(
+            `SELECT content FROM messages_in
+             WHERE kind = 'system'
+               AND json_extract(content, '$.type') = 'gateway_confirmation_response'
+               AND json_extract(content, '$.confirmationId') = 'container-a2a-update-confirmation'
+             LIMIT 1`,
+          )
+          .get() as { content: string } | undefined;
+      } finally {
+        db.close();
+      }
+    });
+    const confirmationBody = JSON.parse(confirmationResponse.content) as {
+      status?: string;
+      confirmation?: string;
+      bindingHash?: string;
+    };
+    if (
+      confirmationBody.status !== 'approved' ||
+      confirmationBody.confirmation !== 'e2e-private-confirmation-token' ||
+      confirmationBody.bindingHash !== E2E_BINDING_HASH
+    ) {
+      throw new Error('private worker confirmation response was not correctly bound');
+    }
+
     const audit = central
       .prepare(
         `SELECT user_id, path, operation, logical_resource, requester_source, status
@@ -395,10 +506,13 @@ async function main(): Promise<void> {
       throw new Error(`Host gateway audit assertion failed: ${JSON.stringify(audit)}`);
     }
     const executeRequests = gatewayRequests.filter((request) => request.path === '/execute');
-    if (executeRequests.length !== 2) {
-      throw new Error(`Gateway expected one create plus one replay, got ${executeRequests.length}`);
+    if (executeRequests.length !== 3) {
+      throw new Error(`Gateway expected create, replay and update preview, got ${executeRequests.length}`);
     }
-    const keys = executeRequests.map((request) => request.body.idempotencyKey);
+    const createRequests = executeRequests.filter(
+      (request) => request.body.operation === 'feishu.bitable.record.create',
+    );
+    const keys = createRequests.map((request) => request.body.idempotencyKey);
     if (
       keys.some((key) => key !== 'container-a2a-stable-create') ||
       committedCreates.size !== 1 ||
@@ -409,9 +523,13 @@ async function main(): Promise<void> {
     ) {
       throw new Error(`Gateway HTTP identity/idempotency assertion failed: ${JSON.stringify(executeRequests)}`);
     }
+    const issueRequests = gatewayRequests.filter((request) => request.path === '/confirmation/issue');
+    if (issueRequests.length !== 1) {
+      throw new Error(`Gateway expected one Host confirmation issue call, got ${issueRequests.length}`);
+    }
 
     console.log(
-      '✓ e2e-container-a2a-gateway PASSED — Web identity survived real-container A2A; create replay committed once.',
+      '✓ e2e-container-a2a-gateway PASSED — Web identity survived real-container A2A; create replay and Host-mediated update confirmation stayed bound.',
     );
   } finally {
     if (stopAllContainers) await stopAllContainers('e2e-cleanup');

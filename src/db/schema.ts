@@ -356,6 +356,37 @@ CREATE TABLE pending_questions (
   created_at     TEXT NOT NULL
 );
 
+-- Host-mediated Gateway confirmation state (ADR-0073). The Host derives
+-- requester + route from the trusted inbound chain; containers cannot write
+-- this table. Execution tokens are delivered into inbound.db and never stored
+-- in the central DB.
+CREATE TABLE pending_gateway_confirmations (
+  confirmation_id      TEXT PRIMARY KEY,
+  session_id           TEXT NOT NULL REFERENCES sessions(id),
+  message_out_id       TEXT NOT NULL UNIQUE,
+  kind                 TEXT NOT NULL CHECK(kind IN ('update', 'create')),
+  requester_user_id    TEXT NOT NULL REFERENCES users(id),
+  agent_group_id       TEXT NOT NULL REFERENCES agent_groups(id),
+  conversation_lane_id TEXT REFERENCES conversation_lanes(id),
+  channel_type         TEXT NOT NULL,
+  platform_id          TEXT NOT NULL,
+  thread_id            TEXT,
+  confirmation_request TEXT,
+  display_json         TEXT NOT NULL,
+  title                TEXT NOT NULL,
+  options_json         TEXT NOT NULL,
+  created_at           TEXT NOT NULL,
+  expires_at           TEXT NOT NULL,
+  status               TEXT NOT NULL DEFAULT 'pending'
+                       CHECK(status IN ('pending', 'issuing', 'approved', 'rejected', 'expired', 'failed')),
+  resolved_at          TEXT,
+  error_code           TEXT
+);
+CREATE INDEX idx_pending_gateway_confirmations_actor
+  ON pending_gateway_confirmations(requester_user_id, status, expires_at);
+CREATE INDEX idx_pending_gateway_confirmations_lane
+  ON pending_gateway_confirmations(conversation_lane_id, requester_user_id, status);
+
 -- Pending approvals for unknown senders (unknown_sender_policy='request_approval').
 -- In-flight dedup via UNIQUE(messaging_group_id, sender_identity): a second
 -- message from the same unknown sender while a card is pending is silently

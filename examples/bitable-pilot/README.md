@@ -1,4 +1,4 @@
-# Bitable Read + Create pilot topology
+# Bitable Query + Create + Update pilot topology
 
 This example keeps the platform core business-agnostic while provisioning a
 dedicated `agentdesk-bitable-worker`.
@@ -14,7 +14,9 @@ The reconciler is idempotent. It:
 - keeps `root-session` A2A isolation;
 - exposes the Worker to Frontdesk as destination `bitable`;
 - exposes Frontdesk back to the Worker as destination `frontdesk`;
-- refreshes destination files for active Frontdesk sessions.
+- refreshes destination files for active Frontdesk sessions;
+- teaches the Worker bounded structured queries and Host-confirmed single
+  Create/Update while keeping Delete and Batch operations closed.
 
 Worker configuration and instructions live in
 `groups/agentdesk-bitable-worker/`. Gateway secrets and physical Feishu

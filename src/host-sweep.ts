@@ -224,6 +224,15 @@ async function sweep(): Promise<void> {
     for (const session of sessions) {
       await sweepSession(session);
     }
+    // Load the broker lazily so host-sweep stays below the router/delivery
+    // registries in the module graph. A static import here creates a cycle
+    // (delivery -> host-sweep -> gateway-confirmation -> delivery) and can run
+    // the broker's registrations while those registries are still in TDZ.
+    const { sweepExpiredGatewayConfirmations } = await import('./modules/gateway-confirmation/index.js');
+    const expiredConfirmations = await sweepExpiredGatewayConfirmations();
+    if (expiredConfirmations > 0) {
+      log.info('Expired Gateway confirmations', { count: expiredConfirmations });
+    }
   } catch (err) {
     log.error('Host sweep error', { err });
   }

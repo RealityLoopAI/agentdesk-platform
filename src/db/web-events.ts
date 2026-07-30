@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 import { getDb } from './connection.js';
 
-export type WebEventType = 'conversation.message.accepted' | 'conversation.message.available';
+export type WebEventType =
+  | 'conversation.message.accepted'
+  | 'conversation.message.available'
+  | 'conversation.confirmation.available'
+  | 'conversation.confirmation.resolved';
 
 export interface WebEvent {
   sequence: number;

@@ -368,6 +368,28 @@ export interface PendingApproval {
   options_json: string;
 }
 
+export interface PendingGatewayConfirmation {
+  confirmation_id: string;
+  session_id: string;
+  message_out_id: string;
+  kind: 'update' | 'create';
+  requester_user_id: string;
+  agent_group_id: string;
+  conversation_lane_id: string | null;
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+  confirmation_request: string | null;
+  display_json: string;
+  title: string;
+  options_json: string;
+  created_at: string;
+  expires_at: string;
+  status: 'pending' | 'issuing' | 'approved' | 'rejected' | 'expired' | 'failed';
+  resolved_at: string | null;
+  error_code: string | null;
+}
+
 // ── Agent destinations (central DB) ──
 
 export interface AgentDestination {

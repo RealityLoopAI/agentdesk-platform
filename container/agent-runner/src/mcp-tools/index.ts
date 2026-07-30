@@ -18,6 +18,7 @@ import './interactive.js';
 import './agents.js';
 import './self-mod.js';
 import './gateway.js';
+import './gateway-confirmation.js';
 import './classify-intent.js';
 import './roster.js';
 import './skill-loader.js';

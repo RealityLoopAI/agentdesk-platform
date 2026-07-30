@@ -19,7 +19,9 @@ import {
   createWebConversation,
   getWebConversationHistory,
   getWebDeliverySubscription,
+  listWebGatewayConfirmations,
   listWebConversations,
+  resolveWebGatewayConfirmation,
   setWebDeliverySubscription,
   submitWebConversationMessage,
   WebConversationError,
@@ -462,6 +464,46 @@ export function createWebRequestHandler(
           const agentGroupId = typeof postBody?.agentGroupId === 'string' ? postBody.agentGroupId : '';
           json(res, 201, { conversation: createWebConversation(authenticated.session.user_id, agentGroupId) });
           return;
+        }
+
+        const confirmationMatch = /^\/api\/conversations\/([^/]+)\/confirmations(?:\/([^/]+))?$/.exec(url.pathname);
+        if (confirmationMatch?.[1]) {
+          let laneId: string;
+          let confirmationId: string | null = null;
+          try {
+            laneId = decodeURIComponent(confirmationMatch[1]);
+            confirmationId = confirmationMatch[2] ? decodeURIComponent(confirmationMatch[2]) : null;
+          } catch {
+            throw new WebRequestError(400, 'invalid_confirmation_id');
+          }
+          if (method === 'GET' && confirmationId === null) {
+            json(
+              res,
+              200,
+              listWebGatewayConfirmations({
+                userId: authenticated.session.user_id,
+                laneId,
+              }),
+            );
+            return;
+          }
+          if (method === 'POST' && confirmationId !== null) {
+            const decision = postBody?.decision;
+            if (decision !== 'approve' && decision !== 'reject') {
+              throw new WebRequestError(400, 'invalid_confirmation_decision');
+            }
+            json(
+              res,
+              200,
+              await resolveWebGatewayConfirmation({
+                userId: authenticated.session.user_id,
+                laneId,
+                confirmationId,
+                decision,
+              }),
+            );
+            return;
+          }
         }
 
         const deliverySubscriptionMatch = /^\/api\/conversations\/([^/]+)\/delivery-subscription$/.exec(url.pathname);

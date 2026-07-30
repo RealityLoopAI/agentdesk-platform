@@ -14,6 +14,7 @@ import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
+import { resetIssuingGatewayConfirmationsAfterRestart } from './db/gateway-confirmations.js';
 import { checkBaseImage, cleanupProxyRuntimeOnBoot, stopAllContainers } from './container-runner.js';
 import { validateStartupConfig } from './config-validate.js';
 import { checkGatewaySigningCoverage } from './gateway-signing-check.js';
@@ -93,6 +94,10 @@ async function main(): Promise<void> {
   const dbPath = path.join(DATA_DIR, 'v2.db');
   const db = initDb(dbPath);
   runMigrations(db);
+  const recoveredConfirmations = resetIssuingGatewayConfirmationsAfterRestart();
+  if (recoveredConfirmations > 0) {
+    log.warn('Recovered interrupted Gateway confirmations', { count: recoveredConfirmations });
+  }
   log.info('Central DB ready', { path: dbPath });
 
   // Record which approval-handler actions are installed (roadmap 5.10).

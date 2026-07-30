@@ -38,10 +38,27 @@ const COMPUTED_FIELD_TYPES = new Set([19, 20, 1001, 1002, 1003, 1004, 1005, 3001
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
 const MAX_BATCH_RECORDS = 100;
+const MAX_QUERY_CONDITIONS = 10;
+const MAX_ORDER_BY = 3;
+const MAX_FILTER_JSON_CHARS = 2_000;
+const MAX_SORT_JSON_CHARS = 1_000;
 const DEFAULT_SCHEMA_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_CURSOR_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_CONFIRMATION_TTL_MS = 5 * 60 * 1000;
 const MAX_RETRY_AFTER_MS = 30_000;
+const STRUCTURED_QUERY_OPERATORS = new Set([
+  'eq',
+  'ne',
+  'isEmpty',
+  'isNotEmpty',
+  'contains',
+  'notContains',
+  'startsWith',
+  'gt',
+  'gte',
+  'lt',
+  'lte',
+]);
 
 const OPERATION_DESCRIPTORS = FEISHU_BITABLE_OPERATION_NAMES.map((name) => {
   const mutating = WRITE_OPERATIONS.has(name);
@@ -52,11 +69,13 @@ const OPERATION_DESCRIPTORS = FEISHU_BITABLE_OPERATION_NAMES.map((name) => {
     mutating,
     approval: DELETE_OPERATIONS.has(name)
       ? 'user-confirmation'
-      : name.endsWith('.update') || name.endsWith('.batch_update')
-        ? 'policy-or-confirmation'
-        : mutating
-          ? 'policy'
-          : undefined,
+      : name === 'feishu.bitable.record.update'
+        ? 'user-confirmation'
+        : name.endsWith('.batch_update')
+          ? 'policy-or-confirmation'
+          : mutating
+            ? 'policy'
+            : undefined,
     requiredFields: requiredFieldsForOperation(name),
     schema: descriptorInputSchema(name),
   };
@@ -267,6 +286,10 @@ export function createFeishuBitableAdapter(options) {
     const operation = String(req?.operation || '');
     let resourceAlias = safeResourceAlias(req?.input?.resource);
     let outcome = 'error';
+    let confirmationBindingHash;
+    let expectedRecordFingerprint;
+    let currentRecordFingerprint;
+    let fingerprintResult;
     try {
       requireEnabledOperation(operation);
       const input = validateOperationInput(operation, req?.input);
@@ -287,6 +310,15 @@ export function createFeishuBitableAdapter(options) {
         if (!idempotencyKey) {
           throw new AdapterError('VALIDATION_FAILED', 'committing writes require idempotencyKey', { status: 422 });
         }
+        if (operation === 'feishu.bitable.record.update') {
+          if (!input.confirmation) {
+            throw new AdapterError('CONFIRMATION_REQUIRED', 'a bound user confirmation is required', {
+              status: 409,
+            });
+          }
+          requireTaggedSha256(input.expectedRecordFingerprint, 'expectedRecordFingerprint');
+          expectedRecordFingerprint = input.expectedRecordFingerprint;
+        }
         idempotencyBinding = hashJson({
           requesterUserId: canonicalUserId(req),
           operation,
@@ -301,6 +333,7 @@ export function createFeishuBitableAdapter(options) {
             });
           }
           outcome = 'replayed';
+          fingerprintResult = operation === 'feishu.bitable.record.update' ? 'replayed' : undefined;
           return { ...cloneJson(prior.response), replayed: true };
         }
       }
@@ -308,6 +341,49 @@ export function createFeishuBitableAdapter(options) {
       if (mutating) {
         await validateWriteInput(operation, input, resource);
       }
+
+      if (operation === 'feishu.bitable.record.update') {
+        if (dryRun) {
+          const preview = await createUpdatePreview(req, input, resource, auditId);
+          confirmationBindingHash = preview.bindingHash;
+          expectedRecordFingerprint = preview.expectedRecordFingerprint;
+          fingerprintResult = 'previewed';
+          outcome = 'preview';
+          return { ok: true, preview, auditId };
+        }
+
+        const confirmationBinding = verifyUpdateConfirmation(
+          input.confirmation,
+          req,
+          input,
+          resource,
+          confirmationSecret,
+          confirmationUses,
+          idempotencyKey,
+          now(),
+        );
+        confirmationBindingHash = taggedHashJson(confirmationBinding);
+        expectedRecordFingerprint = confirmationBinding.expectedRecordFingerprint;
+        const current = await getRecord(input, resource);
+        currentRecordFingerprint = computeFeishuBitableRecordFingerprint(current);
+        if (currentRecordFingerprint !== expectedRecordFingerprint) {
+          fingerprintResult = 'conflict';
+          throw new AdapterError('CONFLICT', 'record changed after preview; generate a new preview and confirmation', {
+            status: 409,
+          });
+        }
+        fingerprintResult = 'match';
+        const result = await updateAndVerify(input, resource, auditId);
+        ensureResponseBound(result, maxResponseBytes);
+        const response = { ok: true, result, auditId };
+        await idempotencyStore.set(idempotencyKey, {
+          bindingHash: idempotencyBinding,
+          response: cloneJson(response),
+        });
+        outcome = 'ok';
+        return response;
+      }
+
       const confirmationBinding = requiredConfirmationBinding(req, operation, input, resource);
       if (confirmationBinding && !dryRun) {
         verifyConfirmation(
@@ -364,6 +440,10 @@ export function createFeishuBitableAdapter(options) {
         idempotencyKey:
           WRITE_OPERATIONS.has(operation) && typeof req?.idempotencyKey === 'string' ? req.idempotencyKey : undefined,
         inputHash: safeInputHash(operation, req?.input),
+        confirmationBindingHash,
+        expectedRecordFingerprint,
+        currentRecordFingerprint,
+        fingerprintResult,
       });
     }
   }
@@ -394,6 +474,110 @@ export function createFeishuBitableAdapter(options) {
       nonce: randomUUID(),
     };
     return signOpaque(payload, confirmationSecret);
+  }
+
+  /**
+   * Exchange a Gateway-created opaque preview request for the execution token.
+   * Only the Host signing proxy may call this method/endpoint after resolving
+   * the actor from the trusted session.
+   */
+  async function issueConfirmationRequest(req) {
+    const startedAt = now();
+    const auditId = randomUUID();
+    let resourceAlias = null;
+    let bindingHash;
+    let outcome = 'error';
+    try {
+      if (req?.requesterSource !== 'session') {
+        throw new AdapterError('BACKEND_UNAUTHORIZED', 'confirmation issuance requires a trusted session actor', {
+          status: 403,
+        });
+      }
+      const requesterUserId = canonicalUserId(req);
+      const agentGroupId = canonicalAgentGroupId(req);
+      if (!requesterUserId || !agentGroupId) {
+        throw new AdapterError(
+          'BACKEND_UNAUTHORIZED',
+          'canonical requester.userId and agent.agentGroupId are required',
+          { status: 403 },
+        );
+      }
+      requireString(req?.confirmationRequest, 'confirmationRequest', 16_384);
+
+      let envelope;
+      try {
+        envelope = verifyOpaque(req.confirmationRequest, confirmationSecret);
+      } catch {
+        throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation request is invalid', { status: 409 });
+      }
+      const binding = validateUpdateConfirmationBinding(envelope?.binding, now());
+      if (envelope?.purpose !== 'bitable-update-preview') {
+        throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation request has an invalid purpose', {
+          status: 409,
+        });
+      }
+      const display = validateUpdateConfirmationDisplay(req?.display);
+      if (!isTaggedSha256(envelope?.displayHash) || envelope.displayHash !== taggedHashJson(display)) {
+        throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation display does not match the Gateway preview', {
+          status: 409,
+        });
+      }
+      resourceAlias = binding.resource;
+      bindingHash = taggedHashJson(binding);
+      if (binding.requesterUserId !== requesterUserId || binding.agentGroupId !== agentGroupId) {
+        throw new AdapterError('BACKEND_UNAUTHORIZED', 'confirmation actor does not match the preview requester', {
+          status: 403,
+        });
+      }
+
+      requireEnabledOperation(binding.operation);
+      const resource = requireAllowedResource(binding.operation, binding.resource);
+      const decision = await decideAuthorization(
+        {
+          ...req,
+          operation: binding.operation,
+        },
+        resource,
+        { resource: binding.resource, recordId: binding.recordId, fields: {} },
+      );
+      if (!decision.allowed) {
+        throw new AdapterError('BACKEND_UNAUTHORIZED', decision.reason || 'business authorization denied', {
+          status: 403,
+        });
+      }
+
+      const confirmation = signOpaque(
+        {
+          purpose: 'bitable-update-confirmation',
+          binding,
+        },
+        confirmationSecret,
+      );
+      outcome = 'issued';
+      return {
+        ok: true,
+        confirmation,
+        expiresAt: binding.exp,
+        bindingHash,
+        auditId,
+      };
+    } catch (error) {
+      const normalized = normalizeError(error);
+      outcome = normalized.code;
+      return { status: normalized.status, body: gatewayErrorBody(normalized) };
+    } finally {
+      await safeAudit(audit, {
+        phase: 'confirmation_issue',
+        auditId,
+        requesterUserId: canonicalUserId(req),
+        requesterSource: req?.requesterSource,
+        agentGroupId: canonicalAgentGroupId(req),
+        resource: resourceAlias,
+        outcome,
+        durationMs: Math.max(0, now() - startedAt),
+        confirmationBindingHash: bindingHash,
+      });
+    }
   }
 
   function requireEnabledOperation(operation) {
@@ -430,6 +614,19 @@ export function createFeishuBitableAdapter(options) {
           reason: externalDecision?.reason || 'operator business policy denied the request',
         };
       }
+    }
+
+    if (operation === 'feishu.bitable.record.update') {
+      return {
+        allowed: true,
+        obligations: [
+          {
+            type: 'user-confirmation',
+            previewRequired: true,
+            expiresInMs: confirmationTtlMs,
+          },
+        ],
+      };
     }
 
     const confirmationBinding = requiredConfirmationBinding(req, operation, input, resource);
@@ -540,18 +737,40 @@ export function createFeishuBitableAdapter(options) {
 
   async function listRecords(input, resource) {
     const queryBinding = {
+      resource: resource.alias,
       viewAlias: input.viewAlias ?? null,
       filterAlias: input.filterAlias ?? null,
       sortAlias: input.sortAlias ?? null,
       fields: input.fields ?? null,
+      query: input.query ?? null,
+      orderBy: input.orderBy ?? null,
     };
     const cursor = decodePageCursor(input.cursor, 'record', resource.alias, queryBinding, cursorSecret, now());
     const body = {};
     if (input.viewAlias) body.view_id = policyAlias(resource.views, input.viewAlias, 'viewAlias');
     if (input.filterAlias) body.filter = policyAlias(resource.filters, input.filterAlias, 'filterAlias');
     if (input.sortAlias) body.sort = policyAlias(resource.sorts, input.sortAlias, 'sortAlias');
+    let schema;
+    if (input.fields || input.query || input.orderBy) {
+      schema = await getFieldSchema(resource);
+    }
+    if (input.query) {
+      body.filter = compileStructuredQuery(input.query, schema);
+      if (JSON.stringify(body.filter).length > MAX_FILTER_JSON_CHARS) {
+        throw new AdapterError('VALIDATION_FAILED', 'structured query exceeds the provider filter bound', {
+          status: 422,
+        });
+      }
+    }
+    if (input.orderBy) {
+      body.sort = compileStructuredOrder(input.orderBy, schema);
+      if (JSON.stringify(body.sort).length > MAX_SORT_JSON_CHARS) {
+        throw new AdapterError('VALIDATION_FAILED', 'structured order exceeds the provider sort bound', {
+          status: 422,
+        });
+      }
+    }
     if (input.fields) {
-      const schema = await getFieldSchema(resource);
       for (const name of input.fields) {
         if (!schema.byName.has(name)) {
           throw new AdapterError('VALIDATION_FAILED', `unknown requested field: ${name}`, { status: 422 });
@@ -559,12 +778,22 @@ export function createFeishuBitableAdapter(options) {
       }
       body.field_names = input.fields;
     }
+    const pageSize = boundedPageSize(input.pageSize);
     const payload = await feishuRequest(tablePath(resource, '/records/search'), {
       method: 'POST',
-      query: { page_size: boundedPageSize(input.pageSize), page_token: cursor?.pageToken },
+      query: { page_size: pageSize, page_token: cursor?.pageToken },
       body,
     });
-    const items = arrayOr(payload?.data?.items, payload?.data?.records).map(normalizeRecord);
+    let items = arrayOr(payload?.data?.items, payload?.data?.records).map(normalizeRecord);
+    if (items.length > pageSize) {
+      throw new AdapterError('BACKEND_UNAVAILABLE', 'Feishu returned more records than the requested page bound', {
+        status: 502,
+        retryable: true,
+      });
+    }
+    if (input.fields) {
+      items = items.map((record) => projectRecordFields(record, input.fields));
+    }
     return pageResult(items, payload?.data, 'record', resource.alias, queryBinding, cursorSecret, cursorTtlMs, now());
   }
 
@@ -587,6 +816,100 @@ export function createFeishuBitableAdapter(options) {
       body: { fields: input.fields },
     });
     return normalizeRecord(payload?.data?.record ?? payload?.data);
+  }
+
+  async function createUpdatePreview(req, input, resource, auditId) {
+    const requesterUserId = canonicalUserId(req);
+    const agentGroupId = canonicalAgentGroupId(req);
+    if (req?.requesterSource !== 'session' || !requesterUserId || !agentGroupId) {
+      throw new AdapterError(
+        'BACKEND_UNAUTHORIZED',
+        'Update preview requires a trusted canonical user and Agent Group',
+        { status: 403 },
+      );
+    }
+
+    const current = await getRecord(input, resource);
+    const expectedRecordFingerprint = computeFeishuBitableRecordFingerprint(current);
+    const diff = Object.keys(input.fields)
+      .sort()
+      .filter((field) => stableStringify(current.fields[field]) !== stableStringify(input.fields[field]))
+      .map((field) => ({
+        field,
+        before: Object.prototype.hasOwnProperty.call(current.fields, field) ? cloneJson(current.fields[field]) : null,
+        after: cloneJson(input.fields[field]),
+        highImpact: resource.highImpactFields.has(field),
+      }));
+    if (diff.length === 0) {
+      throw new AdapterError('VALIDATION_FAILED', 'Update patch does not change any field', { status: 422 });
+    }
+
+    const binding = {
+      v: 2,
+      requesterUserId,
+      agentGroupId,
+      operation: 'feishu.bitable.record.update',
+      resource: resource.alias,
+      recordId: input.recordId,
+      patchHash: taggedHashJson(input.fields),
+      expectedRecordFingerprint,
+      exp: now() + confirmationTtlMs,
+      nonce: randomUUID(),
+    };
+    const bindingHash = taggedHashJson(binding);
+    const display = {
+      recordId: input.recordId,
+      diff,
+      expectedRecordFingerprint,
+      expiresAt: binding.exp,
+      highImpactFields: diff.filter((item) => item.highImpact).map((item) => item.field),
+    };
+    return {
+      ...display,
+      bindingHash,
+      confirmationRequest: signOpaque(
+        {
+          purpose: 'bitable-update-preview',
+          binding,
+          displayHash: taggedHashJson(display),
+        },
+        confirmationSecret,
+      ),
+      auditId,
+    };
+  }
+
+  async function updateAndVerify(input, resource, updateAuditId) {
+    await updateRecord(input, resource);
+    const getAuditId = randomUUID();
+    const verified = await getRecord(input, resource);
+    const mismatchedFields = Object.entries(input.fields)
+      .filter(([field, value]) => stableStringify(verified.fields[field]) !== stableStringify(value))
+      .map(([field]) => field);
+    await safeAudit(audit, {
+      phase: 'update_verify_get',
+      auditId: getAuditId,
+      parentAuditId: updateAuditId,
+      operation: 'feishu.bitable.record.get',
+      resource: resource.alias,
+      recordIdHash: taggedHashJson(input.recordId),
+      expectedPatchHash: taggedHashJson(input.fields),
+      outcome: mismatchedFields.length === 0 ? 'verified' : 'mismatch',
+    });
+    if (mismatchedFields.length > 0) {
+      throw new AdapterError('BACKEND_UNAVAILABLE', 'Update verification did not match the committed patch', {
+        status: 502,
+        retryable: true,
+      });
+    }
+    return {
+      ...verified,
+      verification: {
+        verified: true,
+        updateAuditId,
+        getAuditId,
+      },
+    };
   }
 
   async function deleteRecord(input, resource) {
@@ -851,6 +1174,7 @@ export function createFeishuBitableAdapter(options) {
     authorize: authorizeRequest,
     execute: executeRequest,
     issueConfirmation,
+    issueConfirmationRequest,
   });
 }
 
@@ -952,6 +1276,15 @@ function validateOperationInput(operation, rawInput) {
       requireArray(input.fields, 'fields', 0, 200);
       input.fields.forEach((name) => requireString(name, 'fields[]', 256));
     }
+    if ((input.filterAlias !== undefined || input.sortAlias !== undefined) && (input.query || input.orderBy)) {
+      throw new AdapterError(
+        'VALIDATION_FAILED',
+        'filterAlias/sortAlias cannot be combined with structured query/orderBy',
+        { status: 422 },
+      );
+    }
+    if (input.query !== undefined) validateStructuredQueryShape(input.query);
+    if (input.orderBy !== undefined) validateStructuredOrderShape(input.orderBy);
   }
   if (operation.includes('.record.') && !operation.endsWith('.list')) {
     validateRecordOperationInput(operation, input);
@@ -967,6 +1300,9 @@ function validateRecordOperationInput(operation, input) {
   }
   if (['feishu.bitable.record.create', 'feishu.bitable.record.update'].includes(operation)) {
     requireFields(input.fields);
+  }
+  if (operation === 'feishu.bitable.record.update' && input.expectedRecordFingerprint !== undefined) {
+    requireTaggedSha256(input.expectedRecordFingerprint, 'expectedRecordFingerprint');
   }
   if (operation.includes('.batch_')) {
     if (!['atomic', 'best-effort'].includes(input.mode)) {
@@ -1024,6 +1360,70 @@ function validateFields(fields, schema, creating) {
       }
     }
   }
+}
+
+function validateStructuredQueryShape(query) {
+  if (!isPlainObject(query)) {
+    throw new AdapterError('VALIDATION_FAILED', 'query must be an object', { status: 422 });
+  }
+  for (const key of Object.keys(query)) {
+    if (!['conjunction', 'conditions'].includes(key)) {
+      throw new AdapterError('VALIDATION_FAILED', `unexpected query field: ${key}`, { status: 422 });
+    }
+  }
+  if (!['and', 'or'].includes(query.conjunction)) {
+    throw new AdapterError('VALIDATION_FAILED', 'query.conjunction must be and or or', { status: 422 });
+  }
+  requireArray(query.conditions, 'query.conditions', 1, MAX_QUERY_CONDITIONS);
+  query.conditions.forEach((condition, index) => {
+    if (!isPlainObject(condition)) {
+      throw new AdapterError('VALIDATION_FAILED', `query.conditions[${index}] must be an object`, { status: 422 });
+    }
+    for (const key of Object.keys(condition)) {
+      if (!['field', 'operator', 'value'].includes(key)) {
+        throw new AdapterError('VALIDATION_FAILED', `unexpected query.conditions[${index}] field: ${key}`, {
+          status: 422,
+        });
+      }
+    }
+    requireString(condition.field, `query.conditions[${index}].field`, 256);
+    if (!STRUCTURED_QUERY_OPERATORS.has(condition.operator)) {
+      throw new AdapterError('VALIDATION_FAILED', `unsupported query operator: ${condition.operator}`, {
+        status: 422,
+      });
+    }
+    const emptyOperator = condition.operator === 'isEmpty' || condition.operator === 'isNotEmpty';
+    const hasValue = Object.prototype.hasOwnProperty.call(condition, 'value') && condition.value !== undefined;
+    if (emptyOperator === hasValue) {
+      throw new AdapterError(
+        'VALIDATION_FAILED',
+        emptyOperator
+          ? `query.conditions[${index}].value must be omitted for ${condition.operator}`
+          : `query.conditions[${index}].value is required for ${condition.operator}`,
+        { status: 422 },
+      );
+    }
+  });
+}
+
+function validateStructuredOrderShape(orderBy) {
+  requireArray(orderBy, 'orderBy', 1, MAX_ORDER_BY);
+  orderBy.forEach((item, index) => {
+    if (!isPlainObject(item)) {
+      throw new AdapterError('VALIDATION_FAILED', `orderBy[${index}] must be an object`, { status: 422 });
+    }
+    for (const key of Object.keys(item)) {
+      if (!['field', 'direction'].includes(key)) {
+        throw new AdapterError('VALIDATION_FAILED', `unexpected orderBy[${index}] field: ${key}`, { status: 422 });
+      }
+    }
+    requireString(item.field, `orderBy[${index}].field`, 256);
+    if (!['asc', 'desc'].includes(item.direction)) {
+      throw new AdapterError('VALIDATION_FAILED', `orderBy[${index}].direction must be asc or desc`, {
+        status: 422,
+      });
+    }
+  });
 }
 
 function normalizeField(field, resource) {
@@ -1084,10 +1484,11 @@ function valueMatchesField(value, field) {
 }
 
 function requiredConfirmationBinding(req, operation, input, resource) {
+  // Single-record Update uses the v2 Preview → Host issue → commit flow.
+  // Keep the legacy v1 binding only for Delete and unopened batch policies.
+  if (operation === 'feishu.bitable.record.update') return null;
   let highImpactFields = [];
-  if (operation === 'feishu.bitable.record.update') {
-    highImpactFields = Object.keys(input.fields).filter((field) => resource.highImpactFields.has(field));
-  } else if (operation === 'feishu.bitable.record.batch_update') {
+  if (operation === 'feishu.bitable.record.batch_update') {
     highImpactFields = [
       ...new Set(
         input.records
@@ -1140,6 +1541,114 @@ function verifyConfirmation(token, expectedBinding, secret, uses, idempotencyKey
   uses.set(payload.nonce, idempotencyKey);
 }
 
+function validateUpdateConfirmationBinding(binding, currentTime) {
+  if (
+    !isPlainObject(binding) ||
+    binding.v !== 2 ||
+    binding.operation !== 'feishu.bitable.record.update' ||
+    !canonicalBindingString(binding.requesterUserId) ||
+    !canonicalBindingString(binding.agentGroupId) ||
+    !safeResourceAlias(binding.resource) ||
+    !canonicalBindingString(binding.recordId) ||
+    !isTaggedSha256(binding.patchHash) ||
+    !isTaggedSha256(binding.expectedRecordFingerprint) ||
+    !Number.isSafeInteger(binding.exp) ||
+    binding.exp <= currentTime ||
+    !canonicalBindingString(binding.nonce)
+  ) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation has expired or contains an invalid binding', {
+      status: 409,
+    });
+  }
+  const allowedKeys = new Set([
+    'v',
+    'requesterUserId',
+    'agentGroupId',
+    'operation',
+    'resource',
+    'recordId',
+    'patchHash',
+    'expectedRecordFingerprint',
+    'exp',
+    'nonce',
+  ]);
+  if (Object.keys(binding).some((key) => !allowedKeys.has(key))) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation contains an invalid binding', { status: 409 });
+  }
+  return cloneJson(binding);
+}
+
+function validateUpdateConfirmationDisplay(display) {
+  if (!isPlainObject(display)) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation display is invalid', { status: 409 });
+  }
+  const allowedKeys = new Set(['recordId', 'diff', 'expectedRecordFingerprint', 'expiresAt', 'highImpactFields']);
+  if (
+    Object.keys(display).some((key) => !allowedKeys.has(key)) ||
+    !canonicalBindingString(display.recordId) ||
+    !isTaggedSha256(display.expectedRecordFingerprint) ||
+    !Number.isSafeInteger(display.expiresAt) ||
+    !Array.isArray(display.diff) ||
+    display.diff.length < 1 ||
+    display.diff.length > 200 ||
+    !Array.isArray(display.highImpactFields) ||
+    display.highImpactFields.some((field) => !canonicalBindingString(field))
+  ) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation display is invalid', { status: 409 });
+  }
+  for (const item of display.diff) {
+    if (
+      !isPlainObject(item) ||
+      Object.keys(item).some((key) => !['field', 'before', 'after', 'highImpact'].includes(key)) ||
+      !canonicalBindingString(item.field) ||
+      typeof item.highImpact !== 'boolean' ||
+      !Object.prototype.hasOwnProperty.call(item, 'before') ||
+      !Object.prototype.hasOwnProperty.call(item, 'after')
+    ) {
+      throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation display is invalid', { status: 409 });
+    }
+  }
+  return cloneJson(display);
+}
+
+function verifyUpdateConfirmation(token, req, input, resource, secret, uses, idempotencyKey, currentTime) {
+  if (typeof token !== 'string' || !token) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'a bound user confirmation is required', { status: 409 });
+  }
+  let envelope;
+  try {
+    envelope = verifyOpaque(token, secret);
+  } catch {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation is invalid', { status: 409 });
+  }
+  if (envelope?.purpose !== 'bitable-update-confirmation') {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation has an invalid purpose', { status: 409 });
+  }
+  const binding = validateUpdateConfirmationBinding(envelope.binding, currentTime);
+  const expected = {
+    requesterUserId: canonicalUserId(req),
+    agentGroupId: canonicalAgentGroupId(req),
+    operation: 'feishu.bitable.record.update',
+    resource: resource.alias,
+    recordId: input.recordId,
+    patchHash: taggedHashJson(input.fields),
+    expectedRecordFingerprint: input.expectedRecordFingerprint,
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    if (!value || binding[key] !== value) {
+      throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation does not match this Update', { status: 409 });
+    }
+  }
+  const priorKey = uses.get(binding.nonce);
+  if (priorKey && priorKey !== idempotencyKey) {
+    throw new AdapterError('CONFIRMATION_REQUIRED', 'confirmation was already used by another request', {
+      status: 409,
+    });
+  }
+  uses.set(binding.nonce, idempotencyKey);
+  return binding;
+}
+
 function pageResult(items, data, kind, resource, queryBinding, secret, ttlMs, currentTime) {
   const hasMore = data?.has_more === true && typeof data?.page_token === 'string' && data.page_token.length > 0;
   return {
@@ -1159,6 +1668,144 @@ function pageResult(items, data, kind, resource, queryBinding, secret, ttlMs, cu
         )
       : null,
   };
+}
+
+function compileStructuredQuery(query, schema) {
+  return {
+    conjunction: query.conjunction,
+    conditions: query.conditions.map((condition) => compileStructuredCondition(condition, schema)),
+  };
+}
+
+function compileStructuredCondition(condition, schema) {
+  const field = schema.byName.get(condition.field);
+  if (!field) {
+    throw new AdapterError('VALIDATION_FAILED', `unknown query field: ${condition.field}`, { status: 422 });
+  }
+  const allowed = queryOperatorsForField(field);
+  if (!allowed.has(condition.operator)) {
+    throw new AdapterError(
+      'VALIDATION_FAILED',
+      `query operator ${condition.operator} is not supported for field type ${field.type}: ${field.name}`,
+      { status: 422 },
+    );
+  }
+
+  if (condition.operator === 'isEmpty' || condition.operator === 'isNotEmpty') {
+    return {
+      field_name: field.name,
+      operator: condition.operator,
+      value: [],
+    };
+  }
+
+  validateStructuredConditionValue(condition.value, field);
+  let providerOperator = {
+    eq: 'is',
+    ne: 'isNot',
+    contains: 'contains',
+    notContains: 'doesNotContain',
+    gt: 'isGreater',
+    gte: 'isGreaterEqual',
+    lt: 'isLess',
+    lte: 'isLessEqual',
+  }[condition.operator];
+  let value = condition.value;
+  if (isDateField(field)) {
+    // Feishu's structured filter supports strict date comparisons but not
+    // inclusive ones. Millisecond values let the Gateway preserve inclusive
+    // semantics without falling back to a provider formula string.
+    if (condition.operator === 'gte') {
+      providerOperator = 'isGreater';
+      value -= 1;
+    } else if (condition.operator === 'lte') {
+      providerOperator = 'isLess';
+      value += 1;
+    }
+    return {
+      field_name: field.name,
+      operator: providerOperator,
+      value: ['ExactDate', String(value)],
+    };
+  }
+  return {
+    field_name: field.name,
+    operator: providerOperator,
+    value: [String(value)],
+  };
+}
+
+function compileStructuredOrder(orderBy, schema) {
+  return orderBy.map((item) => {
+    if (!schema.byName.has(item.field)) {
+      throw new AdapterError('VALIDATION_FAILED', `unknown order field: ${item.field}`, { status: 422 });
+    }
+    return { field_name: item.field, desc: item.direction === 'desc' };
+  });
+}
+
+function queryOperatorsForField(field) {
+  const empty = ['isEmpty', 'isNotEmpty'];
+  if ([1, 13, 15].includes(field.typeNumber)) {
+    return new Set(['eq', 'ne', 'contains', 'notContains', ...empty]);
+  }
+  if (field.typeNumber === 2) {
+    return new Set(['eq', 'ne', 'gt', 'gte', 'lt', 'lte', ...empty]);
+  }
+  if ([3, 24].includes(field.typeNumber)) {
+    return new Set(['eq', 'ne', ...empty]);
+  }
+  if (field.typeNumber === 4) {
+    return new Set(['eq', 'ne', 'contains', 'notContains', ...empty]);
+  }
+  if (isDateField(field)) {
+    return new Set(['eq', 'gt', 'gte', 'lt', 'lte', ...empty]);
+  }
+  if (field.typeNumber === 7) {
+    return new Set(['eq', 'ne', ...empty]);
+  }
+  return new Set();
+}
+
+function validateStructuredConditionValue(value, field) {
+  if ([1, 3, 4, 13, 15, 24].includes(field.typeNumber)) {
+    requireString(value, `query value for ${field.name}`, 1_000);
+    if (field.options?.length > 0 && !field.options.includes(value)) {
+      throw new AdapterError('VALIDATION_FAILED', `query field has an unknown option: ${field.name}`, {
+        status: 422,
+      });
+    }
+    return;
+  }
+  if (field.typeNumber === 2) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new AdapterError('VALIDATION_FAILED', `query value must be a finite number: ${field.name}`, {
+        status: 422,
+      });
+    }
+    return;
+  }
+  if (isDateField(field)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new AdapterError(
+        'VALIDATION_FAILED',
+        `query date value must be a positive Unix millisecond integer: ${field.name}`,
+        { status: 422 },
+      );
+    }
+    return;
+  }
+  if (field.typeNumber === 7) {
+    if (typeof value !== 'boolean') {
+      throw new AdapterError('VALIDATION_FAILED', `query value must be boolean: ${field.name}`, { status: 422 });
+    }
+    return;
+  }
+  throw new AdapterError('VALIDATION_FAILED', `field type is not queryable: ${field.name}`, { status: 422 });
+}
+
+function isDateField(field) {
+  return [5, 1001, 1002].includes(field.typeNumber);
 }
 
 function decodePageCursor(cursor, kind, resource, queryBinding, secret, currentTime) {
@@ -1287,6 +1934,14 @@ function normalizeRecord(record) {
   };
 }
 
+function projectRecordFields(record, fieldNames) {
+  const allowed = new Set(fieldNames);
+  return {
+    ...record,
+    fields: Object.fromEntries(Object.entries(record.fields).filter(([name]) => allowed.has(name))),
+  };
+}
+
 function fieldTypeName(type, uiType) {
   const known = {
     1: 'text',
@@ -1361,12 +2016,22 @@ function allowedInputKeys(operation) {
     return new Set([...common, 'pageSize', 'cursor']);
   }
   if (operation === 'feishu.bitable.record.list') {
-    return new Set([...common, 'pageSize', 'cursor', 'viewAlias', 'filterAlias', 'sortAlias', 'fields']);
+    return new Set([
+      ...common,
+      'pageSize',
+      'cursor',
+      'viewAlias',
+      'filterAlias',
+      'sortAlias',
+      'fields',
+      'query',
+      'orderBy',
+    ]);
   }
   if (operation === 'feishu.bitable.record.get') return new Set([...common, 'recordId']);
   if (operation === 'feishu.bitable.record.create') return new Set([...common, 'fields']);
   if (operation === 'feishu.bitable.record.update') {
-    return new Set([...common, 'recordId', 'fields', 'confirmation']);
+    return new Set([...common, 'recordId', 'fields', 'expectedRecordFingerprint', 'confirmation']);
   }
   if (operation === 'feishu.bitable.record.delete') return new Set([...common, 'recordId', 'confirmation']);
   if (operation === 'feishu.bitable.record.batch_create') return new Set([...common, 'mode', 'records']);
@@ -1394,13 +2059,52 @@ function descriptorInputSchema(operation) {
   for (const field of allowedInputKeys(operation)) {
     if (field === 'resource') continue;
     properties[field] =
-      field === 'pageSize'
-        ? { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE }
-        : field === 'mode'
-          ? { type: 'string', enum: ['atomic', 'best-effort'] }
-          : field === 'records' || field === 'recordIds' || field === 'fields'
-            ? { type: field === 'fields' ? 'object' : 'array' }
-            : { type: 'string' };
+      field === 'query'
+        ? {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              conjunction: { type: 'string', enum: ['and', 'or'] },
+              conditions: {
+                type: 'array',
+                minItems: 1,
+                maxItems: MAX_QUERY_CONDITIONS,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    field: { type: 'string' },
+                    operator: { type: 'string', enum: [...STRUCTURED_QUERY_OPERATORS] },
+                    value: {},
+                  },
+                  required: ['field', 'operator'],
+                },
+              },
+            },
+            required: ['conjunction', 'conditions'],
+          }
+        : field === 'orderBy'
+          ? {
+              type: 'array',
+              minItems: 1,
+              maxItems: MAX_ORDER_BY,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  field: { type: 'string' },
+                  direction: { type: 'string', enum: ['asc', 'desc'] },
+                },
+                required: ['field', 'direction'],
+              },
+            }
+          : field === 'pageSize'
+            ? { type: 'integer', minimum: 1, maximum: MAX_PAGE_SIZE }
+            : field === 'mode'
+              ? { type: 'string', enum: ['atomic', 'best-effort'] }
+              : field === 'records' || field === 'recordIds' || field === 'fields'
+                ? { type: field === 'fields' ? 'object' : 'array' }
+                : { type: 'string' };
   }
   return { type: 'object', additionalProperties: false, properties, required };
 }
@@ -1410,10 +2114,10 @@ function operationSummary(operation) {
     'feishu.bitable.app.get': 'Read approved Bitable app metadata',
     'feishu.bitable.table.list': 'List approved logical tables',
     'feishu.bitable.field.list': 'Discover the current table field schema',
-    'feishu.bitable.record.list': 'List records with bounded opaque pagination',
+    'feishu.bitable.record.list': 'List records using bounded, schema-validated structured filters',
     'feishu.bitable.record.get': 'Read one record',
     'feishu.bitable.record.create': 'Create one validated record',
-    'feishu.bitable.record.update': 'Update one validated record',
+    'feishu.bitable.record.update': 'Preview or update one record with bound user confirmation',
     'feishu.bitable.record.delete': 'Delete one explicitly confirmed record',
     'feishu.bitable.record.batch_create': 'Create a bounded record batch',
     'feishu.bitable.record.batch_update': 'Update a bounded record batch',
@@ -1440,6 +2144,25 @@ function verifyOpaque(token, secret) {
 
 function hashJson(value) {
   return crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
+}
+
+function taggedHashJson(value) {
+  return `sha256:${hashJson(value)}`;
+}
+
+export function computeFeishuBitableRecordFingerprint(record) {
+  if (!isPlainObject(record) || !canonicalBindingString(record.recordId) || !isPlainObject(record.fields)) {
+    throw new AdapterError('BACKEND_UNAVAILABLE', 'cannot fingerprint an invalid Feishu record', {
+      status: 502,
+      retryable: true,
+    });
+  }
+  return taggedHashJson({
+    recordId: record.recordId,
+    fields: record.fields,
+    revision: record.revision ?? null,
+    updatedAt: record.updatedAt ?? null,
+  });
 }
 
 function safeInputHash(operation, input) {
@@ -1502,6 +2225,20 @@ function requireString(value, name, maxLength) {
   }
 }
 
+function requireTaggedSha256(value, name) {
+  if (!isTaggedSha256(value)) {
+    throw new AdapterError('VALIDATION_FAILED', `${name} must be a tagged SHA-256 fingerprint`, { status: 422 });
+  }
+}
+
+function isTaggedSha256(value) {
+  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
+}
+
+function canonicalBindingString(value) {
+  return typeof value === 'string' && value.trim() && value === value.trim() && value.length <= 256 ? value : null;
+}
+
 function requireFields(value, name = 'fields') {
   if (!isPlainObject(value) || Object.keys(value).length === 0) {
     throw new AdapterError('VALIDATION_FAILED', `${name} must be a non-empty object`, { status: 422 });
@@ -1530,6 +2267,12 @@ function normalizeAliasMap(value) {
 
 function canonicalUserId(req) {
   return typeof req?.requester?.userId === 'string' && req.requester.userId.trim() ? req.requester.userId.trim() : null;
+}
+
+function canonicalAgentGroupId(req) {
+  return typeof req?.agent?.agentGroupId === 'string' && req.agent.agentGroupId.trim()
+    ? req.agent.agentGroupId.trim()
+    : null;
 }
 
 function safeResourceAlias(value) {

@@ -259,6 +259,28 @@ export const memoryFeedbackRequestSchema = z.object({
   context: z.record(z.string(), z.unknown()),
 });
 
+/**
+ * Optional trusted confirmation issuance endpoint (ADR-0073).
+ *
+ * This request is produced by the Host after it has re-resolved the actor from
+ * the trusted Session/Inbound chain. It is deliberately stricter than the
+ * generic envelope: a confirmation can only be issued for a non-empty
+ * canonical session user and a concrete Agent Group. The opaque request was
+ * created by the Gateway during dry-run; the Host does not interpret or rewrite
+ * its business binding.
+ */
+export const confirmationIssueRequestSchema = z.object({
+  contractVersion: z.number().int(),
+  agent: agentBlockSchema.extend({ agentGroupId: z.string().min(1) }),
+  requester: requesterSchema.extend({ userId: z.string().min(1) }),
+  requesterSource: z.literal('session'),
+  confirmationRequest: z.string().min(1).max(16_384),
+  // Exact Gateway preview subset the Host rendered to the user. The opaque
+  // request binds its hash; the Gateway rejects a container-forged display.
+  display: z.record(z.string(), z.unknown()),
+  context: z.record(z.string(), z.unknown()),
+});
+
 /** Path → request schema. Single lookup the conformance runner reuses. */
 export const REQUEST_SCHEMAS = {
   '/describe': describeRequestSchema,
@@ -270,6 +292,7 @@ export const REQUEST_SCHEMAS = {
   '/memory/upsert': memoryUpsertRequestSchema,
   '/memory/search': memorySearchRequestSchema,
   '/memory/feedback': memoryFeedbackRequestSchema,
+  '/confirmation/issue': confirmationIssueRequestSchema,
 } as const;
 
 export type GatewayPath = keyof typeof REQUEST_SCHEMAS;
@@ -508,6 +531,24 @@ export const memoryFeedbackResponseSchema = z
   })
   .passthrough();
 
+/**
+ * Successful confirmation issuance response (ADR-0073).
+ *
+ * Unlike the legacy lenient response envelopes, the security-bearing token and
+ * expiry are required. Callers must treat a 404 or a body that fails this
+ * schema as a closed failure and must never substitute Agent-asserted text.
+ */
+export const confirmationIssueResponseSchema = z
+  .object({
+    ...responseEnvelope,
+    ok: z.literal(true),
+    confirmation: z.string().min(1).max(16_384),
+    expiresAt: z.number().int().positive(),
+    bindingHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    auditId: z.string().min(1),
+  })
+  .passthrough();
+
 /** Path → response schema. */
 export const RESPONSE_SCHEMAS = {
   '/describe': describeResponseSchema,
@@ -519,6 +560,7 @@ export const RESPONSE_SCHEMAS = {
   '/memory/upsert': memoryUpsertResponseSchema,
   '/memory/search': memorySearchResponseSchema,
   '/memory/feedback': memoryFeedbackResponseSchema,
+  '/confirmation/issue': confirmationIssueResponseSchema,
 } as const;
 
 // ---------------------------------------------------------------------------

@@ -377,7 +377,7 @@ Additional closed codes (usually supplied in a structured error body):
 | `GATEWAY_NOT_CONFIGURED`         | the agent group has no `baseUrl`                                                          |
 | `CONTRACT_VERSION_MISMATCH`      | backend echoed a different `contractVersion` (warn-only, not a hard error)                |
 | `RESOURCE_NOT_ALLOWED`           | the logical resource alias is not on the operator whitelist                               |
-| `CONFIRMATION_REQUIRED`          | a destructive or high-impact write lacks a valid bound confirmation                       |
+| `CONFIRMATION_REQUIRED`          | a confirmation-bound write lacks a valid user/target/patch/version-bound confirmation     |
 | `UPSTREAM_AUTHENTICATION_FAILED` | the Gateway could not authenticate to its upstream system                                 |
 | `NOT_FOUND`                      | the requested upstream business object or record does not exist                           |
 | `CONFLICT`                       | the upstream rejected a concurrent or revision-conflicting write (retryable by default)   |
@@ -424,10 +424,10 @@ Host、Web、Channel、Agent 容器和 Prompt 都不得持有这些值，也不�
 | `feishu.bitable.app.get`             | 读取逻辑应用元数据                    |     否 | 无                             |
 | `feishu.bitable.table.list`          | 列出该逻辑应用中批准暴露的数据表      |     否 | 无                             |
 | `feishu.bitable.field.list`          | 获取字段名、类型、必填、可写等 Schema |     否 | 无                             |
-| `feishu.bitable.record.list`         | 有界分页读取 Record                   |     否 | 无                             |
+| `feishu.bitable.record.list`         | 有界分页或结构化条件读取 Record       |     否 | 无                             |
 | `feishu.bitable.record.get`          | 读取单条 Record                       |     否 | 无                             |
 | `feishu.bitable.record.create`       | 创建单条 Record                       |     是 | 按业务策略                     |
-| `feishu.bitable.record.update`       | 更新单条 Record                       |     是 | 命中高影响字段时确认           |
+| `feishu.bitable.record.update`       | 更新单条 Record                       |     是 | 当前试点始终确认               |
 | `feishu.bitable.record.delete`       | 删除单条 Record                       |     是 | 始终确认                       |
 | `feishu.bitable.record.batch_create` | 批量创建                              |     是 | 按业务策略                     |
 | `feishu.bitable.record.batch_update` | 批量更新                              |     是 | 任一项命中高影响字段时整批确认 |
@@ -451,6 +451,8 @@ Discovery 和执行；关闭的 Operation 返回 `OPERATION_NOT_FOUND`，不会�
 - `cursor` 是 Gateway 包装并校验的不透明 Cursor，不直接暴露飞书 `page_token`。
 - 默认 `pageSize=20`，单页最大 `100`。飞书 Record API 当前允许最大 500，但平台主动收紧到 100，
   防止一次读取撑大 Agent 上下文；运营者可以进一步收紧，不能放宽机器契约。
+- 临时自然语言条件使用 `record.list.query`/`orderBy`，不能把原生飞书 Filter、Sort、Formula 或
+  Provider Payload 作为输入。`filterAlias`/`sortAlias` 不得和结构化 Query/Order 混用。
 
 典型读取：
 
@@ -466,6 +468,43 @@ Discovery 和执行；关闭的 Operation 返回 `OPERATION_NOT_FOUND`，不会�
   },
 }
 ```
+
+结构化条件示例：
+
+```jsonc
+{
+  "operation": "feishu.bitable.record.list",
+  "input": {
+    "resource": "sales.pipeline",
+    "fields": ["客户", "阶段", "金额", "截止日期"],
+    "query": {
+      "conjunction": "and",
+      "conditions": [
+        { "field": "阶段", "operator": "eq", "value": "跟进中" },
+        { "field": "金额", "operator": "gte", "value": 10000 },
+        { "field": "截止日期", "operator": "lte", "value": 1800000000000 },
+      ],
+    },
+    "orderBy": [{ "field": "金额", "direction": "desc" }],
+    "pageSize": 20,
+  },
+}
+```
+
+Gateway 必须先读取当前 Field Schema，再检查字段存在性、Operator Matrix、值类型和选项值，
+最后才编译成 Provider 查询。支持单层 `and|or`、最多 10 个条件和 3 个排序项：
+
+- 文本：`eq/ne/contains/notContains`
+- 数字：`eq/ne/gt/gte/lt/lte`
+- 日期：`eq/gt/gte/lt/lte`，值使用 Unix 毫秒
+- 单选：`eq/ne`
+- 复选框：布尔 `eq/ne`
+- 上述字段均支持 `isEmpty/isNotEmpty`
+
+`startsWith` 在通用封闭词汇中保留，但参考飞书 Provider 当前没有等价表达，会在网络调用前
+返回 `VALIDATION_FAILED`。Cursor 必须同时绑定 Resource、View、字段投影、Query 和 Order；
+条件变化后重放旧 Cursor 必须拒绝。Gateway 每次只取一个有界页面，不得先拉取全表多页再交给
+模型筛选。用于选择单个写入目标时，零匹配、多匹配或 `hasMore=true` 都不能默认第一条。
 
 返回：
 
@@ -511,19 +550,32 @@ Create、Update、Delete 和三个 Batch Operation 的提交调用都必须携�
 “幂等键 + 规范用户 + Operation + 逻辑资源 + 输入 Hash”及首次提交结果；相同请求重放时返回第一次
 的结果，不再次写飞书。同一幂等键绑定到不同输入时返回 `CONFLICT`。
 
-### 删除与高影响更新确认
+### Update Preview 与 Host-mediated 确认
 
-Delete 始终要求显式确认；资源配置中的 `highImpactFields` 命中时，Update 也要求确认。确认凭据必须
-由 Gateway 或其可信业务确认服务签发，且至少绑定：
+当前试点的每一次单条 Update 都要求显式确认；`highImpactFields` 只决定风险标识，不再让普通字段
+绕过确认。Update 使用两阶段协议：
 
-- `requester.userId`；
-- Operation；
-- `resource`；
-- 排序并去重后的 Record ID 集合；
-- 高影响字段集合（适用时）；
-- 到期时间与一次性标识。
+1. Worker 用 `dryRun=true` 提交 `{resource, recordId, fields}`。
+2. Gateway 读取完整当前 Record，生成字段级 Before/After Diff、稳定 Record Fingerprint、
+   Binding Hash、过期时间、后端 `auditId` 和 opaque `confirmationRequest`。
+3. Runner 的 `gateway_request_confirmation` 把 opaque Request 和未经重算的展示数据写入
+   Outbound。Host 从可信 Session/Inbound 链重新解析原规范用户和来源路由，并创建持久化 Pending。
+4. 飞书按钮、飞书文本或 Web 决策都必须匹配 Pending 的原请求者；群聊其他成员不能批准。
+5. 批准后 Host Signing Proxy 调用 `POST /confirmation/issue`。Gateway 验证自身 opaque Request、
+   精确展示摘要、用户、Agent Group 和有效期，再签发 Token。
+6. Commit 必须携带原 Patch、Preview Fingerprint 和 Token。Gateway 先命中相同幂等 Replay，
+   否则验证 Token、重新 Get 并比较 Fingerprint；变化返回 `CONFLICT` 且不 PUT。成功后再次 Get，
+   返回核验结果和关联 Update/Get `auditId`。
 
-缺失、过期、被重放或绑定不一致都返回不可重试的 `CONFIRMATION_REQUIRED`，并且在调用飞书前拒绝。
+Token 至少绑定规范用户、Agent Group、Operation、Resource、`recordId`、Patch Hash、
+Fingerprint、过期时间和 Nonce。Nonce 只允许在同一幂等绑定中重放；不同输入或不同幂等键复用
+必须拒绝。Token 只能进入等待中的 Worker 私有系统响应，不得进入飞书卡片、Web API、日志或
+审计明文。
+
+旧 Gateway 对 `/confirmation/issue` 返回 404、Host 签名失败、用户不匹配、Preview 被篡改、
+过期或 Fingerprint 冲突时，Update 都保持 Fail Closed，不能降级为 Prompt 中的
+`confirmed=true`。Create 可复用同一 Host Pending 交互，但低风险试点暂不要求 Update Token。
+Delete 仍始终确认，且本试点不发布 Delete/Batch。
 
 ### 批量语义
 

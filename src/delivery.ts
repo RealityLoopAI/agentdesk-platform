@@ -774,7 +774,10 @@ async function deliverMessage(
 
     // System actions — handle internally (schedule_task, cancel_task, etc.)
     if (msg.kind === 'system') {
-      await handleSystemAction(content, session, inDb);
+      await handleSystemAction(content, session, inDb, {
+        messageOutId: msg.id,
+        inReplyTo: msg.in_reply_to,
+      });
       return;
     }
 
@@ -1391,6 +1394,7 @@ export type DeliveryActionHandler = (
   content: Record<string, unknown>,
   session: Session,
   inDb: Database.Database,
+  context?: { messageOutId: string; inReplyTo: string | null },
 ) => Promise<void>;
 
 const actionHandlers = new Map<string, DeliveryActionHandler>();
@@ -1494,13 +1498,14 @@ async function handleSystemAction(
   content: Record<string, unknown>,
   session: Session,
   inDb: Database.Database,
+  deliveryContext: { messageOutId: string; inReplyTo: string | null },
 ): Promise<void> {
   const action = content.action as string;
   log.info('System action from agent', { sessionId: session.id, action });
 
   const registered = actionHandlers.get(action);
   if (registered) {
-    await registered(content, session, inDb);
+    await registered(content, session, inDb, deliveryContext);
     return;
   }
 

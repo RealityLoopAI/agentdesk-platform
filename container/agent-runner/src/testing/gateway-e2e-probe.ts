@@ -9,6 +9,7 @@
 import { loadConfig } from '../config.js';
 import { openInboundDb } from '../db/connection.js';
 import type { MessageInRow } from '../db/messages-in.js';
+import { writeMessageOut } from '../db/messages-out.js';
 import { handleGatewayDescribe, handleGatewayExecute } from '../mcp-tools/gateway.js';
 import { setRequestIdentity } from '../request-context.js';
 import { rowIdentity } from '../request-identity.js';
@@ -16,6 +17,16 @@ import { rowIdentity } from '../request-identity.js';
 function fail(message: string): never {
   console.error(`gateway-e2e-probe: ${message}`);
   process.exit(1);
+}
+
+function toolJson(result: Awaited<ReturnType<typeof handleGatewayExecute>>): Record<string, unknown> {
+  const item = result.content[0];
+  if (!item || item.type !== 'text') fail('gateway tool did not return text');
+  try {
+    return JSON.parse(item.text) as Record<string, unknown>;
+  } catch {
+    return fail('gateway tool returned malformed JSON');
+  }
 }
 
 async function main(): Promise<void> {
@@ -64,7 +75,44 @@ async function main(): Promise<void> {
   const replayed = await handleGatewayExecute(runtime, createArgs);
   if (replayed.isError) fail('replayed gateway_execute returned an error');
 
-  console.log(`gateway-e2e-probe: trusted user ${identity.userId}; describe + idempotent create completed`);
+  const previewed = await handleGatewayExecute(runtime, {
+    operation: 'feishu.bitable.record.update',
+    input: {
+      resource: 'e2e.contacts',
+      recordId: 'rec-e2e-created',
+      fields: { Status: 'Confirmed' },
+    },
+    context: { purpose: 'container-a2a-gateway-confirmation-e2e' },
+    dryRun: true,
+  });
+  if (previewed.isError) fail('update dry-run returned an error');
+  const previewBody = toolJson(previewed);
+  const preview = previewBody.preview;
+  if (!preview || typeof preview !== 'object' || Array.isArray(preview)) {
+    fail('update dry-run omitted preview');
+  }
+
+  // The real gateway_request_confirmation tool writes this same system action
+  // before blocking. This probe exits after enqueue so the outer Host harness
+  // can consume, approve and assert the private response deterministically.
+  writeMessageOut({
+    id: 'container-a2a-update-confirmation',
+    in_reply_to: row.id,
+    kind: 'system',
+    platform_id: row.platform_id,
+    channel_type: row.channel_type,
+    thread_id: row.thread_id,
+    content: JSON.stringify({
+      action: 'gateway_confirmation_request',
+      kind: 'update',
+      title: 'E2E update confirmation',
+      preview,
+    }),
+  });
+
+  console.log(
+    `gateway-e2e-probe: trusted user ${identity.userId}; describe + idempotent create + update preview completed`,
+  );
 }
 
 main().catch((error) => fail(error instanceof Error ? (error.stack ?? error.message) : String(error)));

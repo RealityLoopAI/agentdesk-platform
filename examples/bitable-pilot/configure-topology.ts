@@ -12,11 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { DEFAULT_FRONTDESK_FOLDER } from '../../src/branding.js';
 import { GROUPS_DIR } from '../../src/config.js';
-import {
-  readContainerConfig,
-  writeContainerConfig,
-  type ContainerConfig,
-} from '../../src/container-config.js';
+import { readContainerConfig, writeContainerConfig, type ContainerConfig } from '../../src/container-config.js';
 import { getAgentGroupByFolder } from '../../src/db/agent-groups.js';
 import { closeDb } from '../../src/db/connection.js';
 import { getSessionsByAgentGroup } from '../../src/db/sessions.js';
@@ -41,8 +37,7 @@ function derivePilotSigningKey(workerFolder: string): string {
 
   const keys = ['GATEWAY_SIGNING_KEY', 'FEISHU_BITABLE_APP_SECRET', 'FEISHU_APP_SECRET'] as const;
   const dotenv = readEnvFile([...keys]);
-  const value = (key: (typeof keys)[number]): string =>
-    process.env[key]?.trim() || dotenv[key]?.trim() || '';
+  const value = (key: (typeof keys)[number]): string => process.env[key]?.trim() || dotenv[key]?.trim() || '';
 
   const configured = value('GATEWAY_SIGNING_KEY');
   if (configured) return configured;
@@ -53,10 +48,7 @@ function derivePilotSigningKey(workerFolder: string): string {
       'Bitable pilot requires GATEWAY_SIGNING_KEY or a Feishu app secret to derive the local HMAC signing key',
     );
   }
-  return crypto
-    .createHmac('sha256', appSecret)
-    .update('agentdesk-bitable-pilot:gateway-signing')
-    .digest('hex');
+  return crypto.createHmac('sha256', appSecret).update('agentdesk-bitable-pilot:gateway-signing').digest('hex');
 }
 
 function applyPilotFiles(frontdeskFolder: string, workerFolder: string, workerId: string): void {
@@ -76,10 +68,10 @@ function applyPilotFiles(frontdeskFolder: string, workerFolder: string, workerId
   const managed = `${MANAGED_START}
 ## Bitable pilot routing
 
-- \`bitable\`: specialist for Feishu Bitable field discovery, record reads, and confirmed single-record creates.
-- Route 多维表格, Bitable, table-field, record lookup/listing, and add-record requests to \`bitable\`.
+- \`bitable\`: specialist for Feishu Bitable field discovery, structured record queries, and confirmed single-record creates/updates.
+- Route 多维表格, Bitable, table-field, record query/lookup, add-record, and update-record requests to \`bitable\`.
 - Do not claim an operation is available before the Worker checks Gateway discovery.
-- Keep user-facing conversation and Create confirmation at Frontdesk.
+- Keep user-facing conversation at Frontdesk. Host renders trusted Create/Update confirmations to the original actor.
 ${MANAGED_END}`;
   const current = fs
     .readFileSync(frontdeskPromptPath, 'utf8')

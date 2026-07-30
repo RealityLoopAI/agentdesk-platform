@@ -2,12 +2,19 @@ import { describe, expect, it } from 'bun:test';
 
 import {
   BITABLE_MAX_BATCH_RECORDS,
+  BITABLE_MAX_ORDER_BY,
   BITABLE_MAX_PAGE_SIZE,
+  BITABLE_MAX_QUERY_CONDITIONS,
   FEISHU_BITABLE_CONFORMANCE_FIXTURES,
   FEISHU_BITABLE_INPUT_SCHEMAS,
   FEISHU_BITABLE_OPERATION_DESCRIPTORS,
   FEISHU_BITABLE_OPERATION_NAMES,
+  FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES,
   bitableBatchResultSchema,
+  bitableOrderBySchema,
+  bitableRecordQuerySchema,
+  bitableUpdateConfirmationBindingSchema,
+  bitableUpdatePreviewSchema,
   parseFeishuBitableInput,
 } from './feishu-bitable-contract.js';
 import { operationDescriptorSchema } from './gateway-contract.js';
@@ -42,6 +49,29 @@ describe('Feishu Bitable Gateway operation contract', () => {
       FEISHU_BITABLE_INPUT_SCHEMAS['feishu.bitable.record.list'].parse({
         resource: 'sales.pipeline',
         pageSize: BITABLE_MAX_PAGE_SIZE + 1,
+      }),
+    ).toThrow();
+  });
+
+  it('accepts bounded structured record queries and rejects alias ambiguity or provider payloads', () => {
+    const parsed = FEISHU_BITABLE_INPUT_SCHEMAS['feishu.bitable.record.list'].parse({
+      resource: 'sales.pipeline',
+      query: FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.query,
+      orderBy: FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.orderBy,
+    });
+    expect(parsed.query?.conditions).toHaveLength(2);
+
+    expect(() =>
+      FEISHU_BITABLE_INPUT_SCHEMAS['feishu.bitable.record.list'].parse({
+        resource: 'sales.pipeline',
+        filterAlias: 'active',
+        query: FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.query,
+      }),
+    ).toThrow();
+    expect(() =>
+      FEISHU_BITABLE_INPUT_SCHEMAS['feishu.bitable.record.list'].parse({
+        resource: 'sales.pipeline',
+        filter: { conjunction: 'and', conditions: [] },
       }),
     ).toThrow();
   });
@@ -89,5 +119,47 @@ describe('Feishu Bitable Gateway operation contract', () => {
         ],
       }),
     ).toThrow();
+  });
+
+  it('publishes machine-verifiable Query, Order, Preview and Confirmation fixtures', () => {
+    expect(() => bitableRecordQuerySchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.query)).not.toThrow();
+    expect(() => bitableOrderBySchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.orderBy)).not.toThrow();
+    expect(() =>
+      bitableUpdateConfirmationBindingSchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.updateConfirmationBinding),
+    ).not.toThrow();
+    expect(() => bitableUpdatePreviewSchema.parse(FEISHU_BITABLE_SECURE_CONTRACT_FIXTURES.updatePreview)).not.toThrow();
+  });
+
+  it('bounds flat structured queries and rejects operator/value ambiguity', () => {
+    const tooMany = Array.from({ length: BITABLE_MAX_QUERY_CONDITIONS + 1 }, (_, index) => ({
+      field: `Field ${index}`,
+      operator: 'eq',
+      value: index,
+    }));
+    expect(() => bitableRecordQuerySchema.parse({ conjunction: 'and', conditions: tooMany })).toThrow();
+    expect(() =>
+      bitableRecordQuerySchema.parse({
+        conjunction: 'and',
+        conditions: [{ field: 'Name', operator: 'isEmpty', value: true }],
+      }),
+    ).toThrow();
+    expect(() =>
+      bitableRecordQuerySchema.parse({
+        conjunction: 'and',
+        conditions: [{ field: 'Name', operator: 'contains' }],
+      }),
+    ).toThrow();
+  });
+
+  it('bounds ordering and rejects provider-native order fields', () => {
+    expect(() =>
+      bitableOrderBySchema.parse(
+        Array.from({ length: BITABLE_MAX_ORDER_BY + 1 }, (_, index) => ({
+          field: `Field ${index}`,
+          direction: 'asc',
+        })),
+      ),
+    ).toThrow();
+    expect(() => bitableOrderBySchema.parse([{ field_name: 'Name', desc: true }])).toThrow();
   });
 });

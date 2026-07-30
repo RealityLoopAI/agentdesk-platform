@@ -33,6 +33,8 @@ import {
   type WebMessageReceipt,
 } from '../db/web-message-receipts.js';
 import { appendWebEvent } from '../db/web-events.js';
+import { getPendingGatewayConfirmation, listPendingGatewayConfirmationsForLane } from '../db/gateway-confirmations.js';
+import { resolveGatewayConfirmationDecision } from '../modules/gateway-confirmation/index.js';
 import { canAccessAgentGroup } from '../modules/permissions/access.js';
 import { inboundDbPath, openInboundDb, openOutboundDb, outboundDbPath } from '../session-manager.js';
 import type { ConversationLane } from '../types.js';
@@ -80,6 +82,15 @@ export interface WebDeliverySubscriptionState {
   deliveryKind: 'agent-reply-mirror';
   enabled: boolean;
   available: boolean;
+}
+
+export interface WebGatewayConfirmation {
+  id: string;
+  kind: 'update' | 'create';
+  title: string;
+  display: Record<string, unknown>;
+  expiresAt: string;
+  status: 'pending';
 }
 
 interface HistoryKey {
@@ -165,6 +176,53 @@ export function createWebConversation(userId: string, agentGroupId: string): Web
     return created;
   })();
   return laneSummary(lane);
+}
+
+export function listWebGatewayConfirmations(args: { userId: string; laneId: string }): {
+  confirmations: WebGatewayConfirmation[];
+} {
+  assertAccessibleLane(args.userId, args.laneId);
+  const confirmations = listPendingGatewayConfirmationsForLane(args.userId, args.laneId).map((row) => {
+    let display: Record<string, unknown>;
+    try {
+      display = JSON.parse(row.display_json) as Record<string, unknown>;
+    } catch {
+      throw new WebConversationError(409, 'confirmation_unavailable');
+    }
+    return {
+      id: row.confirmation_id,
+      kind: row.kind,
+      title: row.title,
+      display,
+      expiresAt: row.expires_at,
+      status: 'pending' as const,
+    };
+  });
+  return { confirmations };
+}
+
+export async function resolveWebGatewayConfirmation(args: {
+  userId: string;
+  laneId: string;
+  confirmationId: string;
+  decision: 'approve' | 'reject';
+}): Promise<{ confirmation: { id: string; status: string; errorCode: string | null } }> {
+  assertAccessibleLane(args.userId, args.laneId, true);
+  const row = getPendingGatewayConfirmation(args.confirmationId);
+  if (!row || row.conversation_lane_id !== args.laneId || row.requester_user_id !== args.userId) {
+    throw new WebConversationError(403, 'confirmation_unavailable');
+  }
+  const result = await resolveGatewayConfirmationDecision(row.confirmation_id, args.userId, args.decision);
+  if (!result.resolved) throw new WebConversationError(409, result.reason ?? 'confirmation_unavailable');
+  const resolved = getPendingGatewayConfirmation(row.confirmation_id);
+  if (!resolved) throw new WebConversationError(409, 'confirmation_unavailable');
+  return {
+    confirmation: {
+      id: resolved.confirmation_id,
+      status: resolved.status,
+      errorCode: resolved.error_code,
+    },
+  };
 }
 
 export function getWebDeliverySubscription(args: {

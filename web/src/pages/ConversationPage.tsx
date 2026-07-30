@@ -7,6 +7,7 @@ import { submitMessage } from '@/api/client';
 import { ApiFailure } from '@/components/ApiFailure';
 import { Button } from '@/components/ui/Button';
 import { DeliverySubscriptionControl } from '@/conversations/DeliverySubscriptionControl';
+import { GatewayConfirmationPanel } from '@/conversations/GatewayConfirmationPanel';
 import { conversationKeys } from '@/conversations/queryKeys';
 import { useConversationList } from '@/conversations/useConversations';
 import { MessageComposer } from '@/messages/MessageComposer';
@@ -141,6 +142,7 @@ export function ConversationPage() {
         onLoadMore={() => void history.fetchNextPage()}
         onRetry={(message) => sendOptimistic({ ...message, status: 'sending' })}
       />
+      {conversation?.status !== 'archived' ? <GatewayConfirmationPanel laneId={laneId} /> : null}
       <MessageComposer
         disabled={send.isPending || conversation?.status === 'archived'}
         onSend={(text) =>

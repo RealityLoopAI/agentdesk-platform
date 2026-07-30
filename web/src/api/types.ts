@@ -96,10 +96,33 @@ export interface DeliverySubscriptionState {
   available: boolean;
 }
 
+export interface GatewayConfirmation {
+  id: string;
+  kind: 'update' | 'create';
+  title: string;
+  display: Record<string, unknown>;
+  expiresAt: string;
+  status: 'pending';
+}
+
+export interface GatewayConfirmationListResponse {
+  confirmations: GatewayConfirmation[];
+}
+
+export interface ResolvedGatewayConfirmation {
+  id: string;
+  status: 'approved' | 'rejected' | 'expired' | 'failed';
+  errorCode: string | null;
+}
+
 export interface WebEventPayload {
   eventId: string;
   cursor: string;
-  type: 'conversation.message.accepted' | 'conversation.message.available';
+  type:
+    | 'conversation.message.accepted'
+    | 'conversation.message.available'
+    | 'conversation.confirmation.available'
+    | 'conversation.confirmation.resolved';
   laneId: string;
   resourceId: string;
   createdAt: string;

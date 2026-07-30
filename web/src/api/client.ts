@@ -4,9 +4,11 @@ import type {
   ConversationReconciliationResponse,
   ConversationSummary,
   DeliverySubscriptionState,
+  GatewayConfirmationListResponse,
   MeResponse,
   PublicBranding,
   SubmittedMessage,
+  ResolvedGatewayConfirmation,
 } from './types';
 
 export class ApiError extends Error {
@@ -154,6 +156,25 @@ export async function setDeliverySubscription(args: {
     },
   );
   return response.subscription;
+}
+
+export async function listGatewayConfirmations(laneId: string): Promise<GatewayConfirmationListResponse> {
+  return apiFetch<GatewayConfirmationListResponse>(`/api/conversations/${encodeURIComponent(laneId)}/confirmations`);
+}
+
+export async function resolveGatewayConfirmation(args: {
+  laneId: string;
+  confirmationId: string;
+  decision: 'approve' | 'reject';
+}): Promise<ResolvedGatewayConfirmation> {
+  const response = await apiFetch<{ confirmation: ResolvedGatewayConfirmation }>(
+    `/api/conversations/${encodeURIComponent(args.laneId)}/confirmations/${encodeURIComponent(args.confirmationId)}`,
+    {
+      method: 'POST',
+      json: { decision: args.decision },
+    },
+  );
+  return response.confirmation;
 }
 
 export async function logout(): Promise<void> {

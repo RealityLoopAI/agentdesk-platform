@@ -6,6 +6,7 @@
 - **Tags**: `gateway`, `feishu`, `bitable`, `authorization`, `pilot`, `fail-closed`
 - **Supersedes**: —
 - **Superseded by**: —
+- **Extended by**: ADR-0073（Update 确认路径；Read/Create 决策继续有效）
 
 ---
 
@@ -54,7 +55,8 @@ Create 仍必须满足字段 Schema、稳定幂等键和面向用户的最终摘
 
 ## Implementation Notes
 
-- Gateway 模板：`examples/reference-gateway/bitable-read-create.env.example`
+- 当时的 Gateway 模板已随下一阶段改名为
+  `examples/reference-gateway/bitable-query-create-update.env.example`
 - Gateway 适配器与测试：`examples/reference-gateway/feishu-bitable-adapter.mjs`
 - Worker：`groups/agentdesk-bitable-worker/`
 - 运营说明：`docs/feishu-bitable-pilot.md`

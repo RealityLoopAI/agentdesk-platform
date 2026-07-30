@@ -18,6 +18,7 @@
  *   POST /memory/upsert   -> { ok, value, source, validAt, op }  (ADR-0050)
  *   POST /memory/search   -> { ok, results: [{ value, source, score, validAt, invalidAt? }] }
  *   POST /memory/feedback -> { ok, accepted, feedbackId }       (ADR-0043)
+ *   POST /confirmation/issue -> { ok, confirmation, expiresAt, bindingHash, auditId } (ADR-0073)
  *
  * Design goals (deliberately NOT production):
  *   - Zero dependencies. Node built-ins only (node:http, node:crypto).
@@ -50,10 +51,7 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 
-import {
-  createFeishuBitableAdapter,
-  loadFeishuBitableConfigFromEnv,
-} from './feishu-bitable-adapter.mjs';
+import { createFeishuBitableAdapter, loadFeishuBitableConfigFromEnv } from './feishu-bitable-adapter.mjs';
 import { createVisionArchiveAdapter, loadVisionArchiveConfigFromEnv } from './vision-archive-adapter.mjs';
 
 const PORT = Number.parseInt(process.env.PORT || '8088', 10);
@@ -63,11 +61,12 @@ const PORT = Number.parseInt(process.env.PORT || '8088', 10);
  * `agentdesk`; if an operator overrides BRAND_NAMESPACE on the platform side,
  * set the same value here so the header names line up.
  */
-const NS = (process.env.BRAND_NAMESPACE || 'agentdesk')
-  .trim()
-  .toLowerCase()
-  .replace(/[^a-z0-9-]/g, '-')
-  .replace(/^-+|-+$/g, '') || 'agentdesk';
+const NS =
+  (process.env.BRAND_NAMESPACE || 'agentdesk')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/^-+|-+$/g, '') || 'agentdesk';
 const HDR_TIMESTAMP = `x-${NS}-timestamp`;
 const HDR_NONCE = `x-${NS}-nonce`;
 const HDR_SIGNATURE = `x-${NS}-signature`;
@@ -446,6 +445,19 @@ const handlers = {
     return response;
   },
 
+  '/confirmation/issue': async (req) => {
+    if (!bitableAdapter) {
+      return {
+        status: 404,
+        body: {
+          code: 'OPERATION_NOT_FOUND',
+          message: 'confirmation issuance is not configured',
+        },
+      };
+    }
+    return bitableAdapter.issueConfirmationRequest(req);
+  },
+
   // Optional batch endpoint (ADR-0036). Runs N operations in one round-trip.
   '/bulk_execute': async (req) => {
     const ops = Array.isArray(req.operations) ? req.operations : null;
@@ -484,7 +496,9 @@ const handlers = {
           ok: false,
           partial: false,
           results: problems.map((p, i) =>
-            p ? { ok: false, error: p } : { ok: false, error: { code: 'UNKNOWN', message: 'aborted: atomic batch had a failing operation' } },
+            p
+              ? { ok: false, error: p }
+              : { ok: false, error: { code: 'UNKNOWN', message: 'aborted: atomic batch had a failing operation' } },
           ),
         };
       }
@@ -529,9 +543,8 @@ const handlers = {
     const live = liveVersion(versions);
 
     // Merge against the live value when the caller asked for a partial update.
-    const value = req.merge && live && isObject(live.value) && isObject(req.value)
-      ? { ...live.value, ...req.value }
-      : req.value;
+    const value =
+      req.merge && live && isObject(live.value) && isObject(req.value) ? { ...live.value, ...req.value } : req.value;
 
     // A.U.D.N. reconciliation (ADR-0050). This demo is DETERMINISTIC: it
     // compares the canonical JSON of the live value to decide add/update/no-op.
@@ -699,7 +712,9 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.error(`reference-gateway listening on http://localhost:${PORT}`);
-  console.error(`  signing: ${SIGNING_KEY ? `required (headers x-${NS}-*)` : 'disabled (set GATEWAY_SIGNING_KEY to require)'}`);
+  console.error(
+    `  signing: ${SIGNING_KEY ? `required (headers x-${NS}-*)` : 'disabled (set GATEWAY_SIGNING_KEY to require)'}`,
+  );
   console.error(
     `  endpoints: /describe /authorize /execute /bulk_execute /task/status /memory/get /memory/upsert /memory/search /memory/feedback`,
   );

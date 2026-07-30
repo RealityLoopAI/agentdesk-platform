@@ -123,6 +123,7 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0069](ADR-0069-mcp-child-trusted-request-identity.md) | MCP 子进程从 Host 入站行重建可信请求身份 | Accepted | 2026-07-29 | `identity-trust-chain`, `gateway`, `agent-runner`, `mcp`, `fail-closed` |
 | [ADR-0070](ADR-0070-request-driven-vision-archive-gateway.md) | 通过请求驱动的 Gateway 读取 Vision Archive | Accepted | 2026-07-30 | `gateway`, `smb`, `archive`, `security`, `agent-routing`, `read-only` |
 | [ADR-0071](ADR-0071-provider-neutral-group-instructions.md) | Provider-neutral 的 Group 指令与私有 Skill | Accepted | 2026-07-30 | `provider`, `agent-runner`, `prompt`, `skills`, `agent-group`, `openai` |
+| [ADR-0073](ADR-0073-host-mediated-gateway-confirmation.md) | Host-mediated Gateway 确认签发：Host 只收集可信用户交互，Gateway 验证 opaque Preview 并签发绑定用户、组、操作、资源、记录、Patch、Fingerprint、有效期和 Nonce 的一次性 Token；旧 Gateway 404、跨用户、过期、伪造或签名失败均 Fail Closed，且不形成平行业务授权路径 | Accepted | 2026-07-30 | `gateway`, `confirmation`, `identity-trust-chain`, `interactive`, `feishu`, `fail-closed` |
 
 ---
 

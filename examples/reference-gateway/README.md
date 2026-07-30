@@ -30,18 +30,18 @@ transactionally.
 
 ## What it implements
 
-| Endpoint              | Behaviour                                                                                                                                                                                                                   |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /describe`      | returns an operation catalog (`conformance.noop`, `demo.echo`, `demo.order.create`, plus a realistic read+write pair `todo.list` / `todo.create`) and a memory-namespace catalog                                            |
-| `POST /authorize`     | allows reads; denies a **mutating** op when `requesterSource` is `agent-asserted`                                                                                                                                           |
-| `POST /execute`       | `dryRun` → `preview`; otherwise → `result`; **replays the same result for a repeated `idempotencyKey`** so host retries can't double-write; returns an `auditId`; unknown op → structured `OPERATION_NOT_FOUND`             |
-| `POST /bulk_execute`  | runs many operations in one round-trip (ADR-0036); per-op idempotency replay; `atomic` pre-validates then commits all-or-nothing; best-effort returns per-op `results[]` + `partial`                                        |
-| `POST /task/status`   | async task poll (ADR-0037); `submitAsync:true` on `/execute` returns a `taskId`, this returns its `{status, result?}` (idempotent by key; unknown id → `failed`, not 404)                                                   |
-| `POST /memory/get`    | exact lookup by `(namespace, subject)`; returns the live `value` + `source` provenance + `validAt`                                                                                                                          |
-| `POST /memory/upsert` | A.U.D.N. reconciliation (ADR-0050): canonical-value equality → `no-op`; change → supersede (invalidate the old version, append a new one). Returns `value` + `source` + `validAt` + `op`                                    |
-| `POST /memory/search` | naive keyword match over stored JSON, scoped by namespace + subject; returns `{ value, source, score, validAt, invalidAt? }[]` — live only by default, `includeHistory: true` adds superseded versions (ADR-0033, ADR-0050) |
-| `feishu.bitable.*` through `/describe`, `/authorize`, `/execute` | optional Gateway-only App/Table/Field discovery and Record CRUD; disabled unless all credential, signing-secret and resource-whitelist settings are present |
-| `vision.archive.*` through `/describe`, `/authorize`, `/execute` | optional, strictly on-demand experiment search, file metadata listing, and bounded JSON read/search through opaque handles |
+| Endpoint                                                         | Behaviour                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /describe`                                                 | returns an operation catalog (`conformance.noop`, `demo.echo`, `demo.order.create`, plus a realistic read+write pair `todo.list` / `todo.create`) and a memory-namespace catalog                                            |
+| `POST /authorize`                                                | allows reads; denies a **mutating** op when `requesterSource` is `agent-asserted`                                                                                                                                           |
+| `POST /execute`                                                  | `dryRun` → `preview`; otherwise → `result`; **replays the same result for a repeated `idempotencyKey`** so host retries can't double-write; returns an `auditId`; unknown op → structured `OPERATION_NOT_FOUND`             |
+| `POST /bulk_execute`                                             | runs many operations in one round-trip (ADR-0036); per-op idempotency replay; `atomic` pre-validates then commits all-or-nothing; best-effort returns per-op `results[]` + `partial`                                        |
+| `POST /task/status`                                              | async task poll (ADR-0037); `submitAsync:true` on `/execute` returns a `taskId`, this returns its `{status, result?}` (idempotent by key; unknown id → `failed`, not 404)                                                   |
+| `POST /memory/get`                                               | exact lookup by `(namespace, subject)`; returns the live `value` + `source` provenance + `validAt`                                                                                                                          |
+| `POST /memory/upsert`                                            | A.U.D.N. reconciliation (ADR-0050): canonical-value equality → `no-op`; change → supersede (invalidate the old version, append a new one). Returns `value` + `source` + `validAt` + `op`                                    |
+| `POST /memory/search`                                            | naive keyword match over stored JSON, scoped by namespace + subject; returns `{ value, source, score, validAt, invalidAt? }[]` — live only by default, `includeHistory: true` adds superseded versions (ADR-0033, ADR-0050) |
+| `feishu.bitable.*` through `/describe`, `/authorize`, `/execute` | optional Gateway-only App/Table/Field discovery and Record CRUD; disabled unless all credential, signing-secret and resource-whitelist settings are present                                                                 |
+| `vision.archive.*` through `/describe`, `/authorize`, `/execute` | optional, strictly on-demand experiment search, file metadata listing, and bounded JSON read/search through opaque handles                                                                                                  |
 
 Every response carries `contractVersion: 1`. The `requesterSource='session'` vs
 `'agent-asserted'` gate on mutating operations is the contract's identity-trust
@@ -127,16 +127,16 @@ that is the verification working, not a contract violation.)
 
 需要设置以下环境变量：
 
-| 变量 | 说明 |
-|---|---|
-| `FEISHU_BITABLE_APP_ID` | 飞书自建应用 App ID，只存在 Gateway 进程 |
-| `FEISHU_BITABLE_APP_SECRET` | 飞书自建应用 Secret，只存在 Gateway 进程 |
-| `FEISHU_BITABLE_RESOURCES_JSON` | 逻辑资源白名单和规范用户读写策略 |
-| `FEISHU_BITABLE_CURSOR_SECRET` | 至少 32 字符，用于签名不透明分页 Cursor |
-| `FEISHU_BITABLE_CONFIRMATION_SECRET` | 至少 32 字符，用于签名用户确认凭据 |
-| `FEISHU_BITABLE_BASE_URL` | 可选；仅供 Mock/私有代理测试，默认飞书开放平台 |
-| `FEISHU_BITABLE_READ_ENABLED` | 默认 `false`；发布 5 个只读 Operation |
-| `FEISHU_BITABLE_WRITE_ENABLED` | 默认 `false`；发布 6 个写 Operation，必须晚于只读灰度 |
+| 变量                                 | 说明                                                  |
+| ------------------------------------ | ----------------------------------------------------- |
+| `FEISHU_BITABLE_APP_ID`              | 飞书自建应用 App ID，只存在 Gateway 进程              |
+| `FEISHU_BITABLE_APP_SECRET`          | 飞书自建应用 Secret，只存在 Gateway 进程              |
+| `FEISHU_BITABLE_RESOURCES_JSON`      | 逻辑资源白名单和规范用户读写策略                      |
+| `FEISHU_BITABLE_CURSOR_SECRET`       | 至少 32 字符，用于签名不透明分页 Cursor               |
+| `FEISHU_BITABLE_CONFIRMATION_SECRET` | 至少 32 字符，用于签名用户确认凭据                    |
+| `FEISHU_BITABLE_BASE_URL`            | 可选；仅供 Mock/私有代理测试，默认飞书开放平台        |
+| `FEISHU_BITABLE_READ_ENABLED`        | 默认 `false`；发布 5 个只读 Operation                 |
+| `FEISHU_BITABLE_WRITE_ENABLED`       | 默认 `false`；发布 6 个写 Operation，必须晚于只读灰度 |
 
 任一必需项缺失都会在启动时 Fail Closed；未配置任何一项则保持功能关闭，`/describe`
 不会宣传多维表格能力。配置完整但两个 Feature Flag 都关闭时同样不宣传；关闭的 Operation
@@ -151,10 +151,7 @@ that is the verification working, not a contract violation.)
     "name": "销售应用",
     "readers": ["canonical-user-alice"],
     "writers": [],
-    "allowedOperations": [
-      "feishu.bitable.app.get",
-      "feishu.bitable.table.list"
-    ]
+    "allowedOperations": ["feishu.bitable.app.get", "feishu.bitable.table.list"]
   },
   "sales.pipeline": {
     "appToken": "bas...",
@@ -173,9 +170,7 @@ that is the verification working, not a contract violation.)
       }
     },
     "sorts": {
-      "recent": [
-        { "field_name": "更新时间", "desc": true }
-      ]
+      "recent": [{ "field_name": "更新时间", "desc": true }]
     }
   }
 }
@@ -189,6 +184,36 @@ Agent 输入只能使用 `sales.pipeline` 这样的逻辑 `resource`。真实 `a
 `tableId` 只保存在上面的 Gateway 配置中；响应、错误和审计不会返回这些映射。Record List
 中的 `viewAlias`、`filterAlias`、`sortAlias` 也必须来自该资源的白名单，不能提交任意飞书
 表达式。
+
+临时自然语言条件使用同一个 `feishu.bitable.record.list` Operation 的结构化
+`query`/`orderBy`，不新增 `record.query`：
+
+```json
+{
+  "resource": "sales.pipeline",
+  "fields": ["客户", "状态", "成交金额"],
+  "query": {
+    "conjunction": "and",
+    "conditions": [
+      { "field": "状态", "operator": "eq", "value": "进行中" },
+      { "field": "成交金额", "operator": "gte", "value": 10000 }
+    ]
+  },
+  "orderBy": [{ "field": "成交金额", "direction": "desc" }],
+  "pageSize": 20
+}
+```
+
+Gateway 会先拉取当前 Field Schema，再校验字段存在性、值类型和单选选项，随后才转换成
+飞书 `/records/search` 的 `filter`/`sort`。支持单层 `and|or`、最多 10 个条件和 3 个排序项。
+文本支持 `eq/ne/contains/notContains`；数字支持 `eq/ne/gt/gte/lt/lte`；日期支持
+`eq/gt/gte/lt/lte` 且值为 Unix 毫秒；单选支持 `eq/ne`；复选框支持布尔
+`eq/ne`；上述字段都支持 `isEmpty/isNotEmpty`。`startsWith` 虽属于通用封闭词汇，但当前
+飞书 Provider 没有等价结构化操作符，因此参考 Adapter 会在调用飞书前 Fail Closed。
+
+`filterAlias`/`sortAlias` 不得与 `query`/`orderBy` 混用；`viewAlias` 可以保留。Cursor 绑定
+资源、视图、字段投影、条件和排序，换条件重放会被拒绝。Gateway 只请求单个有界页面、再次
+执行字段投影并检查响应字节上限，不会先拉取整表多页交给模型筛选。
 
 Batch 必须显式选择 `best-effort` 或 `atomic`。参考实现默认只接受
 `best-effort`；只有运营者确认上游调用真的能保证“全成或全败”后，才可把对应
@@ -216,11 +241,15 @@ GATEWAY_REQUIRE_FEISHU_BITABLE=true \
   pnpm exec tsx scripts/gateway-conformance.ts http://localhost:8088
 ```
 
-删除与 `highImpactFields` 更新需要确认。`/authorize` 只返回
-`user-confirmation` obligation 和绑定摘要，不会给 Agent 一张可自行满足的凭据。运营系统在
-真正向用户展示并取得确认后，才可从
-[`feishu-bitable-adapter.mjs`](feishu-bitable-adapter.mjs) 的
-`issueConfirmation(...)` 签发短期凭据；该方法不能暴露为 Agent Tool。
+单条 Update 在当前试点中全部需要确认；`highImpactFields` 只保留为风险标签。Worker 先用
+`dryRun=true` 取得 Gateway 生成的 Diff、Record Fingerprint、Binding Hash 和 opaque
+`confirmationRequest`，再把精确 Preview 交给 Host 的 `gateway_request_confirmation`。
+Host 从可信入站链重新确定原请求者，用户确认后经签名代理调用 `POST /confirmation/issue`；
+Gateway 校验 opaque Request、展示摘要、用户、Agent Group 和有效期后才签发短期凭据。签发
+入口不能暴露为 Agent Tool，Token 也不能进入卡片、Web API、日志或审计明文。
+
+Update Commit 重新读取 Record 并比较 Preview Fingerprint；变化返回 `CONFLICT`，成功后再
+Get 核验。Delete 仍要求绑定确认，但 Query/Create/Update 试点资源不发布 Delete 或 Batch。
 
 运行 Mock 飞书 API 回归：
 
@@ -228,8 +257,9 @@ GATEWAY_REQUIRE_FEISHU_BITABLE=true \
 node --test examples/reference-gateway/feishu-bitable-adapter.test.mjs
 ```
 
-测试覆盖 Token 隔离、白名单、规范用户授权、分页、Schema 漂移、字段校验、限流、超时、
-封闭错误、幂等重放、未确认删除/高影响更新，以及 Best-effort 部分失败。
+测试覆盖 Token 隔离、白名单、规范用户授权、结构化查询、Operator Matrix、字段投影、
+Cursor 重绑定、分页/响应边界、Schema 漂移、字段校验、限流、超时、封闭错误、幂等重放、
+Update Preview/确认/Fingerprint 冲突/提交后 Get、未确认删除，以及 Best-effort 部分失败。
 
 ## Point an agent group at it
 

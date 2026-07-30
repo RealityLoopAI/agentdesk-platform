@@ -67,7 +67,13 @@ export const READ_PATHS = ['/describe', '/authorize', '/task/status', '/memory/g
 // /memory/feedback (ADR-0043) writes a feedback record to the backend corpus, so
 // it is write-scoped (added with its tool/handler in the same change to avoid a
 // window where the tool exists but the proxy 403s it).
-export const WRITE_PATHS = ['/execute', '/bulk_execute', '/memory/upsert', '/memory/feedback'] as const;
+export const WRITE_PATHS = [
+  '/execute',
+  '/bulk_execute',
+  '/memory/upsert',
+  '/memory/feedback',
+  '/confirmation/issue',
+] as const;
 export const ALL_GATEWAY_PATHS: readonly string[] = [...READ_PATHS, ...WRITE_PATHS];
 
 const REQUESTER_SOURCES = new Set(['session', 'agent-asserted']);
@@ -456,6 +462,55 @@ export async function processSigningProxyRequest(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Host-internal use of the same signing/forwarding/audit core.
+ *
+ * The confirmation broker already owns a Host-resolved Session, actor and
+ * Agent Group, so it does not need (and must not mint/revoke) the container's
+ * raw proxy token. This narrow wrapper supplies an in-memory virtual token
+ * bound to exactly `/confirmation/issue`; every other identity, path,
+ * canonicalization, signing and two-phase-audit check remains identical to the
+ * external proxy path.
+ */
+export async function processHostGatewayConfirmationRequest(args: {
+  sessionId: string;
+  agentGroupId: string;
+  body: Record<string, unknown>;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+}): Promise<ProxyRequestResult> {
+  const now = args.now ?? (() => Date.now());
+  const jti = `host-confirmation:${args.sessionId}`;
+  return processSigningProxyRequest(
+    {
+      method: 'POST',
+      pathname: '/confirmation/issue',
+      token: 'host-internal',
+      sourceIp: 'host',
+      rawBody: JSON.stringify(args.body),
+    },
+    {
+      verifyToken: (_token, sourceIp) => ({
+        ok: true,
+        record: {
+          jti,
+          sessionId: args.sessionId,
+          agentGroupId: args.agentGroupId,
+          allowedPaths: ['/confirmation/issue'],
+          sourceIp,
+          expiresAt: new Date(now() + 60_000).toISOString(),
+        },
+      }),
+      resolveGateway: resolveGatewayForGroup,
+      recordIntent: recordGatewayProxyIntent,
+      finalize: finalizeGatewayProxyAudit,
+      fetchImpl: args.fetchImpl ?? fetch,
+      allowRate: () => true,
+      now,
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------

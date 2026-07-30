@@ -20,7 +20,12 @@ function parseEvent(data: string): WebEventPayload | null {
       typeof candidate.laneId !== 'string' ||
       typeof candidate.resourceId !== 'string' ||
       typeof candidate.createdAt !== 'string' ||
-      !['conversation.message.accepted', 'conversation.message.available'].includes(candidate.type ?? '')
+      ![
+        'conversation.message.accepted',
+        'conversation.message.available',
+        'conversation.confirmation.available',
+        'conversation.confirmation.resolved',
+      ].includes(candidate.type ?? '')
     ) {
       return null;
     }
@@ -91,10 +96,18 @@ export function useWebEventStream(): EventStreamState {
         const payload = parseEvent((rawEvent as MessageEvent<string>).data);
         if (!payload || !remember(payload.eventId)) return;
         cursor.current = payload.cursor;
-        void Promise.all([
-          queryClient.invalidateQueries({ queryKey: conversationKeys.messages(payload.laneId) }),
-          queryClient.invalidateQueries({ queryKey: conversationKeys.list() }),
-        ]);
+        const confirmationEvent = payload.type.startsWith('conversation.confirmation.');
+        void Promise.all(
+          confirmationEvent
+            ? [
+                queryClient.invalidateQueries({ queryKey: conversationKeys.confirmations(payload.laneId) }),
+                queryClient.invalidateQueries({ queryKey: conversationKeys.list() }),
+              ]
+            : [
+                queryClient.invalidateQueries({ queryKey: conversationKeys.messages(payload.laneId) }),
+                queryClient.invalidateQueries({ queryKey: conversationKeys.list() }),
+              ],
+        );
       });
       source.addEventListener('session-revoked', () => {
         stopped = true;

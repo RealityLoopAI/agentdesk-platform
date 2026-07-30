@@ -55,6 +55,7 @@ beforeEach(async () => {
         },
       }),
     ),
+    http.get('/api/conversations/lane-1/confirmations', () => HttpResponse.json({ confirmations: [] })),
   );
   await getMe();
 });
@@ -159,5 +160,42 @@ describe('ConversationPage', () => {
     await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
     expect(submitted).toEqual({ enabled: true });
     expect(toggle).toHaveAttribute('title', expect.stringContaining('你在 Web 端发送的消息不会被重复发送'));
+  });
+
+  it('renders the Gateway-owned update diff and submits only the user decision', async () => {
+    let submitted: Record<string, unknown> = {};
+    server.use(
+      http.get('/api/conversations/lane-1/confirmations', () =>
+        HttpResponse.json({
+          confirmations: [
+            {
+              id: 'confirm-1',
+              kind: 'update',
+              title: '确认修改多维表格记录',
+              display: {
+                recordId: 'rec-1',
+                diff: [{ field: '状态', before: '待办', after: '完成', highImpact: false }],
+              },
+              expiresAt: '2026-07-30T10:00:00.000Z',
+              status: 'pending',
+            },
+          ],
+        }),
+      ),
+      http.post('/api/conversations/lane-1/confirmations/confirm-1', async ({ request }) => {
+        submitted = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({
+          confirmation: { id: 'confirm-1', status: 'approved', errorCode: null },
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByRole('heading', { name: '确认修改多维表格记录' })).toBeInTheDocument();
+    expect(screen.getByText('待办')).toBeInTheDocument();
+    expect(screen.getByText('完成')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '确认修改' }));
+    await waitFor(() => expect(submitted).toEqual({ decision: 'approve' }));
   });
 });

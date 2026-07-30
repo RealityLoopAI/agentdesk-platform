@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createFeishuBitableAdapter, loadFeishuBitableConfigFromEnv } from './feishu-bitable-adapter.mjs';
+import {
+  computeFeishuBitableRecordFingerprint,
+  createFeishuBitableAdapter,
+  loadFeishuBitableConfigFromEnv,
+} from './feishu-bitable-adapter.mjs';
 
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
@@ -29,6 +33,9 @@ function fieldPayload(extra = []) {
           ui_type: 'SingleSelect',
           property: { options: [{ name: 'Open' }, { name: 'Closed' }] },
         },
+        { field_id: 'fld-amount', field_name: 'Amount', type: 2, ui_type: 'Number', property: null },
+        { field_id: 'fld-due', field_name: 'DueDate', type: 5, ui_type: 'DateTime', property: null },
+        { field_id: 'fld-done', field_name: 'Done', type: 7, ui_type: 'Checkbox', property: null },
         ...extra,
       ],
       has_more: false,
@@ -94,12 +101,80 @@ function request(operation, input, overrides = {}) {
     operation,
     input,
     requester: { userId: ALICE },
+    agent: { agentGroupId: 'bitable-worker' },
     requesterSource: 'session',
     dryRun: false,
     idempotencyKey: operation.includes('.record.') ? `idem-${operation}-${JSON.stringify(input)}` : null,
     ...overrides,
   };
 }
+
+function confirmationDisplay(preview) {
+  return {
+    recordId: preview.recordId,
+    diff: preview.diff,
+    expectedRecordFingerprint: preview.expectedRecordFingerprint,
+    expiresAt: preview.expiresAt,
+    highImpactFields: preview.highImpactFields,
+  };
+}
+
+async function previewAndIssue(adapter, input, overrides = {}) {
+  const previewResponse = await adapter.execute(
+    request('feishu.bitable.record.update', input, {
+      dryRun: true,
+      idempotencyKey: null,
+      ...overrides,
+    }),
+  );
+  assert.equal(previewResponse.ok, true);
+  const issued = await adapter.issueConfirmationRequest({
+    requester: overrides.requester ?? { userId: ALICE },
+    agent: overrides.agent ?? { agentGroupId: 'bitable-worker' },
+    requesterSource: overrides.requesterSource ?? 'session',
+    confirmationRequest: previewResponse.preview.confirmationRequest,
+    display: confirmationDisplay(previewResponse.preview),
+    context: {},
+  });
+  assert.equal(issued.ok, true);
+  assert.equal(issued.bindingHash, previewResponse.preview.bindingHash);
+  return { previewResponse, issued };
+}
+
+test('record fingerprint is stable across field order and changes with content or provider metadata', () => {
+  const first = computeFeishuBitableRecordFingerprint({
+    recordId: 'rec-1',
+    fields: { Status: 'Open', Name: 'Alpha' },
+    revision: '7',
+    updatedAt: '2026-07-30T08:00:00.000Z',
+  });
+  const reordered = computeFeishuBitableRecordFingerprint({
+    updatedAt: '2026-07-30T08:00:00.000Z',
+    revision: '7',
+    fields: { Name: 'Alpha', Status: 'Open' },
+    recordId: 'rec-1',
+  });
+  assert.match(first, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(reordered, first);
+  assert.notEqual(
+    computeFeishuBitableRecordFingerprint({
+      recordId: 'rec-1',
+      fields: { Name: 'Alpha', Status: 'Closed' },
+      revision: '7',
+      updatedAt: '2026-07-30T08:00:00.000Z',
+    }),
+    first,
+  );
+  assert.notEqual(
+    computeFeishuBitableRecordFingerprint({
+      recordId: 'rec-1',
+      fields: { Name: 'Alpha', Status: 'Open' },
+      revision: '8',
+      updatedAt: '2026-07-30T08:00:00.000Z',
+    }),
+    first,
+  );
+});
 
 test('credentials and raw resource ids stay inside the Gateway boundary', async () => {
   const { adapter, calls, audits } = makeHarness(({ url }) => {
@@ -213,7 +288,7 @@ test('Bitable feature flags are opt-in and fail closed on invalid or missing con
   );
 });
 
-test('read-create pilot exposes only the intended operation subset to every trusted canonical user', async () => {
+test('query-create-update pilot exposes only the intended operation subset to every trusted canonical user', async () => {
   let createCalls = 0;
   const { adapter, calls } = makeHarness(
     ({ url, body }) => {
@@ -242,6 +317,7 @@ test('read-create pilot exposes only the intended operation subset to every trus
             'feishu.bitable.record.list',
             'feishu.bitable.record.get',
             'feishu.bitable.record.create',
+            'feishu.bitable.record.update',
           ],
         },
       },
@@ -255,6 +331,7 @@ test('read-create pilot exposes only the intended operation subset to every trus
       'feishu.bitable.record.list',
       'feishu.bitable.record.get',
       'feishu.bitable.record.create',
+      'feishu.bitable.record.update',
     ],
   );
 
@@ -286,7 +363,6 @@ test('read-create pilot exposes only the intended operation subset to every trus
   assert.equal(unknownField.body.code, 'VALIDATION_FAILED');
 
   for (const operation of [
-    'feishu.bitable.record.update',
     'feishu.bitable.record.delete',
     'feishu.bitable.record.batch_create',
     'feishu.bitable.record.batch_update',
@@ -458,7 +534,409 @@ test('record pagination uses a signed opaque cursor bound to the query', async (
   assert.equal(recordCalls, 2);
 });
 
-test('field schema cache refreshes once on drift and validates before writing', async () => {
+test('structured query/order are schema-validated, provider-compiled and field-projected', async () => {
+  let searchCalls = 0;
+  const { adapter, calls } = makeHarness(({ url, body }) => {
+    if (!url.pathname.endsWith('/records/search')) throw new Error(`unexpected path ${url.pathname}`);
+    searchCalls += 1;
+    assert.deepEqual(body.filter, {
+      conjunction: 'and',
+      conditions: [
+        { field_name: 'Name', operator: 'contains', value: ['Qual'] },
+        { field_name: 'Status', operator: 'is', value: ['Open'] },
+        { field_name: 'Amount', operator: 'isGreaterEqual', value: ['100'] },
+        { field_name: 'DueDate', operator: 'isLess', value: ['ExactDate', '1800000000001'] },
+        { field_name: 'Done', operator: 'is', value: ['false'] },
+      ],
+    });
+    assert.deepEqual(body.sort, [{ field_name: 'DueDate', desc: false }]);
+    assert.deepEqual(body.field_names, ['Name', 'Status']);
+    return json({
+      code: 0,
+      data: {
+        items: [
+          {
+            record_id: 'rec-filtered',
+            fields: { Name: 'Qualified', Status: 'Open', SecretColumn: 'must-not-leak' },
+          },
+        ],
+        has_more: false,
+      },
+    });
+  });
+
+  const result = await adapter.execute(
+    request(
+      'feishu.bitable.record.list',
+      {
+        resource: 'sales.pipeline',
+        pageSize: 20,
+        fields: ['Name', 'Status'],
+        query: {
+          conjunction: 'and',
+          conditions: [
+            { field: 'Name', operator: 'contains', value: 'Qual' },
+            { field: 'Status', operator: 'eq', value: 'Open' },
+            { field: 'Amount', operator: 'gte', value: 100 },
+            { field: 'DueDate', operator: 'lte', value: 1_800_000_000_000 },
+            { field: 'Done', operator: 'eq', value: false },
+          ],
+        },
+        orderBy: [{ field: 'DueDate', direction: 'asc' }],
+      },
+      { idempotencyKey: null },
+    ),
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.result.items[0].fields, { Name: 'Qualified', Status: 'Open' });
+  assert.equal(searchCalls, 1);
+  assert.equal(calls.filter((call) => call.url.includes('/fields')).length, 1);
+});
+
+test('invalid structured queries fail before record search and cannot mix aliases or raw provider fields', async () => {
+  const { adapter, calls } = makeHarness(() => {
+    throw new Error('invalid structured query must not reach record search');
+  });
+  const cases = [
+    {
+      query: { conjunction: 'and', conditions: [{ field: 'Missing', operator: 'eq', value: 'x' }] },
+    },
+    {
+      query: { conjunction: 'and', conditions: [{ field: 'Status', operator: 'eq', value: 'Unknown' }] },
+    },
+    {
+      query: { conjunction: 'and', conditions: [{ field: 'Amount', operator: 'contains', value: '1' }] },
+    },
+    {
+      query: { conjunction: 'and', conditions: [{ field: 'Name', operator: 'startsWith', value: 'A' }] },
+    },
+    {
+      filterAlias: 'active',
+      query: { conjunction: 'and', conditions: [{ field: 'Status', operator: 'eq', value: 'Open' }] },
+    },
+    {
+      filter: { conjunction: 'and', conditions: [] },
+    },
+  ];
+  for (const item of cases) {
+    const response = await adapter.execute(
+      request('feishu.bitable.record.list', { resource: 'sales.pipeline', ...item }, { idempotencyKey: null }),
+    );
+    assert.equal(response.body.code, 'VALIDATION_FAILED');
+  }
+  assert.equal(calls.filter((call) => call.url.includes('/records/search')).length, 0);
+});
+
+test('structured cursors bind query, order, resource view and field projection', async () => {
+  let recordCalls = 0;
+  const { adapter } = makeHarness(({ url }) => {
+    if (!url.pathname.endsWith('/records/search')) throw new Error(`unexpected path ${url.pathname}`);
+    recordCalls += 1;
+    return json({
+      code: 0,
+      data: {
+        items: [{ record_id: `rec-${recordCalls}`, fields: { Name: 'Bound' } }],
+        has_more: recordCalls === 1,
+        page_token: recordCalls === 1 ? 'provider-page-2' : undefined,
+      },
+    });
+  });
+  const query = {
+    conjunction: 'and',
+    conditions: [{ field: 'Status', operator: 'eq', value: 'Open' }],
+  };
+  const first = await adapter.execute(
+    request(
+      'feishu.bitable.record.list',
+      { resource: 'sales.pipeline', query, fields: ['Name'], orderBy: [{ field: 'Name', direction: 'asc' }] },
+      { idempotencyKey: null },
+    ),
+  );
+  assert.equal(first.result.hasMore, true);
+
+  for (const rebound of [
+    { query: { conjunction: 'and', conditions: [{ field: 'Status', operator: 'eq', value: 'Closed' }] } },
+    { orderBy: [{ field: 'Name', direction: 'desc' }] },
+    { fields: ['Status'] },
+  ]) {
+    const response = await adapter.execute(
+      request(
+        'feishu.bitable.record.list',
+        {
+          resource: 'sales.pipeline',
+          query,
+          fields: ['Name'],
+          orderBy: [{ field: 'Name', direction: 'asc' }],
+          cursor: first.result.nextCursor,
+          ...rebound,
+        },
+        { idempotencyKey: null },
+      ),
+    );
+    assert.equal(response.body.code, 'VALIDATION_FAILED');
+  }
+  assert.equal(recordCalls, 1);
+});
+
+test('pilot query-create-update lifecycle is bounded, idempotent, conflict-safe and Get-verified', async () => {
+  let createCalls = 0;
+  let updateCalls = 0;
+  let searchCalls = 0;
+  let revision = 1;
+  const records = new Map([
+    [
+      'rec-seed-1',
+      {
+        record_id: 'rec-seed-1',
+        fields: { Name: 'Seed one', Status: 'Open', Done: false },
+        revision: '1',
+        last_modified_time: 1_800_000_000_000,
+      },
+    ],
+    [
+      'rec-seed-2',
+      {
+        record_id: 'rec-seed-2',
+        fields: { Name: 'Seed two', Status: 'Open', Done: false },
+        revision: '1',
+        last_modified_time: 1_800_000_000_000,
+      },
+    ],
+  ]);
+  const { adapter, audits } = makeHarness(
+    ({ url, init, body }) => {
+      if (url.pathname.endsWith('/records/search')) {
+        searchCalls += 1;
+        assert.deepEqual(body.filter, {
+          conjunction: 'and',
+          conditions: [
+            { field_name: 'Status', operator: 'is', value: ['Open'] },
+            { field_name: 'Done', operator: 'is', value: ['false'] },
+          ],
+        });
+        assert.equal(url.searchParams.get('page_size'), '1');
+        if (!url.searchParams.get('page_token')) {
+          return json({
+            code: 0,
+            data: {
+              items: [records.get('rec-seed-1')],
+              has_more: true,
+              page_token: 'provider-lifecycle-page-2',
+            },
+          });
+        }
+        assert.equal(url.searchParams.get('page_token'), 'provider-lifecycle-page-2');
+        return json({
+          code: 0,
+          data: { items: [records.get('rec-seed-2')], has_more: false },
+        });
+      }
+      if (url.pathname.endsWith('/records') && init.method === 'POST') {
+        createCalls += 1;
+        const record = {
+          record_id: 'rec-created',
+          fields: body.fields,
+          revision: String(revision),
+          last_modified_time: 1_800_000_000_000 + revision,
+        };
+        records.set(record.record_id, record);
+        return json({ code: 0, data: { record } });
+      }
+      const match = url.pathname.match(/\/records\/([^/]+)$/);
+      if (match && (init.method ?? 'GET') === 'GET') {
+        const record = records.get(match[1]);
+        if (!record) return json({ code: 1254043, msg: 'not found' }, 404);
+        return json({ code: 0, data: { record } });
+      }
+      if (match && init.method === 'PUT') {
+        updateCalls += 1;
+        const current = records.get(match[1]);
+        revision += 1;
+        const updated = {
+          ...current,
+          fields: { ...current.fields, ...body.fields },
+          revision: String(revision),
+          last_modified_time: 1_800_000_000_000 + revision,
+        };
+        records.set(match[1], updated);
+        return json({ code: 0, data: { record: updated } });
+      }
+      throw new Error(`unexpected provider request ${init.method ?? 'GET'} ${url.pathname}`);
+    },
+    {
+      resources: {
+        'pilot.records': {
+          appToken: APP_TOKEN,
+          tableId: TABLE_ID,
+          readers: ['*'],
+          writers: ['*'],
+          requiredFields: ['Name'],
+          highImpactFields: ['Status'],
+          allowedOperations: [
+            'feishu.bitable.field.list',
+            'feishu.bitable.record.list',
+            'feishu.bitable.record.get',
+            'feishu.bitable.record.create',
+            'feishu.bitable.record.update',
+          ],
+        },
+      },
+    },
+  );
+
+  const queryInput = {
+    resource: 'pilot.records',
+    pageSize: 1,
+    fields: ['Name', 'Status', 'Done'],
+    query: {
+      conjunction: 'and',
+      conditions: [
+        { field: 'Status', operator: 'eq', value: 'Open' },
+        { field: 'Done', operator: 'eq', value: false },
+      ],
+    },
+  };
+  const firstPage = await adapter.execute(request('feishu.bitable.record.list', queryInput, { idempotencyKey: null }));
+  assert.equal(firstPage.result.hasMore, true);
+  assert.doesNotMatch(firstPage.result.nextCursor, /provider-lifecycle-page-2/);
+  const secondPage = await adapter.execute(
+    request(
+      'feishu.bitable.record.list',
+      { ...queryInput, cursor: firstPage.result.nextCursor },
+      { idempotencyKey: null },
+    ),
+  );
+  assert.equal(secondPage.result.hasMore, false);
+  assert.equal(searchCalls, 2);
+
+  const createRequest = request(
+    'feishu.bitable.record.create',
+    {
+      resource: 'pilot.records',
+      fields: { Name: 'Lifecycle', Status: 'Open', Done: false },
+    },
+    { idempotencyKey: 'lifecycle-create' },
+  );
+  const created = await adapter.execute(createRequest);
+  const createReplay = await adapter.execute(createRequest);
+  assert.equal(created.result.recordId, 'rec-created');
+  assert.equal(createReplay.replayed, true);
+  assert.equal(createCalls, 1);
+
+  const initialPreview = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      { resource: 'pilot.records', recordId: 'rec-created', fields: { Status: 'Closed' } },
+      { dryRun: true, idempotencyKey: null },
+    ),
+  );
+  const initialIssued = await adapter.issueConfirmationRequest({
+    requester: { userId: ALICE },
+    agent: { agentGroupId: 'bitable-worker' },
+    requesterSource: 'session',
+    confirmationRequest: initialPreview.preview.confirmationRequest,
+    display: confirmationDisplay(initialPreview.preview),
+    context: {},
+  });
+  const externallyChanged = records.get('rec-created');
+  revision += 1;
+  records.set('rec-created', {
+    ...externallyChanged,
+    fields: { ...externallyChanged.fields, Name: 'Externally changed' },
+    revision: String(revision),
+    last_modified_time: 1_800_000_000_000 + revision,
+  });
+  const conflict = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      {
+        resource: 'pilot.records',
+        recordId: 'rec-created',
+        fields: { Status: 'Closed' },
+        expectedRecordFingerprint: initialPreview.preview.expectedRecordFingerprint,
+        confirmation: initialIssued.confirmation,
+      },
+      { idempotencyKey: 'lifecycle-conflict' },
+    ),
+  );
+  assert.equal(conflict.body.code, 'CONFLICT');
+  assert.equal(updateCalls, 0);
+
+  const { previewResponse, issued } = await previewAndIssue(adapter, {
+    resource: 'pilot.records',
+    recordId: 'rec-created',
+    fields: { Status: 'Closed' },
+  });
+  const updateRequest = request(
+    'feishu.bitable.record.update',
+    {
+      resource: 'pilot.records',
+      recordId: 'rec-created',
+      fields: { Status: 'Closed' },
+      expectedRecordFingerprint: previewResponse.preview.expectedRecordFingerprint,
+      confirmation: issued.confirmation,
+    },
+    { idempotencyKey: 'lifecycle-update' },
+  );
+  const updated = await adapter.execute(updateRequest);
+  const updateReplay = await adapter.execute({
+    ...updateRequest,
+    input: { ...updateRequest.input, confirmation: 'replay-does-not-reuse-token' },
+  });
+  assert.equal(updated.result.fields.Status, 'Closed');
+  assert.equal(updated.result.verification.verified, true);
+  assert.ok(updated.result.verification.getAuditId);
+  assert.equal(updateReplay.replayed, true);
+  assert.equal(updateCalls, 1);
+  assert.ok(audits.some((event) => event.phase === 'execute' && event.idempotencyKey === 'lifecycle-create'));
+  assert.ok(audits.some((event) => event.phase === 'execute' && event.idempotencyKey === 'lifecycle-update'));
+});
+
+test('record search rejects provider pages larger than the requested bound', async () => {
+  const { adapter } = makeHarness(({ url }) => {
+    if (!url.pathname.endsWith('/records/search')) throw new Error(`unexpected path ${url.pathname}`);
+    return json({
+      code: 0,
+      data: {
+        items: [
+          { record_id: 'rec-1', fields: { Name: 'One' } },
+          { record_id: 'rec-2', fields: { Name: 'Two' } },
+        ],
+        has_more: false,
+      },
+    });
+  });
+  const response = await adapter.execute(
+    request('feishu.bitable.record.list', { resource: 'sales.pipeline', pageSize: 1 }, { idempotencyKey: null }),
+  );
+  assert.equal(response.body.code, 'BACKEND_UNAVAILABLE');
+});
+
+test('record search enforces the configured response byte bound without fetching another page', async () => {
+  let searchCalls = 0;
+  const { adapter } = makeHarness(
+    ({ url }) => {
+      if (!url.pathname.endsWith('/records/search')) throw new Error(`unexpected path ${url.pathname}`);
+      searchCalls += 1;
+      return json({
+        code: 0,
+        data: {
+          items: [{ record_id: 'rec-large', fields: { Name: 'x'.repeat(1_000) } }],
+          has_more: true,
+          page_token: 'provider-page-2',
+        },
+      });
+    },
+    { maxResponseBytes: 128 },
+  );
+  const response = await adapter.execute(
+    request('feishu.bitable.record.list', { resource: 'sales.pipeline', pageSize: 1 }, { idempotencyKey: null }),
+  );
+  assert.equal(response.body.code, 'VALIDATION_FAILED');
+  assert.equal(searchCalls, 1);
+});
+
+test('field schema cache refreshes once on drift and validates before Update preview', async () => {
   let fieldCalls = 0;
   let writeCalls = 0;
   const driftCalls = [];
@@ -491,9 +969,18 @@ test('field schema cache refreshes once on drift and validates before writing', 
           fieldCalls >= 2 ? [{ field_id: 'fld-priority', field_name: 'Priority', type: 2, ui_type: 'Number' }] : [];
         return json(fieldPayload(extra));
       }
-      writeCalls += 1;
-      const body = JSON.parse(init.body);
-      return json({ code: 0, data: { record: { record_id: 'rec-created', fields: body.fields } } });
+      if (href.endsWith('/records') && init.method === 'POST') {
+        writeCalls += 1;
+        const body = JSON.parse(init.body);
+        return json({ code: 0, data: { record: { record_id: 'rec-created', fields: body.fields } } });
+      }
+      if (href.endsWith('/records/rec-created') && (init.method ?? 'GET') === 'GET') {
+        return json({
+          code: 0,
+          data: { record: { record_id: 'rec-created', fields: { Name: 'Initial', Priority: 1 } } },
+        });
+      }
+      throw new Error(`unexpected provider request ${init.method ?? 'GET'} ${href}`);
     },
   });
 
@@ -502,15 +989,20 @@ test('field schema cache refreshes once on drift and validates before writing', 
   );
   assert.equal(created.ok, true);
   const updated = await driftAdapter.execute(
-    request('feishu.bitable.record.update', {
-      resource: 'sales.pipeline',
-      recordId: 'rec-created',
-      fields: { Priority: 2 },
-    }),
+    request(
+      'feishu.bitable.record.update',
+      {
+        resource: 'sales.pipeline',
+        recordId: 'rec-created',
+        fields: { Priority: 2 },
+      },
+      { dryRun: true, idempotencyKey: null },
+    ),
   );
   assert.equal(updated.ok, true);
+  assert.equal(updated.preview.diff[0].field, 'Priority');
   assert.equal(fieldCalls, 2);
-  assert.equal(writeCalls, 2);
+  assert.equal(writeCalls, 1);
   assert.ok(driftCalls.some((href) => href.includes('/fields')));
 });
 
@@ -546,17 +1038,22 @@ test('idempotency replay returns the first committed record and rejects key rebi
   assert.equal(createCalls, 1);
 });
 
-test('delete and high-impact update require a user/resource/record-bound confirmation', async () => {
+test('delete keeps legacy confirmation while every Update uses Preview and Host-mediated confirmation', async () => {
   let deleteCalls = 0;
   let updateCalls = 0;
+  let currentFields = { Name: 'Initial', Status: 'Open' };
   const { adapter } = makeHarness(({ url, init, body }) => {
     if (url.pathname.endsWith('/records/rec-1') && init.method === 'DELETE') {
       deleteCalls += 1;
       return json({ code: 0, data: {} });
     }
+    if (url.pathname.endsWith('/records/rec-1') && (init.method ?? 'GET') === 'GET') {
+      return json({ code: 0, data: { record: { record_id: 'rec-1', fields: currentFields } } });
+    }
     if (url.pathname.endsWith('/records/rec-1') && init.method === 'PUT') {
       updateCalls += 1;
-      return json({ code: 0, data: { record: { record_id: 'rec-1', fields: body.fields } } });
+      currentFields = { ...currentFields, ...body.fields };
+      return json({ code: 0, data: { record: { record_id: 'rec-1', fields: currentFields } } });
     }
     throw new Error(`unexpected path ${url.pathname}`);
   });
@@ -606,13 +1103,15 @@ test('delete and high-impact update require a user/resource/record-bound confirm
   assert.equal(highImpactWithout.body.code, 'CONFIRMATION_REQUIRED');
   assert.equal(updateCalls, 0);
 
-  const updateConfirmation = adapter.issueConfirmation({
-    requesterUserId: ALICE,
-    operation: 'feishu.bitable.record.update',
+  const { previewResponse, issued } = await previewAndIssue(adapter, {
     resource: 'sales.pipeline',
-    recordIds: ['rec-1'],
-    highImpactFields: ['Status'],
+    recordId: 'rec-1',
+    fields: { Status: 'Closed' },
   });
+  assert.deepEqual(previewResponse.preview.diff, [
+    { field: 'Status', before: 'Open', after: 'Closed', highImpact: true },
+  ]);
+  assert.doesNotMatch(previewResponse.preview.confirmationRequest, /Open|Closed/);
   const highImpactCommitted = await adapter.execute(
     request(
       'feishu.bitable.record.update',
@@ -620,13 +1119,303 @@ test('delete and high-impact update require a user/resource/record-bound confirm
         resource: 'sales.pipeline',
         recordId: 'rec-1',
         fields: { Status: 'Closed' },
-        confirmation: updateConfirmation,
+        expectedRecordFingerprint: previewResponse.preview.expectedRecordFingerprint,
+        confirmation: issued.confirmation,
       },
       { idempotencyKey: 'high-impact-key' },
     ),
   );
   assert.equal(highImpactCommitted.result.fields.Status, 'Closed');
+  assert.equal(highImpactCommitted.result.verification.verified, true);
+  assert.equal(highImpactCommitted.result.verification.updateAuditId, highImpactCommitted.auditId);
+  assert.ok(highImpactCommitted.result.verification.getAuditId);
   assert.equal(updateCalls, 1);
+});
+
+test('Update confirmation binds actor, group, record, patch, fingerprint, expiry, nonce and idempotency', async () => {
+  let clock = 1_800_000_000_000;
+  let updateCalls = 0;
+  let current = {
+    record_id: 'rec-secure',
+    fields: { Name: 'Original', Status: 'Open', Done: false },
+    revision: '1',
+    last_modified_time: clock,
+  };
+  const { adapter, audits } = makeHarness(
+    ({ url, init, body }) => {
+      if (url.pathname.endsWith('/records/rec-secure') && (init.method ?? 'GET') === 'GET') {
+        return json({ code: 0, data: { record: current } });
+      }
+      if (url.pathname.endsWith('/records/rec-other') && (init.method ?? 'GET') === 'GET') {
+        return json({
+          code: 0,
+          data: {
+            record: {
+              record_id: 'rec-other',
+              fields: { Name: 'Other', Status: 'Open', Done: false },
+              revision: '1',
+              last_modified_time: clock,
+            },
+          },
+        });
+      }
+      if (url.pathname.endsWith('/records/rec-secure') && init.method === 'PUT') {
+        updateCalls += 1;
+        current = {
+          ...current,
+          fields: { ...current.fields, ...body.fields },
+          revision: String(Number(current.revision) + 1),
+          last_modified_time: clock + 1,
+        };
+        return json({ code: 0, data: { record: current } });
+      }
+      throw new Error(`unexpected path ${init.method ?? 'GET'} ${url.pathname}`);
+    },
+    {
+      now: () => clock,
+      confirmationTtlMs: 1_000,
+      resources: {
+        'sales.pipeline': {
+          appToken: APP_TOKEN,
+          tableId: TABLE_ID,
+          readers: ['*'],
+          writers: ['*'],
+          requiredFields: ['Name'],
+          highImpactFields: ['Status'],
+          allowedOperations: [
+            'feishu.bitable.field.list',
+            'feishu.bitable.record.list',
+            'feishu.bitable.record.get',
+            'feishu.bitable.record.create',
+            'feishu.bitable.record.update',
+          ],
+        },
+      },
+    },
+  );
+
+  const unconfirmed = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      { resource: 'sales.pipeline', recordId: 'rec-secure', fields: { Done: true } },
+      { idempotencyKey: 'update-unconfirmed' },
+    ),
+  );
+  assert.equal(unconfirmed.body.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(updateCalls, 0);
+
+  const noOp = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      { resource: 'sales.pipeline', recordId: 'rec-secure', fields: { Done: false } },
+      { dryRun: true, idempotencyKey: null },
+    ),
+  );
+  assert.equal(noOp.body.code, 'VALIDATION_FAILED');
+
+  const preview = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      { resource: 'sales.pipeline', recordId: 'rec-secure', fields: { Done: true } },
+      { dryRun: true, idempotencyKey: null },
+    ),
+  );
+  assert.equal(preview.ok, true);
+  assert.deepEqual(preview.preview.diff, [{ field: 'Done', before: false, after: true, highImpact: false }]);
+  assert.match(preview.preview.expectedRecordFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.match(preview.preview.bindingHash, /^sha256:[a-f0-9]{64}$/);
+  assert.doesNotMatch(preview.preview.confirmationRequest, /Original|Done|false|true/);
+
+  const wrongIssuer = await adapter.issueConfirmationRequest({
+    requester: { userId: BOB },
+    agent: { agentGroupId: 'bitable-worker' },
+    requesterSource: 'session',
+    confirmationRequest: preview.preview.confirmationRequest,
+    display: confirmationDisplay(preview.preview),
+    context: {},
+  });
+  assert.equal(wrongIssuer.body.code, 'BACKEND_UNAUTHORIZED');
+  const wrongGroupIssuer = await adapter.issueConfirmationRequest({
+    requester: { userId: ALICE },
+    agent: { agentGroupId: 'other-worker' },
+    requesterSource: 'session',
+    confirmationRequest: preview.preview.confirmationRequest,
+    display: confirmationDisplay(preview.preview),
+    context: {},
+  });
+  assert.equal(wrongGroupIssuer.body.code, 'BACKEND_UNAUTHORIZED');
+  const forgedDisplay = await adapter.issueConfirmationRequest({
+    requester: { userId: ALICE },
+    agent: { agentGroupId: 'bitable-worker' },
+    requesterSource: 'session',
+    confirmationRequest: preview.preview.confirmationRequest,
+    display: {
+      ...confirmationDisplay(preview.preview),
+      diff: [{ field: 'Done', before: false, after: false, highImpact: false }],
+    },
+    context: {},
+  });
+  assert.equal(forgedDisplay.body.code, 'CONFIRMATION_REQUIRED');
+
+  const issued = await adapter.issueConfirmationRequest({
+    requester: { userId: ALICE },
+    agent: { agentGroupId: 'bitable-worker' },
+    requesterSource: 'session',
+    confirmationRequest: preview.preview.confirmationRequest,
+    display: confirmationDisplay(preview.preview),
+    context: {},
+  });
+  assert.equal(issued.ok, true);
+
+  const baseConfirmedInput = {
+    resource: 'sales.pipeline',
+    recordId: 'rec-secure',
+    fields: { Done: true },
+    expectedRecordFingerprint: preview.preview.expectedRecordFingerprint,
+    confirmation: issued.confirmation,
+  };
+  const wrongActor = await adapter.execute(
+    request('feishu.bitable.record.update', baseConfirmedInput, {
+      requester: { userId: BOB },
+      idempotencyKey: 'update-wrong-actor',
+    }),
+  );
+  assert.equal(wrongActor.body.code, 'CONFIRMATION_REQUIRED');
+  const wrongGroup = await adapter.execute(
+    request('feishu.bitable.record.update', baseConfirmedInput, {
+      agent: { agentGroupId: 'other-worker' },
+      idempotencyKey: 'update-wrong-group',
+    }),
+  );
+  assert.equal(wrongGroup.body.code, 'CONFIRMATION_REQUIRED');
+  const wrongRecord = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      { ...baseConfirmedInput, recordId: 'rec-other' },
+      { idempotencyKey: 'update-wrong-record' },
+    ),
+  );
+  assert.equal(wrongRecord.body.code, 'CONFIRMATION_REQUIRED');
+  const wrongPatch = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      { ...baseConfirmedInput, fields: { Done: false } },
+      { idempotencyKey: 'update-wrong-patch' },
+    ),
+  );
+  assert.equal(wrongPatch.body.code, 'CONFIRMATION_REQUIRED');
+  const wrongFingerprint = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      { ...baseConfirmedInput, expectedRecordFingerprint: `sha256:${'f'.repeat(64)}` },
+      { idempotencyKey: 'update-wrong-fingerprint' },
+    ),
+  );
+  assert.equal(wrongFingerprint.body.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(updateCalls, 0);
+
+  clock += 1_001;
+  const expired = await adapter.execute(
+    request('feishu.bitable.record.update', baseConfirmedInput, {
+      idempotencyKey: 'update-expired',
+    }),
+  );
+  assert.equal(expired.body.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(updateCalls, 0);
+
+  const conflictPreview = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      { resource: 'sales.pipeline', recordId: 'rec-secure', fields: { Done: true } },
+      { dryRun: true, idempotencyKey: null },
+    ),
+  );
+  const conflictIssued = await adapter.issueConfirmationRequest({
+    requester: { userId: ALICE },
+    agent: { agentGroupId: 'bitable-worker' },
+    requesterSource: 'session',
+    confirmationRequest: conflictPreview.preview.confirmationRequest,
+    display: confirmationDisplay(conflictPreview.preview),
+    context: {},
+  });
+  current = {
+    ...current,
+    fields: { ...current.fields, Name: 'External edit' },
+    revision: '2',
+    last_modified_time: clock + 1,
+  };
+  const conflicted = await adapter.execute(
+    request(
+      'feishu.bitable.record.update',
+      {
+        resource: 'sales.pipeline',
+        recordId: 'rec-secure',
+        fields: { Done: true },
+        expectedRecordFingerprint: conflictPreview.preview.expectedRecordFingerprint,
+        confirmation: conflictIssued.confirmation,
+      },
+      { idempotencyKey: 'update-fingerprint-conflict' },
+    ),
+  );
+  assert.equal(conflicted.body.code, 'CONFLICT');
+  assert.equal(updateCalls, 0);
+
+  const { previewResponse: freshPreview, issued: freshIssued } = await previewAndIssue(adapter, {
+    resource: 'sales.pipeline',
+    recordId: 'rec-secure',
+    fields: { Done: true },
+  });
+  const committedRequest = request(
+    'feishu.bitable.record.update',
+    {
+      resource: 'sales.pipeline',
+      recordId: 'rec-secure',
+      fields: { Done: true },
+      expectedRecordFingerprint: freshPreview.preview.expectedRecordFingerprint,
+      confirmation: freshIssued.confirmation,
+    },
+    { idempotencyKey: 'update-stable-key' },
+  );
+  const committed = await adapter.execute(committedRequest);
+  assert.equal(committed.ok, true);
+  assert.equal(committed.result.fields.Done, true);
+  assert.equal(committed.result.verification.verified, true);
+  assert.equal(updateCalls, 1);
+
+  const replay = await adapter.execute({
+    ...committedRequest,
+    input: { ...committedRequest.input, confirmation: 'malformed-but-ignored-on-replay' },
+  });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.result.verification.updateAuditId, committed.auditId);
+  assert.equal(updateCalls, 1);
+
+  const rebound = await adapter.execute({
+    ...committedRequest,
+    input: {
+      ...committedRequest.input,
+      fields: { Status: 'Closed' },
+      confirmation: 'malformed-but-conflict-precedes-confirmation',
+    },
+  });
+  assert.equal(rebound.body.code, 'CONFLICT');
+  assert.equal(updateCalls, 1);
+
+  const reusedByOtherKey = await adapter.execute({
+    ...committedRequest,
+    idempotencyKey: 'update-other-key',
+  });
+  assert.equal(reusedByOtherKey.body.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(updateCalls, 1);
+
+  assert.doesNotMatch(JSON.stringify(audits), /Original|External edit|Closed/);
+  const successAudit = audits.find(
+    (event) => event.phase === 'execute' && event.idempotencyKey === 'update-stable-key',
+  );
+  assert.equal(successAudit.fingerprintResult, 'match');
+  assert.match(successAudit.confirmationBindingHash, /^sha256:[a-f0-9]{64}$/);
+  assert.match(successAudit.expectedRecordFingerprint, /^sha256:[a-f0-9]{64}$/);
+  assert.match(successAudit.currentRecordFingerprint, /^sha256:[a-f0-9]{64}$/);
 });
 
 test('rate limits and timeouts map to bounded retryable closed errors', async () => {

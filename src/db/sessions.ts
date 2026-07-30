@@ -438,6 +438,15 @@ export function getAskQuestionRender(
     { title: string; options_json: string } | undefined;
   if (a?.title) return { title: a.title, options: JSON.parse(a.options_json) };
 
+  if (hasTable(getDb(), 'pending_gateway_confirmations')) {
+    const confirmation = getDb()
+      .prepare('SELECT title, options_json FROM pending_gateway_confirmations WHERE confirmation_id = ?')
+      .get(id) as { title: string; options_json: string } | undefined;
+    if (confirmation?.title) {
+      return { title: confirmation.title, options: JSON.parse(confirmation.options_json) };
+    }
+  }
+
   // Channel-registration + unknown-sender approvals persist title/options_json
   // the same way pending_approvals does — just SELECT and return.
   if (hasTable(getDb(), 'pending_channel_approvals')) {

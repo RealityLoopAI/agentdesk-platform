@@ -9,11 +9,13 @@ vi.mock('../config.js', async () => {
 
 import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { listConversationBindings } from '../db/conversation-lanes.js';
+import { createPendingGatewayConfirmation } from '../db/gateway-confirmations.js';
 import { runMigrations } from '../db/migrations/index.js';
 import { openOutboundDbRw, resolveSession, writeSessionMessage } from '../session-manager.js';
 import {
   createWebConversation,
   getWebConversationHistory,
+  listWebGatewayConfirmations,
   listWebConversations,
   WebConversationError,
 } from './conversations.js';
@@ -41,6 +43,46 @@ afterEach(() => {
 });
 
 describe('Web conversation service', () => {
+  it('exposes only the owner-bound confirmation display and hides the opaque Gateway request', () => {
+    const lane = createWebConversation('alice', 'ag-1');
+    const binding = listConversationBindings(lane.id)[0]!;
+    const resolved = resolveSession('ag-1', binding.messaging_group_id, null, 'per-user', 'alice', null, null, lane.id);
+    createPendingGatewayConfirmation({
+      confirmationId: 'confirm-1',
+      sessionId: resolved.session.id,
+      messageOutId: 'confirm-1',
+      kind: 'update',
+      requesterUserId: 'alice',
+      agentGroupId: 'ag-1',
+      conversationLaneId: lane.id,
+      channelType: 'web',
+      platformId: binding.platform_id,
+      threadId: null,
+      confirmationRequest: 'opaque-secret-request',
+      displayJson: JSON.stringify({
+        recordId: 'rec-1',
+        diff: [{ field: '状态', before: '待办', after: '完成', highImpact: false }],
+      }),
+      title: '确认修改',
+      optionsJson: '[]',
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const visible = listWebGatewayConfirmations({ userId: 'alice', laneId: lane.id });
+    expect(visible.confirmations).toEqual([
+      expect.objectContaining({
+        id: 'confirm-1',
+        kind: 'update',
+        display: expect.objectContaining({ recordId: 'rec-1' }),
+      }),
+    ]);
+    expect(JSON.stringify(visible)).not.toContain('opaque-secret-request');
+    expect(() => listWebGatewayConfirmations({ userId: 'bob', laneId: lane.id })).toThrowError(
+      expect.objectContaining({ code: 'conversation_unavailable' }),
+    );
+  });
+
   it('creates a user-owned Web binding and hides inaccessible Lanes from the list', () => {
     const lane = createWebConversation('alice', 'ag-1');
     expect(lane.agentGroup).toEqual({ id: 'ag-1', name: 'Research Agent' });
