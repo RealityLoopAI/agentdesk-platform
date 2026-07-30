@@ -304,6 +304,28 @@ describe('voice photo monitor service', () => {
     monitor.close();
   });
 
+  it('keeps polling after readiness until explicitly aborted', async () => {
+    const { root, databasePath } = await fixture();
+    const controller = new AbortController();
+    let scans = 0;
+    const scan = vi.fn(async () => {
+      scans += 1;
+      if (scans === 2) controller.abort();
+      return [];
+    });
+    const state = new VoicePhotoState(databasePath);
+    const monitor = new VoicePhotoMonitor(config(root, databasePath), {
+      state,
+      sender: { sendImage: vi.fn() },
+      target: normalizeFeishuP2pTarget('feishu:p2p:ou_receiver'),
+      scan,
+    });
+
+    await monitor.run(controller.signal);
+    expect(scan).toHaveBeenCalledTimes(2);
+    monitor.close();
+  });
+
   it('keeps excess events queued under the persisted per-minute attempt budget', async () => {
     const { root, databasePath } = await fixture();
     const limited = { ...config(root, databasePath), maxSendsPerMinute: 1 };
