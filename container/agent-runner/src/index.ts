@@ -40,6 +40,7 @@ import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import { resolveProviderRoles } from './provider-roles.js';
 import { runPollLoop } from './poll-loop.js';
+import { buildEffectiveSystemInstructions } from './workspace-instructions.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
@@ -64,7 +65,7 @@ async function main(): Promise<void> {
   // shared base (/app/CLAUDE.md) and each enabled module's fragment.
   // Per-group memory lives in /workspace/agent/CLAUDE.local.md
   // (auto-loaded) when the selected provider supports it.
-  const instructions = buildSystemPromptAddendum(
+  const runtimeInstructions = buildSystemPromptAddendum(
     config.assistantName || undefined,
     config.memoryMode,
     config.agentGroupId || undefined,
@@ -111,6 +112,11 @@ async function main(): Promise<void> {
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: roles.execution.model,
     toolMode: roles.execution.toolMode,
+  });
+  const instructions = buildEffectiveSystemInstructions({
+    cwd: CWD,
+    runtimeInstructions,
+    loadsWorkspaceInstructionsNatively: provider.loadsWorkspaceInstructionsNatively === true,
   });
 
   const routingProvider = roles.routing

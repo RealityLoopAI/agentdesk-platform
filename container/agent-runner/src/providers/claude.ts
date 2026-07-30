@@ -319,6 +319,7 @@ const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not fou
 
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
+  readonly loadsWorkspaceInstructionsNatively = true;
 
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;

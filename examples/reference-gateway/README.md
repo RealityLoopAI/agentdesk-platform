@@ -41,10 +41,18 @@ transactionally.
 | `POST /memory/upsert` | A.U.D.N. reconciliation (ADR-0050): canonical-value equality → `no-op`; change → supersede (invalidate the old version, append a new one). Returns `value` + `source` + `validAt` + `op`                                    |
 | `POST /memory/search` | naive keyword match over stored JSON, scoped by namespace + subject; returns `{ value, source, score, validAt, invalidAt? }[]` — live only by default, `includeHistory: true` adds superseded versions (ADR-0033, ADR-0050) |
 | `feishu.bitable.*` through `/describe`, `/authorize`, `/execute` | optional Gateway-only App/Table/Field discovery and Record CRUD; disabled unless all credential, signing-secret and resource-whitelist settings are present |
+| `vision.archive.*` through `/describe`, `/authorize`, `/execute` | optional, strictly on-demand experiment search, file metadata listing, and bounded JSON read/search through opaque handles |
 
 Every response carries `contractVersion: 1`. The `requesterSource='session'` vs
 `'agent-asserted'` gate on mutating operations is the contract's identity-trust
 model in miniature — a real backend should keep that gate and harden it.
+
+The optional Vision Archive adapter is disabled unless its root, resource
+policy, and feature configuration are present. Configuring it performs no
+filesystem access; only an authorized `/execute` touches the read-only Host
+mount. See the
+[`Vision Archive operator guide`](../../docs/vision-archive-gateway.md) and
+[`pilot README`](../vision-archive-pilot/README.md).
 
 ## Run it
 

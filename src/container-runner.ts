@@ -31,7 +31,7 @@ import {
   stopContainer,
   stopContainerAsync,
 } from './container-runtime.js';
-import { composeGroupClaudeMd } from './claude-md-compose.js';
+import { composeGroupClaudeMd, resolveSkillSource } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { revokeAllProxyTokens, revokeProxyTokensForSession } from './db/gateway-proxy-token.js';
 import { gatewaySigningProxyEnabled, mintSessionProxyToken } from './gateway-signing-proxy.js';
@@ -596,7 +596,8 @@ export function buildMounts(
   ensureStateScope(scope, { disableAutoMemory: containerConfig.memoryMode === 'gateway' });
 
   // Sync skill symlinks based on container.json selection before mounting.
-  syncSkillSymlinks(scope.claudeDir, containerConfig);
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+  syncSkillSymlinks(scope.claudeDir, groupDir, containerConfig);
 
   // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
   // fragments, and MCP server instructions. See `claude-md-compose.ts`.
@@ -604,7 +605,6 @@ export function buildMounts(
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
-  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
@@ -634,6 +634,14 @@ export function buildMounts(
   const promptsDir = path.join(groupDir, 'prompts');
   if (fs.existsSync(promptsDir)) {
     mounts.push({ hostPath: promptsDir, containerPath: '/workspace/agent/prompts', readonly: true });
+  }
+
+  // Group-private skills are template assets. Owned per-user scopes do not
+  // physically contain them, so project the operator-managed directory into
+  // the stable container path as a read-only nested mount.
+  const privateSkillsDir = path.join(groupDir, 'skills');
+  if (fs.existsSync(privateSkillsDir)) {
+    mounts.push({ hostPath: privateSkillsDir, containerPath: '/workspace/agent/skills', readonly: true });
   }
 
   if (containerConfig.llm?.routing?.enabled) {
@@ -732,7 +740,11 @@ export function resolveRoutingPromptMount(groupDir: string, promptFile: string):
  * selection. Each symlink points to a container path (/app/skills/<name>)
  * so it's dangling on the host but valid inside the container.
  */
-function syncSkillSymlinks(claudeDir: string, containerConfig: import('./container-config.js').ContainerConfig): void {
+function syncSkillSymlinks(
+  claudeDir: string,
+  groupDir: string,
+  containerConfig: import('./container-config.js').ContainerConfig,
+): void {
   const skillsDir = path.join(claudeDir, 'skills');
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
@@ -743,21 +755,31 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
   let desired: string[];
   if (containerConfig.skills === 'all') {
-    // Recompute from shared dir — newly-added upstream skills appear automatically
-    desired = fs.existsSync(sharedSkillsDir)
-      ? fs.readdirSync(sharedSkillsDir).filter((e) => {
-          try {
-            return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
-          } catch {
-            return false;
-          }
-        })
-      : [];
+    // Recompute from shared + group-private dirs. A private Skill with the same
+    // name intentionally overrides the shared source for this group only.
+    desired = [
+      ...new Set(
+        [sharedSkillsDir, path.join(groupDir, 'skills')].flatMap((directory) =>
+          fs.existsSync(directory)
+            ? fs
+                .readdirSync(directory, { withFileTypes: true })
+                .filter((entry) => entry.isDirectory())
+                .map((entry) => entry.name)
+            : [],
+        ),
+      ),
+    ];
   } else {
     desired = containerConfig.skills;
   }
 
-  const desiredSet = new Set(desired);
+  const resolved = new Map(
+    desired.flatMap((skill) => {
+      const source = resolveSkillSource(groupDir, sharedSkillsDir, skill);
+      return source ? [[skill, source.containerDir] as const] : [];
+    }),
+  );
+  const desiredSet = new Set(resolved.keys());
 
   // Remove symlinks not in the desired set
   for (const entry of fs.readdirSync(skillsDir)) {
@@ -774,18 +796,21 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 
   // Create symlinks for desired skills (container path targets)
-  for (const skill of desired) {
+  for (const [skill, target] of resolved) {
     const linkPath = path.join(skillsDir, skill);
-    let exists = false;
+    let currentTarget: string | null = null;
     try {
-      fs.lstatSync(linkPath);
-      exists = true;
+      currentTarget = fs.readlinkSync(linkPath);
     } catch {
       /* missing */
     }
-    if (!exists) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+    if (currentTarget === target) continue;
+    try {
+      fs.unlinkSync(linkPath);
+    } catch {
+      /* missing */
     }
+    fs.symlinkSync(target, linkPath);
   }
 }
 

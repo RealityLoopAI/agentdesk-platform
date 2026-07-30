@@ -34,6 +34,7 @@ export function defaultMockResponse(prompt: string): string {
  */
 export class MockProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
+  readonly loadsWorkspaceInstructionsNatively = false;
 
   private responseFactory: (prompt: string) => string;
 

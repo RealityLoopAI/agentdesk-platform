@@ -15,6 +15,12 @@ vi.mock('../src/config.js', async () => {
   };
 });
 
+// Unit tests must not inherit operator secrets from the repository's real
+// `.env`; explicit process.env cases below cover the environment fallback.
+vi.mock('../src/env.js', () => ({
+  readEnvFile: () => ({}),
+}));
+
 import { readContainerConfig } from '../src/container-config.js';
 import { run } from './configure-enterprise-gateway.js';
 

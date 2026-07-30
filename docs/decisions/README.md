@@ -121,6 +121,8 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0067](ADR-0067-native-eventsource-same-origin-validation.md) | 原生 EventSource 使用 Origin 优先、Fetch Metadata 兜底的同源校验 | Accepted | 2026-07-29 | `web`, `sse`, `security`, `csrf`, `browser` |
 | [ADR-0068](ADR-0068-bitable-trusted-users-read-create-pilot.md) | 多维表格试点允许可信规范用户读取和单条新增 | Accepted | 2026-07-29 | `gateway`, `feishu`, `bitable`, `authorization`, `pilot`, `fail-closed` |
 | [ADR-0069](ADR-0069-mcp-child-trusted-request-identity.md) | MCP 子进程从 Host 入站行重建可信请求身份 | Accepted | 2026-07-29 | `identity-trust-chain`, `gateway`, `agent-runner`, `mcp`, `fail-closed` |
+| [ADR-0070](ADR-0070-request-driven-vision-archive-gateway.md) | 通过请求驱动的 Gateway 读取 Vision Archive | Accepted | 2026-07-30 | `gateway`, `smb`, `archive`, `security`, `agent-routing`, `read-only` |
+| [ADR-0071](ADR-0071-provider-neutral-group-instructions.md) | Provider-neutral 的 Group 指令与私有 Skill | Accepted | 2026-07-30 | `provider`, `agent-runner`, `prompt`, `skills`, `agent-group`, `openai` |
 
 ---
 

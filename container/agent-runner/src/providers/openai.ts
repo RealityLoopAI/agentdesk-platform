@@ -910,6 +910,7 @@ class OpenAIMcpBridge {
 
 export class OpenAIProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
+  readonly loadsWorkspaceInstructionsNatively = false;
 
   private readonly baseUrl: string;
   private readonly apiKey: string;

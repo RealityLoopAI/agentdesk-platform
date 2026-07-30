@@ -113,7 +113,7 @@ Routing outputs only `delegate`, `answer_self`, `clarify`, or `reject`. `delegat
 | `imageTag`         | string                                 | derived | Override the agent image tag for this group.                      |
 | `packages`         | `{apt:[],npm:[]}`                      | empty   | Extra apt/npm packages baked at build.                            |
 | `additionalMounts` | `[{hostPath,containerPath,readonly?}]` | empty   | Extra bind mounts (validated against an install-level allowlist). |
-| `skills`           | `string[]` \| `'all'`                  | `'all'` | Which skills to enable for this group.                            |
+| `skills`           | `string[]` \| `'all'`                  | `'all'` | Which skills to enable. Explicit names prefer group-private skills before shared skills. |
 | `mcpServers`       | record                                 | empty   | Extra MCP servers `{command,args,env}` available to the agent.    |
 
 ### Lifecycle

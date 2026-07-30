@@ -651,6 +651,13 @@ The architecture is **flexible for code changes, not configurable for everything
 
 AgentDesk is customized via skills — branches that get merged into the user's installation. Different skills add different capabilities (channels, integrations, behaviors). The code must be structured so that:
 
+Group-specific business Skills may live under
+`groups/<folder>/skills/<name>/`. Explicit `container.json#skills` entries
+resolve those private Skills before the shared `container/skills` catalog.
+Providers that do not natively load the composed `CLAUDE.md` receive a bounded
+expanded copy plus `CLAUDE.local.md` through their system context; native
+workspace-loading providers retain their native path without duplication.
+
 1. **Different customizations don't conflict.** Adding Slack and adding Telegram should not produce merge conflicts. Adding a new MCP tool should not conflict with adding a channel. Each type of customization should touch its own file(s).
 
 2. **Core blocks of functionality are in separate files.** Channel registration, message formatting, MCP tools, routing logic, container management — each in its own file. A skill that changes how messages are formatted doesn't touch the file that handles container spawning.

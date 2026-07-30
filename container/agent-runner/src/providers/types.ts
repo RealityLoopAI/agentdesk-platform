@@ -6,6 +6,13 @@ export interface AgentProvider {
    */
   readonly supportsNativeSlashCommands: boolean;
 
+  /**
+   * True when the provider runtime loads the workspace's composed
+   * CLAUDE.md/CLAUDE.local.md itself. When false/absent, agent-runner expands
+   * those files into systemContext so provider behavior remains equivalent.
+   */
+  readonly loadsWorkspaceInstructionsNatively?: boolean;
+
   /** Start a new query. Returns a handle for streaming input and output. */
   query(input: QueryInput): AgentQuery;
 

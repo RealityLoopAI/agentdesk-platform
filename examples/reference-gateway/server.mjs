@@ -54,6 +54,7 @@ import {
   createFeishuBitableAdapter,
   loadFeishuBitableConfigFromEnv,
 } from './feishu-bitable-adapter.mjs';
+import { createVisionArchiveAdapter, loadVisionArchiveConfigFromEnv } from './vision-archive-adapter.mjs';
 
 const PORT = Number.parseInt(process.env.PORT || '8088', 10);
 
@@ -87,6 +88,19 @@ const bitableAdapter = BITABLE_CONFIG
   ? createFeishuBitableAdapter({
       ...BITABLE_CONFIG,
       audit: (event) => console.error(`[bitable-audit] ${JSON.stringify(event)}`),
+    })
+  : null;
+
+/**
+ * Optional request-driven archive adapter (ADR-0070). Loading configuration
+ * and constructing the adapter perform no filesystem access; the mounted
+ * archive root is touched only by an authorized /execute request.
+ */
+const VISION_ARCHIVE_CONFIG = loadVisionArchiveConfigFromEnv(process.env);
+const visionArchiveAdapter = VISION_ARCHIVE_CONFIG
+  ? createVisionArchiveAdapter({
+      ...VISION_ARCHIVE_CONFIG,
+      audit: (event) => console.error(`[vision-archive-audit] ${JSON.stringify(event)}`),
     })
   : null;
 
@@ -196,6 +210,16 @@ async function runSingleForBulk(entry, req, dryRun) {
       ...(outcome.replayed ? { replayed: true } : {}),
     };
   }
+  if (visionArchiveAdapter?.isOperation(op)) {
+    const outcome = await visionArchiveAdapter.execute({
+      ...req,
+      operation: op,
+      input: entry?.input ?? {},
+      dryRun,
+    });
+    if (outcome?.status && outcome?.body) return { ok: false, error: outcome.body };
+    return { ok: true, result: outcome.result, auditId: outcome.auditId };
+  }
   if (def.mutating && !dryRun && key && idempotency.has(key)) {
     return { ...idempotency.get(key), replayed: true };
   }
@@ -269,7 +293,11 @@ const BASE_OPERATIONS = [
     },
   },
 ];
-const OPERATIONS = [...BASE_OPERATIONS, ...(bitableAdapter?.describeOperations() ?? [])];
+const OPERATIONS = [
+  ...BASE_OPERATIONS,
+  ...(bitableAdapter?.describeOperations() ?? []),
+  ...(visionArchiveAdapter?.describeOperations() ?? []),
+];
 const OPERATION_NAMES = new Set(OPERATIONS.map((o) => o.name));
 
 // --- HMAC verification ------------------------------------------------------
@@ -354,6 +382,7 @@ const handlers = {
   '/authorize': async (req) => {
     const op = String(req.operation || '');
     if (bitableAdapter?.isOperation(op)) return bitableAdapter.authorize(req);
+    if (visionArchiveAdapter?.isOperation(op)) return visionArchiveAdapter.authorize(req);
     if (!OPERATION_NAMES.has(op)) {
       return { allowed: false, reason: `unknown operation: ${op}` };
     }
@@ -372,6 +401,7 @@ const handlers = {
   '/execute': async (req) => {
     const op = String(req.operation || '');
     if (bitableAdapter?.isOperation(op)) return bitableAdapter.execute(req);
+    if (visionArchiveAdapter?.isOperation(op)) return visionArchiveAdapter.execute(req);
     if (!OPERATION_NAMES.has(op)) {
       // Surface a structured, classifiable error (maps to OPERATION_NOT_FOUND).
       return { status: 404, body: { code: 'OPERATION_NOT_FOUND', message: `unknown operation: ${op}` } };
@@ -674,4 +704,5 @@ server.listen(PORT, () => {
     `  endpoints: /describe /authorize /execute /bulk_execute /task/status /memory/get /memory/upsert /memory/search /memory/feedback`,
   );
   console.error(`  Feishu Bitable: ${bitableAdapter ? 'enabled through Gateway operations' : 'disabled'}`);
+  console.error(`  Vision Archive: ${visionArchiveAdapter ? 'enabled for on-demand reads' : 'disabled'}`);
 });
