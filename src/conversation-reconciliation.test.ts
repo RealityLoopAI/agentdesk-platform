@@ -4,6 +4,7 @@ import {
   ConversationLaneConflictError,
   createConversationBinding,
   createConversationLane,
+  linkSessionToConversationLane,
 } from './db/conversation-lanes.js';
 import { closeDb, getDb, initTestDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
@@ -201,7 +202,14 @@ describe('Feishu conversation reconciliation', () => {
       }),
     ).toThrow(ConversationLaneConflictError);
 
+    createSession(session('session-bound', 'mg-1'));
     const occupied = createConversationLane({ agentGroupId: 'ag-1', ownerUserId: 'alice' });
+    linkSessionToConversationLane({
+      laneId: occupied.id,
+      sessionId: 'session-bound',
+      sourceSessionMode: 'per-user',
+      actor: 'alice',
+    });
     createConversationBinding({
       laneId: occupied.id,
       channelType: 'feishu',
@@ -216,10 +224,76 @@ describe('Feishu conversation reconciliation', () => {
       actor: 'alice',
       trigger: 'web',
     });
-    expect(result).toMatchObject({ scanned: 1, linked: 0, conflicts: 1 });
+    expect(result).toMatchObject({ scanned: 2, existing: 1, linked: 0, conflicts: 1 });
     expect(
       getDb().prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?').pluck().get('session-1'),
     ).toBeNull();
+  });
+
+  it('reattaches one active legacy root to its exact verified empty Lane after a context reset', () => {
+    const identity = aliceIdentity();
+    const existingLane = createConversationLane({
+      id: 'lane-existing-empty',
+      agentGroupId: 'ag-1',
+      ownerUserId: 'alice',
+    });
+    createSession(session('session-before-reset', 'mg-1'));
+    linkSessionToConversationLane({
+      laneId: existingLane.id,
+      sessionId: 'session-before-reset',
+      sourceSessionMode: 'per-user',
+      actor: 'alice',
+    });
+    getDb()
+      .prepare(
+        `UPDATE sessions
+            SET status = 'archived', archived_at = ?
+          WHERE id = 'session-before-reset'`,
+      )
+      .run('2026-01-01T00:01:00.000Z');
+    getDb()
+      .prepare('UPDATE conversation_lanes SET root_session_id = NULL WHERE id = ?')
+      .run(existingLane.id);
+    createConversationBinding({
+      laneId: existingLane.id,
+      channelType: 'feishu',
+      messagingGroupId: 'mg-1',
+      platformId: 'feishu:oc_one',
+      externalIdentityId: identity.id,
+      deliveryMode: 'source-reply',
+    });
+    createSession(session('session-after-reset', 'mg-1'));
+
+    const result = reconcileFeishuConversationLanes({
+      userId: 'alice',
+      externalIdentityId: identity.id,
+      actor: 'alice',
+      trigger: 'web',
+    });
+
+    expect(result).toMatchObject({ scanned: 1, linked: 1, existing: 0, conflicts: 0 });
+    expect(
+      getDb().prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?').pluck().get('session-after-reset'),
+    ).toBe(existingLane.id);
+    expect(
+      getDb().prepare('SELECT root_session_id FROM conversation_lanes WHERE id = ?').pluck().get(existingLane.id),
+    ).toBe('session-after-reset');
+    expect(
+      getDb()
+        .prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?')
+        .pluck()
+        .get('session-before-reset'),
+    ).toBeNull();
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(1);
+    expect(getDb().prepare('SELECT COUNT(*) FROM conversation_bindings').pluck().get()).toBe(1);
+    expect(
+      getDb()
+        .prepare(
+          "SELECT COUNT(*) FROM enterprise_audit WHERE event_type = 'conversation_lane_archived_session_detached'",
+        )
+        .pluck()
+        .get(),
+    ).toBe(1);
   });
 
   it('links an exact existing legacy session during inbound association without reading message history', () => {

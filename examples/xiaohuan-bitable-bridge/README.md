@@ -101,6 +101,7 @@ Agent/确认链。Bridge 不再持续采集环境音。
 填写固定部署绑定：
 
 ```dotenv
+FEISHU_APP_ID=<Host 原生飞书适配器使用的同一个 App ID>
 XIAOHUAN_BITABLE_AUTHENTICATED_USER_ID=<Host 中已有的规范用户 ID>
 XIAOHUAN_BITABLE_FEISHU_P2P_PLATFORM_ID=feishu:p2p:ou_<该用户 open_id>
 XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED=true
@@ -108,7 +109,10 @@ XIAOHUAN_BITABLE_RESOURCE=<Gateway 中批准的测试表逻辑别名>
 ```
 
 `XIAOHUAN_BITABLE_RESOURCE` 只能是 Gateway 逻辑别名；形似物理 `bas...`/`tbl...`
-的值会被拒绝。用户、P2P 路由和资源不能从音频、transcript、设备地址或模型输出覆盖。
+的值会被拒绝。启动时 Bridge 会用 `FEISHU_APP_ID`、固定 P2P 路由里的 `open_id` 和
+`XIAOHUAN_BITABLE_AUTHENTICATED_USER_ID` 精确查询 Host 的 `user_identities`；缺失、错配或
+归属其他用户时均拒绝监听。验证成功后，同一身份作为 Host envelope 的 `senderIdentity`
+进入 Conversation Lane，不从音频、transcript、设备地址或模型输出推导。
 
 HTTP 接收配置：
 

@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react';
 import type { HistoryMessage } from '@/api/types';
 import { BrandLogo } from '@/branding/BrandLogo';
 import { Button } from '@/components/ui/Button';
+import { ReadOnlyQuestionCard } from './ReadOnlyQuestionCard';
 import { SafeMarkdown } from './SafeMarkdown';
 
 export interface OptimisticMessage {
@@ -33,7 +34,11 @@ function AgentMessage({ message }: { message: HistoryMessage }) {
             <span className="rounded-full bg-brand-subtle px-2 py-0.5 text-brand">来自飞书</span>
           ) : null}
         </div>
-        <SafeMarkdown>{message.text}</SafeMarkdown>
+        {message.presentation?.type === 'ask-question' && message.presentation.mode === 'read-only' ? (
+          <ReadOnlyQuestionCard presentation={message.presentation} sourceChannel={message.channel.type} />
+        ) : (
+          <SafeMarkdown>{message.text}</SafeMarkdown>
+        )}
       </div>
     </article>
   );

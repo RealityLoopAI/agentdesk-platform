@@ -23,6 +23,7 @@ import {
   ConversationLaneConflictError,
   createConversationLaneRootSession,
   getConversationLane,
+  linkSessionToConversationLane,
   sessionForConversationLane,
 } from './db/conversation-lanes.js';
 import {
@@ -246,6 +247,19 @@ export function resolveSession(
         existing = findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
       }
       if (existing) {
+        if (conversationLaneId) {
+          linkSessionToConversationLane({
+            laneId: conversationLaneId,
+            sessionId: existing.id,
+            sourceSessionMode: sessionMode,
+            actor: ownerUserId,
+          });
+          const linked = getSession(existing.id);
+          if (!linked) {
+            throw new ConversationLaneConflictError('linked_session_unavailable');
+          }
+          return { session: linked, created: false };
+        }
         return { session: existing, created: false };
       }
     }

@@ -41,9 +41,9 @@ describe('Windows GUI Agent MCP bridge', () => {
         windows_gui: { env: { GUI_AGENT_BASE_URL: string; NO_PROXY: string; no_proxy: string } };
       };
     };
-    expect(config.mcpServers.windows_gui.env.GUI_AGENT_BASE_URL).toBe('http://192.168.66.31:8000');
-    expect(config.mcpServers.windows_gui.env.NO_PROXY).toBe('192.168.66.31');
-    expect(config.mcpServers.windows_gui.env.no_proxy).toBe('192.168.66.31');
+    expect(config.mcpServers.windows_gui.env.GUI_AGENT_BASE_URL).toBe('http://192.168.66.98:8000');
+    expect(config.mcpServers.windows_gui.env.NO_PROXY).toBe('192.168.66.98');
+    expect(config.mcpServers.windows_gui.env.no_proxy).toBe('192.168.66.98');
   });
 
   it('enables a complete worker-private GUI operation skill', () => {
@@ -66,13 +66,13 @@ describe('Windows GUI Agent MCP bridge', () => {
 
   it('encodes GUI inputs as query parameters without allowing model-controlled paths', async () => {
     const fetchImpl = vi.fn(async () => response('{"success":true}')) as unknown as FetchLike;
-    const client = new GuiAgentClient('http://192.168.66.31:8000', fetchImpl);
+    const client = new GuiAgentClient('http://192.168.66.98:8000', fetchImpl);
 
     const result = await callGuiTool(client, 'gui_type', { text: '样品 A&B' });
 
     expect(result.isError).toBeUndefined();
     const requested = new URL(String(fetchImpl.mock.calls[0]?.[0]));
-    expect(requested.origin).toBe('http://192.168.66.31:8000');
+    expect(requested.origin).toBe('http://192.168.66.98:8000');
     expect(requested.pathname).toBe('/type');
     expect(requested.searchParams.get('text')).toBe('样品 A&B');
   });
@@ -86,7 +86,7 @@ describe('Windows GUI Agent MCP bridge', () => {
       }
       return response('{"success":true,"root":{"name":"Console"}}');
     }) as unknown as FetchLike;
-    const client = new GuiAgentClient('http://192.168.66.31:8000', fetchImpl);
+    const client = new GuiAgentClient('http://192.168.66.98:8000', fetchImpl);
 
     const result = await callGuiTool(client, 'gui_observe', {
       max_depth: 3,
@@ -108,7 +108,7 @@ describe('Windows GUI Agent MCP bridge', () => {
 
   it('fails closed on invalid coordinates and oversized declared responses', async () => {
     const fetchImpl = vi.fn(async () => response('{}', { contentLength: 3 * 1024 * 1024 })) as unknown as FetchLike;
-    const client = new GuiAgentClient('http://192.168.66.31:8000', fetchImpl);
+    const client = new GuiAgentClient('http://192.168.66.98:8000', fetchImpl);
 
     const invalidCoordinate = await callGuiTool(client, 'gui_click', { x: Number.NaN, y: 10 });
     expect(invalidCoordinate.isError).toBe(true);
@@ -122,7 +122,7 @@ describe('Windows GUI Agent MCP bridge', () => {
 
   it('implements MCP initialize, tool listing, and tool calls', async () => {
     const fetchImpl = vi.fn(async () => response('{"status":"ok"}')) as unknown as FetchLike;
-    const client = new GuiAgentClient('http://192.168.66.31:8000', fetchImpl);
+    const client = new GuiAgentClient('http://192.168.66.98:8000', fetchImpl);
 
     const initialized = await dispatchMcpRequest(client, {
       jsonrpc: '2.0',

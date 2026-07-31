@@ -142,6 +142,7 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0088](ADR-0088-hardware-segmented-http-wav-ingress.md) | 由硬件切句并以整句 HTTP WAV 接入语音链路 | Accepted | 2026-07-30 | `voice`, `wav`, `http`, `hardware`, `ingress` |
 | [ADR-0089](ADR-0089-closed-scene-routed-voice-json-ingest.md) | 视觉 JSON 按封闭场景路由到多维表格 | Accepted | 2026-07-30 | `vision`, `json`, `bitable`, `routing`, `closed-scene` |
 | [ADR-0090](ADR-0090-deterministic-transcript-marker-field-extraction.md) | 用配置化 transcript 标记选择器补齐关键语音字段 | Accepted | 2026-07-30 | `voice`, `transcript`, `field-mapping`, `configuration` |
+| [ADR-0091](ADR-0091-host-projected-read-only-web-question-cards.md) | 由 Host 投影 Web 只读问题卡片 | Accepted | 2026-07-31 | `web`, `feishu`, `interactive`, `history`, `security`, `backward-compat` |
 
 ---
 

@@ -182,6 +182,12 @@ Web History。Organization 访问仍由 Host 通过 Agent Group 推导；Organiz
   `POST /api/conversations/reconcile` 按 Cursor 续跑，再刷新只读列表。
 - **运营回填**：停止 Host 后运行 CLI。CLI 默认 Dry Run，只处理一个规范用户，可选限定 Agent
   Group；每批最多 500 条。
+- **上下文重置后的续接**：若运维归档旧根 Session、保留经过验证的飞书/Web Binding，并将 Lane
+  根清空，下一条可信入站或显式协调会把同一用户、Agent Group、飞书地址和外部身份下唯一的活动
+  个人根 Session 原子挂回该 Lane；事务会先摘除旧归档 Session 上的 Lane 唯一引用，并写
+  `conversation_lane_archived_session_detached` Audit，但不会删除旧 Session 或消息库。已有 Lane
+  已指向其他活动根、Binding 地址不一致或身份归属不一致时仍然 Fail Closed，不能用“新建另一条
+  Lane”绕过冲突。
 
 每个既有飞书根 Session 单独映射一条 Lane。同一用户使用同一助手的两条根 Session不会合并。
 协调只读取中央数据库结构字段，不扫描、复制或重写 Session 消息正文。
@@ -229,6 +235,26 @@ sum by (trigger, outcome) (
 重点关注 `conflict`、`skipped_unauthorized` 和 `limit_reached`。`trigger="inbound"` 表示飞书入站，
 `sso` 表示首次登录批次，`web` 表示前端续跑，`operator` 表示 CLI。指标只含固定枚举标签，不含
 用户、飞书地址或消息正文。
+
+### 5.3 飞书问题卡在 Web 中的只读展示
+
+标准 `ask_question` 发送到飞书后，飞书 Adapter 继续生成可点击的互动卡；同一条 Lane 的 Web
+History 将该消息显示为只读卡片，包含标题、问题、选项和处理状态，不再显示原始 JSON。
+
+Web 卡片没有按钮，也没有回答、确认、拒绝或取消接口：
+
+- `awaiting-external-response`：飞书目标显示“请在飞书端完成选择”；Web 目标显示“Web 端仅供查看”；
+- `answered`：突出显示 Host 已持久化的匹配选项；
+- `cancelled`：显示“已取消”；
+- `closed`：问题已不在 Pending 状态，且没有可展示的有效选择。
+
+飞书点击经既有身份校验和 `question_response` 路径写入根 Session 后，Host 复用
+`conversation.message.available` SSE 事件通知浏览器刷新。断线期间遗漏的事件可以按 Cursor 重放，
+历史刷新也会直接从 Session 数据库重建状态。
+
+Web 只识别有界、完整的标准 `ask_question` 字段。任意 `type: "card"`、附加 Agent 字段、选项内部
+值、回调 Payload 和响应用户标识都不会成为浏览器组件属性。旧前端仍可读取 `text` 回退；无效载荷
+只显示安全文本，不能造成历史接口失败。
 
 ## 6. 多维表格 Gateway 配置
 

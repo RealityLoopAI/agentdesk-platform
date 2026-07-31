@@ -61,6 +61,47 @@ beforeEach(async () => {
 });
 
 describe('ConversationPage', () => {
+  it('renders a synchronized ask_question as a non-interactive read-only card', async () => {
+    server.use(
+      http.get('/api/conversations/lane-1/messages', () =>
+        HttpResponse.json({
+          messages: [
+            {
+              id: 'question-1',
+              sequence: 1,
+              direction: 'agent',
+              kind: 'chat-sdk',
+              timestamp: '2026-07-27T10:00:00.000Z',
+              text: '请选择设备仪器。',
+              channel: { type: 'feishu', platformId: 'feishu:p2p:ou_alice', threadId: null },
+              status: 'delivered',
+              presentation: {
+                type: 'ask-question',
+                mode: 'read-only',
+                title: '设备仪器字段需要确认',
+                question: '请选择设备仪器。',
+                options: [
+                  { label: '力辰科技', selected: false },
+                  { label: '链路测试', selected: true },
+                ],
+                state: 'answered',
+                selectedLabel: '链路测试',
+                responseChannel: 'feishu',
+              },
+            },
+          ],
+          nextCursor: null,
+        }),
+      ),
+    );
+    renderPage();
+
+    expect(await screen.findByRole('heading', { name: '设备仪器字段需要确认' })).toBeInTheDocument();
+    expect(screen.getByText('已选择：链路测试')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /力辰科技|链路测试/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/"type":"ask_question"/)).not.toBeInTheDocument();
+  });
+
   it('shows an optimistic message and reconciles it with the server id', async () => {
     let submitted: Record<string, unknown> = {};
     server.use(

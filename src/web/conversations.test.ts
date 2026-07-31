@@ -11,6 +11,7 @@ import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { listConversationBindings } from '../db/conversation-lanes.js';
 import { createPendingGatewayConfirmation } from '../db/gateway-confirmations.js';
 import { runMigrations } from '../db/migrations/index.js';
+import { createPendingQuestion, deletePendingQuestion } from '../db/sessions.js';
 import { openInboundDb, openOutboundDbRw, resolveSession, writeSessionMessage } from '../session-manager.js';
 import {
   createWebConversation,
@@ -236,6 +237,179 @@ describe('Web conversation service', () => {
     };
     inbound.close();
     expect(JSON.parse(stored.content)).toMatchObject({ text: machinePayload });
+  });
+
+  it('projects standard questions as read-only cards and derives exact Host-owned lifecycle state', () => {
+    const lane = createWebConversation('alice', 'ag-1');
+    const binding = listConversationBindings(lane.id)[0]!;
+    const resolved = resolveSession('ag-1', binding.messaging_group_id, null, 'per-user', 'alice', null, null, lane.id);
+    const question = {
+      type: 'ask_question',
+      questionId: 'question-1',
+      title: '设备仪器字段需要确认',
+      question: '请选择设备仪器。',
+      options: [
+        { label: '力辰科技', selectedLabel: '力辰科技', value: '力辰科技' },
+        { label: '链路测试', selectedLabel: '已选链路测试', value: '链路测试' },
+      ],
+      ignoredAgentField: '<script>not a UI contract</script>',
+    };
+    const outbound = openOutboundDbRw('ag-1', resolved.session.id);
+    outbound
+      .prepare(
+        `INSERT INTO messages_out
+           (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content, in_reply_to)
+         VALUES (?, 1, ?, 'chat-sdk', ?, 'feishu', NULL, ?, NULL)`,
+      )
+      .run('out-question-1', '2026-01-01T00:00:01.000Z', 'feishu:p2p:ou_alice', JSON.stringify(question));
+    outbound.close();
+    createPendingQuestion({
+      question_id: question.questionId,
+      session_id: resolved.session.id,
+      message_out_id: 'out-question-1',
+      platform_id: 'feishu:p2p:ou_alice',
+      channel_type: 'feishu',
+      thread_id: null,
+      title: question.title,
+      options: question.options,
+      created_at: '2026-01-01T00:00:01.000Z',
+    });
+
+    const pending = getWebConversationHistory({ userId: 'alice', laneId: lane.id }).messages[0]!;
+    expect(pending.text).toBe('请选择设备仪器。');
+    expect(pending.presentation).toEqual({
+      type: 'ask-question',
+      mode: 'read-only',
+      title: '设备仪器字段需要确认',
+      question: '请选择设备仪器。',
+      options: [
+        { label: '力辰科技', selected: false },
+        { label: '链路测试', selected: false },
+      ],
+      state: 'awaiting-external-response',
+      selectedLabel: null,
+      responseChannel: null,
+    });
+    expect(JSON.stringify(pending)).not.toContain('ignoredAgentField');
+    expect(JSON.stringify(pending)).not.toContain('<script>');
+    expect(JSON.stringify(pending)).not.toContain('"value"');
+
+    writeSessionMessage('ag-1', resolved.session.id, {
+      id: 'question-response-1',
+      kind: 'system',
+      timestamp: '2026-01-01T00:00:02.000Z',
+      platformId: 'feishu:p2p:ou_alice',
+      channelType: 'feishu',
+      content: JSON.stringify({
+        type: 'question_response',
+        questionId: question.questionId,
+        selectedOption: '链路测试',
+        userId: 'ou-secret-not-for-web',
+      }),
+    });
+    deletePendingQuestion(question.questionId);
+
+    const answered = getWebConversationHistory({ userId: 'alice', laneId: lane.id }).messages[0]!;
+    expect(answered.presentation).toMatchObject({
+      state: 'answered',
+      selectedLabel: '已选链路测试',
+      responseChannel: 'feishu',
+      options: [
+        { label: '力辰科技', selected: false },
+        { label: '链路测试', selected: true },
+      ],
+    });
+    expect(JSON.stringify(answered)).not.toContain('ou-secret-not-for-web');
+    expect(() => getWebConversationHistory({ userId: 'bob', laneId: lane.id })).toThrowError(
+      expect.objectContaining({ code: 'conversation_unavailable' }),
+    );
+  });
+
+  it('closes or cancels read-only cards safely and keeps malformed cards human-readable across pages', () => {
+    const lane = createWebConversation('alice', 'ag-1');
+    const binding = listConversationBindings(lane.id)[0]!;
+    const resolved = resolveSession('ag-1', binding.messaging_group_id, null, 'per-user', 'alice', null, null, lane.id);
+    const outbound = openOutboundDbRw('ag-1', resolved.session.id);
+    const insert = outbound.prepare(
+      `INSERT INTO messages_out
+         (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content, in_reply_to)
+       VALUES (?, ?, ?, 'chat-sdk', ?, 'feishu', NULL, ?, NULL)`,
+    );
+    insert.run(
+      'out-closed',
+      1,
+      '2026-01-01T00:00:01.000Z',
+      'feishu:p2p:ou_alice',
+      JSON.stringify({
+        type: 'ask_question',
+        questionId: 'question-closed',
+        title: '已关闭问题',
+        question: '这个问题已经关闭。',
+        options: ['选项 A'],
+      }),
+    );
+    insert.run(
+      'out-cancelled',
+      2,
+      '2026-01-01T00:00:02.000Z',
+      'feishu:p2p:ou_alice',
+      JSON.stringify({
+        type: 'ask_question',
+        questionId: 'question-cancelled',
+        title: '已取消问题',
+        question: '这个问题已经取消。',
+        options: ['选项 B'],
+      }),
+    );
+    insert.run(
+      'out-malformed',
+      3,
+      '2026-01-01T00:00:03.000Z',
+      'feishu:p2p:ou_alice',
+      JSON.stringify({
+        type: 'ask_question',
+        questionId: 'question-malformed',
+        title: '格式错误',
+        question: '仍然显示这段可读问题。',
+        options: [],
+      }),
+    );
+    outbound.close();
+    writeSessionMessage('ag-1', resolved.session.id, {
+      id: 'question-response-cancelled',
+      kind: 'system',
+      timestamp: '2026-01-01T00:00:04.000Z',
+      platformId: 'feishu:p2p:ou_alice',
+      channelType: 'feishu',
+      content: JSON.stringify({
+        type: 'question_response',
+        questionId: 'question-cancelled',
+        selectedOption: '__cancelled__',
+        cancelled: true,
+      }),
+    });
+
+    const latest = getWebConversationHistory({ userId: 'alice', laneId: lane.id, limit: 2 });
+    expect(latest.messages.map((message) => message.id)).toEqual(['out-cancelled', 'out-malformed']);
+    expect(latest.messages[0]!.presentation).toMatchObject({ state: 'cancelled', selectedLabel: null });
+    expect(latest.messages[1]).toMatchObject({
+      text: '仍然显示这段可读问题。',
+    });
+    expect(latest.messages[1]!.presentation).toBeUndefined();
+    expect(JSON.stringify(latest.messages[1])).not.toContain('"options":[]');
+
+    const older = getWebConversationHistory({
+      userId: 'alice',
+      laneId: lane.id,
+      cursor: latest.nextCursor,
+      limit: 2,
+    });
+    expect(older.messages).toEqual([
+      expect.objectContaining({
+        id: 'out-closed',
+        presentation: expect.objectContaining({ state: 'closed' }),
+      }),
+    ]);
   });
 
   it('keeps A2A Worker results internal instead of rendering them as user-authored messages', () => {

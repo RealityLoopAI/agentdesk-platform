@@ -1,10 +1,7 @@
-import type {
-  ChannelAdapter,
-  ChannelSetup,
-  OutboundMessage,
-} from '../../src/channels/adapter.js';
+import type { ChannelAdapter, ChannelSetup, OutboundMessage } from '../../src/channels/adapter.js';
 import { getChannelAdapter } from '../../src/channels/channel-registry.js';
 import { getMessagingGroupWithAgentCount } from '../../src/db/messaging-groups.js';
+import { getUserIdentity } from '../../src/db/user-identities.js';
 import { log } from '../../src/log.js';
 import {
   onGatewayConfirmationDelivered,
@@ -12,10 +9,7 @@ import {
   onGatewayConfirmationResolved,
   type GatewayConfirmationResolvedEvent,
 } from '../../src/modules/gateway-confirmation/events.js';
-import {
-  onAgentTurnResolved,
-  type AgentTurnResolvedEvent,
-} from '../../src/modules/agent-turn/events.js';
+import { onAgentTurnResolved, type AgentTurnResolvedEvent } from '../../src/modules/agent-turn/events.js';
 import { getUser } from '../../src/modules/permissions/db/users.js';
 import { createAudioPipeline, type SafeLogger } from '../xiaohuan-doubao-audio/pipeline.js';
 import type { ExperimentAudioV1 } from '../xiaohuan-doubao-audio/experiment-schema.js';
@@ -103,9 +97,7 @@ export interface FeishuTranscriptMirrorInput {
  * Reuse the initialized Host Feishu adapter so the Bridge never owns Feishu
  * credentials or accepts a transcript-derived destination.
  */
-export async function mirrorTranscriptToFeishu(
-  input: FeishuTranscriptMirrorInput,
-): Promise<string | undefined> {
+export async function mirrorTranscriptToFeishu(input: FeishuTranscriptMirrorInput): Promise<string | undefined> {
   const feishu = getChannelAdapter('feishu');
   if (!feishu?.isConnected()) {
     throw new BridgeLifecycleError('FEISHU_ADAPTER_UNAVAILABLE');
@@ -117,12 +109,7 @@ export async function mirrorTranscriptToFeishu(
 }
 
 function safeErrorCode(error: unknown, fallback: string): string {
-  if (
-    error &&
-    typeof error === 'object' &&
-    'code' in error &&
-    typeof (error as { code?: unknown }).code === 'string'
-  ) {
+  if (error && typeof error === 'object' && 'code' in error && typeof (error as { code?: unknown }).code === 'string') {
     const code = (error as { code: string }).code;
     if (/^[A-Z0-9_:-]{1,128}$/.test(code)) return code;
   }
@@ -144,6 +131,20 @@ function serviceLogger(logger: BridgeAdapterLogger): SafeLogger {
 export function validateDeploymentBinding(config: EnabledBridgeConfig): void {
   if (!getUser(config.authenticatedUserId)) {
     throw new BridgeLifecycleError('CANONICAL_USER_NOT_FOUND');
+  }
+  if (
+    config.senderIdentity.provider !== 'feishu' ||
+    config.senderIdentity.identifierType !== 'open_id' ||
+    config.platformId !== `feishu:p2p:${config.senderIdentity.externalSubject}`
+  ) {
+    throw new BridgeLifecycleError('FEISHU_IDENTITY_ROUTE_MISMATCH');
+  }
+  const identity = getUserIdentity(config.senderIdentity);
+  if (!identity) {
+    throw new BridgeLifecycleError('VERIFIED_FEISHU_IDENTITY_NOT_FOUND');
+  }
+  if (identity.user_id !== config.authenticatedUserId) {
+    throw new BridgeLifecycleError('FEISHU_IDENTITY_USER_MISMATCH');
   }
   const route = getMessagingGroupWithAgentCount('feishu', config.platformId);
   if (!route) throw new BridgeLifecycleError('FEISHU_P2P_ROUTE_NOT_FOUND');
@@ -169,18 +170,14 @@ export function createXiaohuanBitableAdapter(
   dependencies: XiaohuanBitableAdapterDependencies = {},
 ): ChannelAdapter {
   const validateBinding = dependencies.validateBinding ?? validateDeploymentBinding;
-  const validateHttpConfig =
-    dependencies.validateHttpConfig ?? validateWholeUtteranceHttpConfig;
+  const validateHttpConfig = dependencies.validateHttpConfig ?? validateWholeUtteranceHttpConfig;
   const createPipeline = dependencies.createPipeline ?? createAudioPipeline;
-  const startHttpService =
-    dependencies.startHttpService ?? startWholeUtteranceHttpService;
+  const startHttpService = dependencies.startHttpService ?? startWholeUtteranceHttpService;
   const mapFields = dependencies.mapFields ?? mapExperimentCandidateFields;
   const fingerprint = dependencies.fingerprint ?? createRequestFingerprint;
   const idempotencyKey = dependencies.idempotencyKey ?? createIdempotencyKey;
-  const subscribeConfirmation =
-    dependencies.onConfirmationDelivered ?? onGatewayConfirmationDelivered;
-  const subscribeResolution =
-    dependencies.onConfirmationResolved ?? onGatewayConfirmationResolved;
+  const subscribeConfirmation = dependencies.onConfirmationDelivered ?? onGatewayConfirmationDelivered;
+  const subscribeResolution = dependencies.onConfirmationResolved ?? onGatewayConfirmationResolved;
   const subscribeAgentTurn = dependencies.onAgentTurnResolved ?? onAgentTurnResolved;
   const mirrorTranscript = dependencies.mirrorTranscript ?? mirrorTranscriptToFeishu;
   const activeDraftMaxMs = dependencies.activeDraftMaxMs ?? ACTIVE_DRAFT_MAX_MS;
@@ -226,9 +223,7 @@ export function createXiaohuanBitableAdapter(
     scheduleDrain();
   };
 
-  const handleConfirmationDelivered = (
-    event: GatewayConfirmationDeliveredEvent,
-  ): void => {
+  const handleConfirmationDelivered = (event: GatewayConfirmationDeliveredEvent): void => {
     const current = activeDraft;
     if (
       !current ||
@@ -257,9 +252,7 @@ export function createXiaohuanBitableAdapter(
     current.state = 'awaiting-confirmation';
   };
 
-  const handleConfirmationResolved = (
-    event: GatewayConfirmationResolvedEvent,
-  ): void => {
+  const handleConfirmationResolved = (event: GatewayConfirmationResolvedEvent): void => {
     const current = activeDraft;
     if (
       !current ||
@@ -283,11 +276,7 @@ export function createXiaohuanBitableAdapter(
 
   const handleAgentTurnResolved = (event: AgentTurnResolvedEvent): void => {
     const current = activeDraft;
-    if (
-      !current ||
-      current.state !== 'processing' ||
-      !sourceMatches(event.sourceMessageId, current.sourceMessageId)
-    ) {
+    if (!current || current.state !== 'processing' || !sourceMatches(event.sourceMessageId, current.sourceMessageId)) {
       return;
     }
 
@@ -308,15 +297,11 @@ export function createXiaohuanBitableAdapter(
       current.retryTimeout = setTimeout(() => {
         if (activeDraft !== current || !hostSetup || !acceptingOutputs) return;
         current.attempt += 1;
-        current.sourceMessageId =
-          `${XIAOHUAN_BITABLE_CHANNEL_TYPE}-${current.requestFingerprint}-attempt-${current.attempt + 1}`;
+        current.sourceMessageId = `${XIAOHUAN_BITABLE_CHANNEL_TYPE}-${current.requestFingerprint}-attempt-${current.attempt + 1}`;
         current.state = 'processing';
         current.confirmationId = undefined;
         current.retryTimeout = undefined;
-        current.timeout = setTimeout(
-          () => releaseActiveDraft(current, 'timeout'),
-          activeDraftMaxMs,
-        );
+        current.timeout = setTimeout(() => releaseActiveDraft(current, 'timeout'), activeDraftMaxMs);
         current.timeout.unref?.();
         trackDelivery(submitActiveDraft(hostSetup, current).then(() => undefined));
       }, delayMs);
@@ -335,10 +320,7 @@ export function createXiaohuanBitableAdapter(
     releaseActiveDraft(current, event.status === 'provider-failed' ? 'provider-failed' : 'timeout');
   };
 
-  submitActiveDraft = async (
-    setup: ChannelSetup,
-    current: ActiveDraft,
-  ): Promise<boolean> => {
+  submitActiveDraft = async (setup: ChannelSetup, current: ActiveDraft): Promise<boolean> => {
     const result = current.result;
 
     const envelope = createBridgeEnvelope({
@@ -356,6 +338,7 @@ export function createXiaohuanBitableAdapter(
         platformId: config.platformId,
         threadId: null,
         authenticatedUserId: config.authenticatedUserId,
+        senderIdentity: config.senderIdentity,
         message: {
           id: current.sourceMessageId,
           kind: 'chat',
@@ -415,10 +398,7 @@ export function createXiaohuanBitableAdapter(
     }
   };
 
-  const deliverResult = async (
-    setup: ChannelSetup,
-    result: ExperimentAudioV1,
-  ): Promise<boolean> => {
+  const deliverResult = async (setup: ChannelSetup, result: ExperimentAudioV1): Promise<boolean> => {
     let requestFingerprint: string;
     let fields: BitableDraftFields;
     let stableIdempotencyKey: string;
@@ -456,10 +436,7 @@ export function createXiaohuanBitableAdapter(
       state: 'processing',
     };
     activeDraft = current;
-    current.timeout = setTimeout(
-      () => releaseActiveDraft(current, 'timeout'),
-      activeDraftMaxMs,
-    );
+    current.timeout = setTimeout(() => releaseActiveDraft(current, 'timeout'), activeDraftMaxMs);
     current.timeout.unref?.();
     return submitActiveDraft(setup, current);
   };
@@ -534,8 +511,7 @@ export function createXiaohuanBitableAdapter(
 
       const serviceDependencies: WholeUtteranceHttpDependencies = {
         logger: serviceLogger(logger),
-        processUtterance: (filePath, captureId) =>
-          pipeline.processWav(filePath, captureId),
+        processUtterance: (filePath, captureId) => pipeline.processWav(filePath, captureId),
         onOutput: handleOutput,
       };
 
@@ -614,11 +590,7 @@ export function createXiaohuanBitableAdapter(
       return hostSetup !== null && acceptingOutputs;
     },
 
-    async deliver(
-      _platformId: string,
-      _threadId: string | null,
-      _message: OutboundMessage,
-    ): Promise<undefined> {
+    async deliver(_platformId: string, _threadId: string | null, _message: OutboundMessage): Promise<undefined> {
       throw new BridgeLifecycleError('INGRESS_ONLY_CHANNEL');
     },
   };

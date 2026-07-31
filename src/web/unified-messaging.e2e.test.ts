@@ -31,9 +31,11 @@ import { closeDb, getDb, initTestDb } from '../db/connection.js';
 import { createConversationBinding } from '../db/conversation-lanes.js';
 import { runMigrations } from '../db/migrations/index.js';
 import { createMessagingGroup, createMessagingGroupAgent } from '../db/messaging-groups.js';
+import { getPendingQuestion } from '../db/sessions.js';
 import { createUserIdentity } from '../db/user-identities.js';
 import { createWebAuthSession } from '../db/web-auth.js';
 import { deliverSessionMessages, setDeliveryAdapter } from '../delivery.js';
+import { resolvePendingQuestion } from '../modules/interactive/index.js';
 import { routeInbound, setSenderResolver } from '../router.js';
 import { inboundDbPath, outboundDbPath } from '../session-manager.js';
 import type { Session } from '../types.js';
@@ -101,7 +103,7 @@ function writeOutboundMessage(args: {
   text?: string;
   content?: Record<string, unknown>;
   id: string;
-  kind: 'chat' | 'system';
+  kind: 'chat' | 'chat-sdk' | 'system';
 }): void {
   const db = new Database(outboundDbPath('ag-unified', args.sessionId));
   db.prepare(
@@ -234,6 +236,157 @@ afterEach(async () => {
 });
 
 describe('真实 Host + MockProvider 的 Web/飞书统一消息', () => {
+  it('把飞书 ask_question 同步为 Web 只读卡片并在飞书回答后原位更新', async () => {
+    createUserIdentity({
+      userId: 'user-alice',
+      provider: 'feishu',
+      providerScope: CONFIG.feishu.appId,
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
+    createMessagingGroup({
+      id: 'mg-question-card',
+      channel_type: 'feishu',
+      platform_id: 'feishu:p2p:ou_alice',
+      name: 'Alice P2P',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: new Date().toISOString(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-question-card',
+      messaging_group_id: 'mg-question-card',
+      agent_group_id: 'ag-unified',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'per-user',
+      priority: 0,
+      created_at: new Date().toISOString(),
+    });
+    await routeInbound({
+      channelType: 'feishu',
+      platformId: 'feishu:p2p:ou_alice',
+      threadId: null,
+      senderIdentity: {
+        provider: 'feishu',
+        providerScope: CONFIG.feishu.appId,
+        identifierType: 'open_id',
+        externalSubject: 'ou_alice',
+      },
+      message: {
+        id: 'feishu-question-trigger',
+        kind: 'chat',
+        content: JSON.stringify({ text: '请校验设备仪器', sender: 'Alice' }),
+        timestamp: new Date().toISOString(),
+        isMention: false,
+        isGroup: false,
+      },
+    });
+    const session = getDb()
+      .prepare("SELECT * FROM sessions WHERE messaging_group_id = 'mg-question-card'")
+      .get() as Session;
+    const inbound = new Database(inboundDbPath('ag-unified', session.id), { readonly: true });
+    const inboundId = inbound.prepare('SELECT id FROM messages_in ORDER BY seq LIMIT 1').pluck().get() as string;
+    inbound.close();
+    writeOutboundMessage({
+      sessionId: session.id,
+      inReplyTo: inboundId,
+      id: 'question-card-1',
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'question-card-1',
+        title: '设备仪器字段需要确认',
+        question: '请选择设备仪器。',
+        options: [
+          { label: '力辰科技', selectedLabel: '力辰科技', value: '力辰科技' },
+          { label: '链路测试', selectedLabel: '链路测试', value: '链路测试' },
+        ],
+      },
+    });
+    await deliverSessionMessages(session);
+
+    const auth = createWebAuthSession({
+      userId: 'user-alice',
+      secret: SECRET,
+      policy: CONFIG.sessionPolicy,
+    });
+    const historyUrl = `${baseUrl}/api/conversations/${encodeURIComponent(session.conversation_lane_id!)}/messages`;
+    const pendingHistory = await fetch(historyUrl, {
+      headers: { cookie: `${CONFIG.cookieName}=${auth.token}` },
+    });
+    expect(pendingHistory.status).toBe(200);
+    const pendingBody = (await pendingHistory.json()) as {
+      messages: Array<{
+        id: string;
+        text: string;
+        presentation?: {
+          state: string;
+          selectedLabel: string | null;
+          options: Array<{ label: string; selected: boolean }>;
+        };
+      }>;
+    };
+    expect(pendingBody.messages).toHaveLength(2);
+    expect(pendingBody.messages.find((message) => message.id === 'question-card-1')).toMatchObject({
+      text: '请选择设备仪器。',
+      presentation: {
+        state: 'awaiting-external-response',
+        selectedLabel: null,
+        options: [
+          { label: '力辰科技', selected: false },
+          { label: '链路测试', selected: false },
+        ],
+      },
+    });
+    expect(JSON.stringify(pendingBody)).not.toContain('"type":"ask_question"');
+    expect(getDb().prepare("SELECT COUNT(*) FROM web_events WHERE resource_id = 'question-card-1'").pluck().get()).toBe(
+      1,
+    );
+
+    const pendingQuestion = getPendingQuestion('question-card-1');
+    expect(pendingQuestion).toBeDefined();
+    await resolvePendingQuestion(session, pendingQuestion!, '链路测试', 'ou_alice');
+
+    const answeredHistory = await fetch(historyUrl, {
+      headers: { cookie: `${CONFIG.cookieName}=${auth.token}` },
+    });
+    expect(answeredHistory.status).toBe(200);
+    const answeredBody = (await answeredHistory.json()) as typeof pendingBody;
+    expect(answeredBody.messages).toHaveLength(2);
+    expect(answeredBody.messages.find((message) => message.id === 'question-card-1')).toMatchObject({
+      presentation: {
+        state: 'answered',
+        selectedLabel: '链路测试',
+        options: [
+          { label: '力辰科技', selected: false },
+          { label: '链路测试', selected: true },
+        ],
+      },
+    });
+    expect(
+      getDb()
+        .prepare(
+          `SELECT COUNT(*) FROM web_events
+           WHERE lane_id = ? AND event_type = 'conversation.message.available'`,
+        )
+        .pluck()
+        .get(session.conversation_lane_id),
+    ).toBe(2);
+
+    const deliveredDb = new Database(inboundDbPath('ag-unified', session.id), { readonly: true });
+    const delivered = deliveredDb
+      .prepare("SELECT status, platform_message_id FROM delivered WHERE message_out_id = 'question-card-1'")
+      .get();
+    deliveredDb.close();
+    expect(delivered).toEqual({
+      status: 'delivered',
+      platform_message_id: 'feishu-e2e-question-card-1',
+    });
+  });
+
   it('让飞书多维表格请求经 Gateway 授权执行并审计，拒绝越权和未确认删除', async () => {
     createUserIdentity({
       userId: 'user-alice',

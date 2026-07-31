@@ -20,7 +20,7 @@ import {
 import { writeDestinations } from '../../src/modules/agent-to-agent/write-destinations.js';
 import { run as initEnterpriseTopology } from '../../scripts/init-enterprise-topology.js';
 
-export const GUI_AGENT_BASE_URL = 'http://192.168.66.31:8000';
+export const GUI_AGENT_BASE_URL = 'http://192.168.66.98:8000';
 const WORKER_FOLDER = 'agentdesk-windows-gui-worker';
 const GENERIC_WORKER_ALIAS = 'windows-gui-worker';
 const GUI_ALIAS = 'gui';
@@ -41,8 +41,8 @@ function applyWorkerFiles(frontdeskFolder: string, workerFolder: string, workerI
   workerConfig.mcpServers.windows_gui.env = {
     ...workerConfig.mcpServers.windows_gui.env,
     GUI_AGENT_BASE_URL,
-    NO_PROXY: '192.168.66.31',
-    no_proxy: '192.168.66.31',
+    NO_PROXY: '192.168.66.98',
+    no_proxy: '192.168.66.98',
   };
   fs.mkdirSync(path.dirname(skillTarget), { recursive: true });
   fs.cpSync(skillSource, skillTarget, { recursive: true, force: true });

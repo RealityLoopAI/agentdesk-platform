@@ -5,6 +5,7 @@ import {
   type DoubaoAudioConfig,
   type WholeUtteranceHttpConfig,
 } from '../xiaohuan-doubao-audio/index.js';
+import type { TrustedChannelIdentity } from '../../src/channels/adapter.js';
 import { parseFieldMap, type ExperimentFieldMap } from './mapper.js';
 
 export const BRIDGE_ENV_PREFIX = 'XIAOHUAN_BITABLE_';
@@ -24,6 +25,7 @@ export interface EnabledBridgeConfig {
   enabled: true;
   authenticatedUserId: string;
   platformId: string;
+  senderIdentity: TrustedChannelIdentity;
   feishuTranscriptMirrorEnabled: boolean;
   resource: string;
   fieldMap: ExperimentFieldMap;
@@ -99,20 +101,11 @@ function validateLogicalResource(value: string): string {
   return value;
 }
 
-function loadHttpServiceConfig(
-  env: NodeJS.ProcessEnv,
-  audio: DoubaoAudioConfig,
-): WholeUtteranceHttpConfig {
+function loadHttpServiceConfig(env: NodeJS.ProcessEnv, audio: DoubaoAudioConfig): WholeUtteranceHttpConfig {
   const outputDir = env.XIAOHUAN_BITABLE_HTTP_OUTPUT_DIR?.trim();
   return {
     bindHost: env.XIAOHUAN_BITABLE_HTTP_BIND?.trim() || DEFAULT_HTTP_BIND_HOST,
-    port: boundedInteger(
-      env,
-      'XIAOHUAN_BITABLE_HTTP_PORT',
-      DEFAULT_HTTP_PORT,
-      1,
-      65_535,
-    ),
+    port: boundedInteger(env, 'XIAOHUAN_BITABLE_HTTP_PORT', DEFAULT_HTTP_PORT, 1, 65_535),
     ...(outputDir ? { outputDir: path.resolve(outputDir) } : {}),
     maxBodyBytes: boundedInteger(
       env,
@@ -129,13 +122,7 @@ function loadHttpServiceConfig(
       audio.maxWavDurationMs,
     ),
     expectedSampleRate: 16_000,
-    maxQueue: boundedInteger(
-      env,
-      'XIAOHUAN_BITABLE_HTTP_MAX_QUEUE',
-      DEFAULT_HTTP_MAX_QUEUE,
-      1,
-      64,
-    ),
+    maxQueue: boundedInteger(env, 'XIAOHUAN_BITABLE_HTTP_MAX_QUEUE', DEFAULT_HTTP_MAX_QUEUE, 1, 64),
     requestTimeoutMs: boundedInteger(
       env,
       'XIAOHUAN_BITABLE_HTTP_REQUEST_TIMEOUT_MS',
@@ -162,7 +149,8 @@ export function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): BridgeCo
   }
 
   const platformId = requiredText(env, 'XIAOHUAN_BITABLE_FEISHU_P2P_PLATFORM_ID');
-  if (!/^feishu:p2p:ou_[A-Za-z0-9_-]+$/.test(platformId)) {
+  const routeMatch = /^feishu:p2p:(ou_[A-Za-z0-9_-]+)$/.exec(platformId);
+  if (!routeMatch) {
     throw new BridgeConfigError(
       'INVALID_P2P_ROUTE',
       'XIAOHUAN_BITABLE_FEISHU_P2P_PLATFORM_ID must be a Feishu P2P route',
@@ -182,10 +170,13 @@ export function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): BridgeCo
     enabled: true,
     authenticatedUserId: requiredText(env, 'XIAOHUAN_BITABLE_AUTHENTICATED_USER_ID'),
     platformId,
-    feishuTranscriptMirrorEnabled: booleanValue(
-      env,
-      'XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED',
-    ),
+    senderIdentity: {
+      provider: 'feishu',
+      providerScope: requiredText(env, 'FEISHU_APP_ID'),
+      identifierType: 'open_id',
+      externalSubject: routeMatch[1]!,
+    },
+    feishuTranscriptMirrorEnabled: booleanValue(env, 'XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED'),
     resource: validateLogicalResource(requiredText(env, 'XIAOHUAN_BITABLE_RESOURCE', 128)),
     fieldMap: parseFieldMap(requiredText(env, 'XIAOHUAN_BITABLE_FIELD_MAP_JSON', 8_192)),
     joinSeparator,

@@ -4,10 +4,10 @@
       "command": "bun",
       "args": ["run", "/workspace/agent/gui-agent-mcp.ts"],
       "env": {
-        "GUI_AGENT_BASE_URL": "http://192.168.66.31:8000",
+        "GUI_AGENT_BASE_URL": "http://192.168.66.98:8000",
         "GUI_AGENT_TIMEOUT_MS": "15000",
-        "NO_PROXY": "192.168.66.31",
-        "no_proxy": "192.168.66.31"
+        "NO_PROXY": "192.168.66.98",
+        "no_proxy": "192.168.66.98"
       }
     }
   },

@@ -25,10 +25,7 @@ import type {
   GatewayConfirmationResolvedEvent,
   GatewayConfirmationResolvedListener,
 } from '../src/modules/gateway-confirmation/events.js';
-import type {
-  AgentTurnResolvedEvent,
-  AgentTurnResolvedListener,
-} from '../src/modules/agent-turn/events.js';
+import type { AgentTurnResolvedEvent, AgentTurnResolvedListener } from '../src/modules/agent-turn/events.js';
 const summary: WholeUtteranceHttpSummary = {
   received: 1,
   duplicates: 0,
@@ -42,6 +39,12 @@ function bridgeConfig(): EnabledBridgeConfig {
     enabled: true,
     authenticatedUserId: 'canonical-user-1',
     platformId: 'feishu:p2p:ou_canonical1',
+    senderIdentity: {
+      provider: 'feishu',
+      providerScope: 'cli_app_a',
+      identifierType: 'open_id',
+      externalSubject: 'ou_canonical1',
+    },
     feishuTranscriptMirrorEnabled: false,
     resource: 'lab.experiments',
     fieldMap: {
@@ -189,8 +192,9 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
       supportsThreads: false,
     });
     expect(adapter.isConnected()).toBe(false);
-    await expect(adapter.deliver('anything', null, { kind: 'chat', content: {} }))
-      .rejects.toMatchObject({ code: 'INGRESS_ONLY_CHANNEL' });
+    await expect(adapter.deliver('anything', null, { kind: 'chat', content: {} })).rejects.toMatchObject({
+      code: 'INGRESS_ONLY_CHANNEL',
+    });
   });
 
   it('validates before starting the listener and fails closed', async () => {
@@ -256,6 +260,12 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
       platformId: 'feishu:p2p:ou_canonical1',
       threadId: null,
       authenticatedUserId: 'canonical-user-1',
+      senderIdentity: {
+        provider: 'feishu',
+        providerScope: 'cli_app_a',
+        identifierType: 'open_id',
+        externalSubject: 'ou_canonical1',
+      },
       message: {
         kind: 'chat',
         timestamp: '2026-07-30T06:00:00.000Z',
@@ -301,9 +311,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     });
     expect(envelope.workflow.steps).toEqual(BRIDGE_WORKFLOW_STEPS);
     expect(envelope.fieldMapping).toEqual(bridgeConfig().fieldMap);
-    expect(envelope.idempotencyKey).toBe(
-      `xiaohuan-bitable-create-${envelope.requestFingerprint}`,
-    );
+    expect(envelope.idempotencyKey).toBe(`xiaohuan-bitable-create-${envelope.requestFingerprint}`);
     expect(envelope.experiment).toEqual(experiment());
     expect(event.message.content).not.toContain('test-only-key');
 
@@ -540,9 +548,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const service = serviceHarness();
     const host = setupHarness();
     let turnListener: AgentTurnResolvedListener | undefined;
-    const fingerprints = Array.from({ length: 5 }, (_, index) =>
-      String(index + 1).repeat(64),
-    );
+    const fingerprints = Array.from({ length: 5 }, (_, index) => String(index + 1).repeat(64));
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
       validateHttpConfig: vi.fn(),
@@ -578,10 +584,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     }
 
     expect(host.events.map((event) => event.message.id)).toEqual(
-      Array.from(
-        { length: 5 },
-        (_, index) => `xiaohuan-bitable-${String(index + 1).repeat(64)}-attempt-1`,
-      ),
+      Array.from({ length: 5 }, (_, index) => `xiaohuan-bitable-${String(index + 1).repeat(64)}-attempt-1`),
     );
     await adapter.teardown();
   });

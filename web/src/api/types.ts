@@ -75,6 +75,19 @@ export interface HistoryMessage {
     threadId: string | null;
   };
   status: string;
+  presentation?: {
+    type: 'ask-question';
+    mode: 'read-only';
+    title: string;
+    question: string;
+    options: Array<{
+      label: string;
+      selected: boolean;
+    }>;
+    state: 'awaiting-external-response' | 'answered' | 'cancelled' | 'closed';
+    selectedLabel: string | null;
+    responseChannel: string | null;
+  };
 }
 
 export interface ConversationHistoryResponse {

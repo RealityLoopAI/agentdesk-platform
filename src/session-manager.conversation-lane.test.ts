@@ -65,6 +65,20 @@ describe('cross-channel session resolution', () => {
     expect(web.session.messaging_group_id).toBe('mg-feishu');
   });
 
+  it('atomically attaches an existing unlinked user session when the verified Lane has no root', () => {
+    const legacy = resolveSession('ag-1', 'mg-feishu', null, 'per-user', 'alice');
+    const lane = createConversationLane({ agentGroupId: 'ag-1', ownerUserId: 'alice' });
+
+    const linked = resolveSession('ag-1', 'mg-feishu', null, 'per-user', 'alice', null, null, lane.id);
+
+    expect(linked.created).toBe(false);
+    expect(linked.session.id).toBe(legacy.session.id);
+    expect(linked.session.conversation_lane_id).toBe(lane.id);
+    expect(getDb().prepare('SELECT root_session_id FROM conversation_lanes WHERE id = ?').pluck().get(lane.id)).toBe(
+      legacy.session.id,
+    );
+  });
+
   it('fails closed for another user or any shared session mode', () => {
     const lane = createConversationLane({ agentGroupId: 'ag-1', ownerUserId: 'alice' });
     expect(() => resolveSession('ag-1', 'mg-web', null, 'per-user', 'bob', null, null, lane.id)).toThrowError(

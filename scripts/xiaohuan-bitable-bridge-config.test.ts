@@ -34,6 +34,7 @@ function enabledEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     XIAOHUAN_BITABLE_ALLOW_AGENT_DELIVERY: 'true',
     XIAOHUAN_BITABLE_AUTHENTICATED_USER_ID: 'canonical-alice',
     XIAOHUAN_BITABLE_FEISHU_P2P_PLATFORM_ID: 'feishu:p2p:ou_alice',
+    FEISHU_APP_ID: 'cli_app_a',
     XIAOHUAN_BITABLE_RESOURCE: 'pilot.records',
     XIAOHUAN_BITABLE_FIELD_MAP_JSON: '{"captureId":"Capture","experiment.sampleIds":"Samples"}',
     XIAOHUAN_BITABLE_HTTP_BIND: '0.0.0.0',
@@ -54,6 +55,12 @@ describe('Xiaohuan Bitable bridge configuration', () => {
     expect(config.enabled).toBe(true);
     expect(config.authenticatedUserId).toBe('canonical-alice');
     expect(config.platformId).toBe('feishu:p2p:ou_alice');
+    expect(config.senderIdentity).toEqual({
+      provider: 'feishu',
+      providerScope: 'cli_app_a',
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
     expect(config.feishuTranscriptMirrorEnabled).toBe(false);
     expect(config.resource).toBe('pilot.records');
     expect(config.audio.ark.apiKey).toBe('ark-secret');
@@ -75,15 +82,14 @@ describe('Xiaohuan Bitable bridge configuration', () => {
     ) as EnabledBridgeConfig;
     expect(config.feishuTranscriptMirrorEnabled).toBe(true);
     expect(() =>
-      loadBridgeConfig(
-        enabledEnv({ XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED: 'yes' }),
-      ),
+      loadBridgeConfig(enabledEnv({ XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED: 'yes' })),
     ).toThrowError(expect.objectContaining({ code: 'INVALID_BOOLEAN' }));
   });
 
   it.each([
     ['missing upload consent', { XIAOHUAN_BITABLE_ALLOW_EXTERNAL_UPLOAD: 'false' }],
     ['missing delivery consent', { XIAOHUAN_BITABLE_ALLOW_AGENT_DELIVERY: 'false' }],
+    ['missing Feishu app scope', { FEISHU_APP_ID: '' }],
     ['group route', { XIAOHUAN_BITABLE_FEISHU_P2P_PLATFORM_ID: 'feishu:chat:oc_group' }],
     ['physical app token', { XIAOHUAN_BITABLE_RESOURCE: 'bascnPhysical123' }],
     ['physical table id', { XIAOHUAN_BITABLE_RESOURCE: 'tblPhysical123' }],
@@ -324,9 +330,7 @@ describe('Xiaohuan Bitable field mapping', () => {
       resource: 'pilot.records',
       transcript: result.transcript,
       experiment: result.experiment,
-      fieldMapping: parseFieldMap(
-        '{"experiment.sampleIds":"Samples","experiment.measurements":"Measurements"}',
-      ),
+      fieldMapping: parseFieldMap('{"experiment.sampleIds":"Samples","experiment.measurements":"Measurements"}'),
     };
     const reordered = {
       fieldMapping: {
@@ -433,9 +437,7 @@ describe('Xiaohuan Bitable field mapping', () => {
     ['multiple marker phrases', '批次测试十号，批次测试十一号。', {}],
   ])('omits an unsafe text-after-marker candidate: %s', (_name, transcript, expected) => {
     const selected = { ...result, transcript };
-    const mapping = parseFieldMap(
-      '{"transcript":{"field":"批次","selector":"text-after-marker","markers":["批次"]}}',
-    );
+    const mapping = parseFieldMap('{"transcript":{"field":"批次","selector":"text-after-marker","markers":["批次"]}}');
     expect(mapExperimentCandidateFields(selected, mapping)).toEqual(expected);
     expect(() => mapExperimentFields(selected, mapping)).toThrowError(
       expect.objectContaining({ code: 'SELECTOR_MATCH_COUNT' }),

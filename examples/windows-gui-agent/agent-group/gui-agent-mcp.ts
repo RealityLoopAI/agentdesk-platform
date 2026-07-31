@@ -8,7 +8,7 @@
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 
-const DEFAULT_BASE_URL = 'http://192.168.66.31:8000';
+const DEFAULT_BASE_URL = 'http://192.168.66.98:8000';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024;

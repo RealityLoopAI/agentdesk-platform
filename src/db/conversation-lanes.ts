@@ -135,6 +135,39 @@ export function linkSessionToConversationLane(args: {
       throw new ConversationLaneConflictError('lane_already_has_root');
     }
 
+    const staleLinkedSession = db
+      .prepare(
+        `SELECT id, status
+           FROM sessions
+          WHERE conversation_lane_id = ?
+            AND id <> ?
+          LIMIT 1`,
+      )
+      .get(lane.id, session.id) as Pick<Session, 'id' | 'status'> | undefined;
+    if (staleLinkedSession) {
+      if (staleLinkedSession.status !== 'archived' || lane.root_session_id) {
+        throw new ConversationLaneConflictError('lane_has_other_linked_session');
+      }
+      db.prepare(
+        `UPDATE sessions
+            SET conversation_lane_id = NULL
+          WHERE id = ?
+            AND status = 'archived'
+            AND conversation_lane_id = ?`,
+      ).run(staleLinkedSession.id, lane.id);
+      recordEnterpriseAudit({
+        eventType: 'conversation_lane_archived_session_detached',
+        agentGroupId: lane.agent_group_id,
+        actor: args.actor ?? lane.owner_user_id,
+        details: {
+          laneId: lane.id,
+          archivedSessionId: staleLinkedSession.id,
+          replacementSessionId: session.id,
+          ownerUserId: lane.owner_user_id,
+        },
+      });
+    }
+
     db.prepare('UPDATE sessions SET conversation_lane_id = ? WHERE id = ?').run(lane.id, session.id);
     db.prepare('UPDATE conversation_lanes SET root_session_id = ? WHERE id = ?').run(session.id, lane.id);
     if (!lane.root_session_id || !session.conversation_lane_id) {
@@ -445,6 +478,15 @@ export function linkLegacyFeishuSession(args: {
   if (!group || group.channel_type !== 'feishu') {
     throw new ConversationLaneConflictError('legacy_channel_not_feishu');
   }
+  const existingBinding = findActiveConversationBinding({
+    channelType: group.channel_type,
+    platformId: group.platform_id,
+    threadId: session.thread_id,
+    threadFallback: false,
+    externalIdentityId: identity.id,
+    ownerUserId: session.owner_user_id,
+    agentGroupId: session.agent_group_id,
+  });
   if (session.conversation_lane_id) {
     const existing = getConversationLane(session.conversation_lane_id);
     if (!existing) throw new ConversationLaneConflictError('linked_lane_missing');
@@ -455,15 +497,6 @@ export function linkLegacyFeishuSession(args: {
     ) {
       throw new ConversationLaneConflictError('linked_lane_structure_mismatch');
     }
-    const existingBinding = findActiveConversationBinding({
-      channelType: group.channel_type,
-      platformId: group.platform_id,
-      threadId: session.thread_id,
-      threadFallback: false,
-      externalIdentityId: identity.id,
-      ownerUserId: session.owner_user_id,
-      agentGroupId: session.agent_group_id,
-    });
     if (existingBinding) {
       if (existingBinding.lane.id !== existing.id) {
         throw new ConversationBindingConflictError();
@@ -482,6 +515,20 @@ export function linkLegacyFeishuSession(args: {
       verifiedAt: identity.verified_at,
     });
     return existing;
+  }
+  if (existingBinding) {
+    if (
+      (existingBinding.binding.messaging_group_id && existingBinding.binding.messaging_group_id !== group.id) ||
+      (existingBinding.lane.root_session_id && existingBinding.lane.root_session_id !== session.id)
+    ) {
+      throw new ConversationBindingConflictError();
+    }
+    return linkSessionToConversationLane({
+      laneId: existingBinding.lane.id,
+      sessionId: session.id,
+      sourceSessionMode: args.sourceSessionMode,
+      actor: args.actor,
+    });
   }
   const digest = createHash('sha256').update(`legacy-lane\0${session.id}`).digest('hex').slice(0, 24);
   const laneId = `lane-legacy-${digest}`;

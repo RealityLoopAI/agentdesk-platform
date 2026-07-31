@@ -38,6 +38,14 @@ import { resolveGatewayConfirmationDecision } from '../modules/gateway-confirmat
 import { canAccessAgentGroup } from '../modules/permissions/access.js';
 import { inboundDbPath, openInboundDb, openOutboundDb, outboundDbPath } from '../session-manager.js';
 import type { ConversationLane } from '../types.js';
+import {
+  buildAskQuestionPresentation,
+  malformedAskQuestionFallback,
+  parseAskQuestion,
+  parseTrustedQuestionResponse,
+  type TrustedQuestionResponse,
+  type WebAskQuestionPresentation,
+} from './read-only-message-cards.js';
 
 const CLIENT_MESSAGE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_HISTORY_PAGE = 100;
@@ -75,6 +83,7 @@ export interface WebHistoryMessage {
     threadId: string | null;
   };
   status: string;
+  presentation?: WebAskQuestionPresentation;
 }
 
 export interface WebDeliverySubscriptionState {
@@ -344,8 +353,12 @@ function compareKey(left: HistoryKey, right: HistoryKey): number {
 }
 
 function messageText(raw: string): string {
+  const askQuestion = parseAskQuestion(raw);
+  if (askQuestion) return askQuestion.question;
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const malformedQuestion = malformedAskQuestionFallback(raw);
+    if (malformedQuestion) return malformedQuestion;
     return typeof parsed.displayText === 'string'
       ? parsed.displayText
       : typeof parsed.text === 'string'
@@ -434,6 +447,35 @@ export function getWebConversationHistory(args: {
       content: string;
       in_reply_to: string | null;
     }>;
+    const questionResponseRows = inbound
+      .prepare(
+        `SELECT seq, channel_type, content
+         FROM messages_in
+         WHERE kind = 'system'
+           AND content LIKE '%"type":"question_response"%'
+         ORDER BY seq`,
+      )
+      .all() as Array<{
+      seq: number | null;
+      channel_type: string | null;
+      content: string;
+    }>;
+    const questionResponses = new Map<string, TrustedQuestionResponse>();
+    for (const row of questionResponseRows) {
+      const response = parseTrustedQuestionResponse(row.content, row.channel_type);
+      if (response) questionResponses.set(response.questionId, response);
+    }
+    const pendingQuestionKeys = new Set(
+      (
+        getDb()
+          .prepare(
+            `SELECT question_id, message_out_id
+             FROM pending_questions
+             WHERE session_id = ?`,
+          )
+          .all(session.id) as Array<{ question_id: string; message_out_id: string }>
+      ).map((row) => `${row.question_id}\0${row.message_out_id}`),
+    );
     const deliveryRows = inbound.prepare('SELECT message_out_id, status FROM delivered').all() as Array<{
       message_out_id: string;
       status: string;
@@ -472,20 +514,31 @@ export function getWebConversationHistory(args: {
         // trusted routing authority used by delivery.ts. Container-written
         // address columns may be null (bare model reply) or forged.
         .filter((row) => !row.in_reply_to || trustedRoutes.has(row.in_reply_to))
-        .map((row) => ({
-          id: row.id,
-          sequence: row.seq,
-          direction: 'agent' as const,
-          kind: row.kind,
-          timestamp: normalizeHistoryTimestamp(row.timestamp),
-          text: messageText(row.content),
-          channel: (row.in_reply_to ? trustedRoutes.get(row.in_reply_to) : undefined) ?? {
-            type: row.channel_type,
-            platformId: row.platform_id,
-            threadId: row.thread_id,
-          },
-          status: deliveries.get(row.id) ?? 'pending',
-        })),
+        .map((row) => {
+          const question = parseAskQuestion(row.content);
+          const presentation = question
+            ? buildAskQuestionPresentation({
+                question,
+                response: questionResponses.get(question.questionId),
+                pending: pendingQuestionKeys.has(`${question.questionId}\0${row.id}`),
+              })
+            : undefined;
+          return {
+            id: row.id,
+            sequence: row.seq,
+            direction: 'agent' as const,
+            kind: row.kind,
+            timestamp: normalizeHistoryTimestamp(row.timestamp),
+            text: question?.question ?? messageText(row.content),
+            channel: (row.in_reply_to ? trustedRoutes.get(row.in_reply_to) : undefined) ?? {
+              type: row.channel_type,
+              platformId: row.platform_id,
+              threadId: row.thread_id,
+            },
+            status: deliveries.get(row.id) ?? 'pending',
+            ...(presentation ? { presentation } : {}),
+          };
+        }),
     ].sort((left, right) => compareKey(historyKey(left), historyKey(right)));
 
     const eligible = cursor
