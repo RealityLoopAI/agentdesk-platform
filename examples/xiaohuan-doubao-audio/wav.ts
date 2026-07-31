@@ -7,6 +7,8 @@ export interface WavMetadata {
   sampleRate: number;
   channels: number;
   bitsPerSample: number;
+  byteRate: number;
+  blockAlign: number;
   durationMs: number;
   audioFormat: number;
   dataBytes: number;
@@ -51,6 +53,7 @@ export function parseWav(buffer: Buffer): WavMetadata {
         channels: number;
         sampleRate: number;
         byteRate: number;
+        blockAlign: number;
         bitsPerSample: number;
       }
     | undefined;
@@ -70,6 +73,7 @@ export function parseWav(buffer: Buffer): WavMetadata {
         channels: buffer.readUInt16LE(dataStart + 2),
         sampleRate: buffer.readUInt32LE(dataStart + 4),
         byteRate: buffer.readUInt32LE(dataStart + 8),
+        blockAlign: buffer.readUInt16LE(dataStart + 12),
         bitsPerSample: buffer.readUInt16LE(dataStart + 14),
       };
     } else if (id === 'data') {
@@ -87,6 +91,7 @@ export function parseWav(buffer: Buffer): WavMetadata {
     format.channels <= 0 ||
     format.sampleRate <= 0 ||
     format.byteRate <= 0 ||
+    format.blockAlign <= 0 ||
     format.bitsPerSample <= 0
   ) {
     invalidWav('WAV format metadata is invalid');

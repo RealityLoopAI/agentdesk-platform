@@ -14,10 +14,11 @@ import {
 import { mapExperimentFields } from '../examples/xiaohuan-bitable-bridge/mapper.js';
 import type { ExperimentAudioV1 } from '../examples/xiaohuan-doubao-audio/experiment-schema.js';
 import type {
-  VadListeningServiceDependencies,
-  VadServiceOutput,
-  VadServiceSummary,
-} from '../examples/xiaohuan-doubao-audio/vad-listening-service.js';
+  RunningWholeUtteranceHttpService,
+  WholeUtteranceHttpDependencies,
+  WholeUtteranceHttpOutput,
+  WholeUtteranceHttpSummary,
+} from '../examples/xiaohuan-doubao-audio/whole-utterance-http-service.js';
 import type {
   GatewayConfirmationDeliveredEvent,
   GatewayConfirmationDeliveredListener,
@@ -28,13 +29,12 @@ import type {
   AgentTurnResolvedEvent,
   AgentTurnResolvedListener,
 } from '../src/modules/agent-turn/events.js';
-import { createTtsReceiptKey } from '../examples/xiaohuan-bitable-bridge/tts-ack.js';
-
-const summary: VadServiceSummary = {
-  accepted: 1,
+const summary: WholeUtteranceHttpSummary = {
+  received: 1,
+  duplicates: 0,
   succeeded: 1,
   failed: 0,
-  discarded: 0,
+  rejected: 0,
 };
 
 function bridgeConfig(): EnabledBridgeConfig {
@@ -42,6 +42,7 @@ function bridgeConfig(): EnabledBridgeConfig {
     enabled: true,
     authenticatedUserId: 'canonical-user-1',
     platformId: 'feishu:p2p:ou_canonical1',
+    feishuTranscriptMirrorEnabled: false,
     resource: 'lab.experiments',
     fieldMap: {
       captureId: 'Capture ID',
@@ -52,30 +53,15 @@ function bridgeConfig(): EnabledBridgeConfig {
     },
     joinSeparator: ' | ',
     maxFieldValueBytes: 8_192,
-    ttsAck: { enabled: false },
-    vadService: {
-      sdpPath: '/operator/xiaohuan.sdp',
-      ffmpegPath: 'ffmpeg',
-      vad: {
-        sampleRate: 16_000,
-        frameMs: 20,
-        thresholdDb: -38,
-        startFrames: 2,
-        preRollMs: 200,
-        trailingSilenceMs: 800,
-        minSpeechMs: 300,
-        maxUtteranceMs: 20_000,
-      },
+    httpService: {
+      bindHost: '127.0.0.1',
+      port: 50_020,
+      maxBodyBytes: 4 * 1024 * 1024,
+      maxDurationMs: 20_000,
+      expectedSampleRate: 16_000,
       maxQueue: 4,
-      maxUtterances: 0,
-      firstAudioTimeoutMs: 30_000,
-      stopGraceMs: 3_000,
+      requestTimeoutMs: 10_000,
       keepUtterances: false,
-      processUtterances: true,
-      allowExternalUpload: true,
-      capturePrefix: 'bridge-test',
-      normalizePeakDb: -3,
-      maxNormalizeGainDb: 30,
     },
     audio: {
       ark: {
@@ -106,11 +92,9 @@ function experiment(captureId = 'bridge-test-000001'): ExperimentAudioV1 {
   };
 }
 
-function output(result: ExperimentAudioV1): VadServiceOutput {
+function output(result: ExperimentAudioV1): WholeUtteranceHttpOutput {
   return {
     captureId: result.captureId,
-    index: 1,
-    reason: 'silence',
     result,
   };
 }
@@ -130,28 +114,45 @@ function loggerHarness(): {
 }
 
 function serviceHarness(): {
-  run: ReturnType<typeof vi.fn>;
-  dependencies: () => VadListeningServiceDependencies;
+  start: ReturnType<typeof vi.fn>;
+  dependencies: () => WholeUtteranceHttpDependencies;
+  running: () => RunningWholeUtteranceHttpService;
 } {
-  let captured: VadListeningServiceDependencies | undefined;
-  const run = vi.fn(
+  let captured: WholeUtteranceHttpDependencies | undefined;
+  let running: RunningWholeUtteranceHttpService | undefined;
+  const start = vi.fn(
     async (
-      _config: EnabledBridgeConfig['vadService'],
-      dependencies: VadListeningServiceDependencies,
-    ): Promise<VadServiceSummary> => {
+      _config: EnabledBridgeConfig['httpService'],
+      dependencies: WholeUtteranceHttpDependencies,
+    ): Promise<RunningWholeUtteranceHttpService> => {
       captured = dependencies;
-      await new Promise<void>((resolve) => {
-        if (dependencies.signal?.aborted) resolve();
-        else dependencies.signal?.addEventListener('abort', () => resolve(), { once: true });
+      let resolveDone: (value: WholeUtteranceHttpSummary) => void = () => undefined;
+      const done = new Promise<WholeUtteranceHttpSummary>((resolve) => {
+        resolveDone = resolve;
       });
-      return summary;
+      const close = vi.fn(async () => {
+        resolveDone(summary);
+        return summary;
+      });
+      running = {
+        bindHost: '127.0.0.1',
+        port: 50_020,
+        outputRoot: '/tmp/xiaohuan-http-test',
+        done,
+        close,
+      };
+      return running;
     },
   );
   return {
-    run,
+    start,
     dependencies: () => {
       if (!captured) throw new Error('service was not started');
       return captured;
+    },
+    running: () => {
+      if (!running) throw new Error('service was not started');
+      return running;
     },
   };
 }
@@ -196,39 +197,39 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const service = serviceHarness();
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockRejectedValue(
-        Object.assign(new Error('operator path detail'), { code: 'INVALID_SDP' }),
-      ),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(() => {
+        throw Object.assign(new Error('operator path detail'), { code: 'INVALID_HTTP_AUDIO' });
+      }),
+      startHttpService: service.start,
       logger: loggerHarness().logger,
     });
 
     await expect(adapter.setup(setupHarness().setup)).rejects.toMatchObject({
-      code: 'INVALID_SDP',
+      code: 'INVALID_HTTP_AUDIO',
     });
-    expect(service.run).not.toHaveBeenCalled();
+    expect(service.start).not.toHaveBeenCalled();
     expect(adapter.isConnected()).toBe(false);
   });
 
-  it('preflights the canonical user and P2P route before VAD validation', async () => {
-    const validateVadConfig = vi.fn();
-    const runVadService = vi.fn();
+  it('preflights the canonical user and P2P route before HTTP listener validation', async () => {
+    const validateHttpConfig = vi.fn();
+    const startHttpService = vi.fn();
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(() => {
         throw Object.assign(new Error('unknown canonical user'), {
           code: 'CANONICAL_USER_NOT_FOUND',
         });
       }),
-      validateVadConfig,
-      runVadService,
+      validateHttpConfig,
+      startHttpService,
       logger: loggerHarness().logger,
     });
 
     await expect(adapter.setup(setupHarness().setup)).rejects.toMatchObject({
       code: 'CANONICAL_USER_NOT_FOUND',
     });
-    expect(validateVadConfig).not.toHaveBeenCalled();
-    expect(runVadService).not.toHaveBeenCalled();
+    expect(validateHttpConfig).not.toHaveBeenCalled();
+    expect(startHttpService).not.toHaveBeenCalled();
   });
 
   it('wraps one valid result as trusted Feishu P2P ingress with a controlled workflow', async () => {
@@ -237,8 +238,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const logs = loggerHarness();
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: logs.logger,
       now: () => new Date('2026-07-30T06:00:00.000Z'),
     });
@@ -310,80 +311,40 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     expect(adapter.isConnected()).toBe(false);
   });
 
-  it('acknowledges a complete local WAV before Ark output or confirmation delivery', async () => {
+  it('mirrors the concise transcript once to the fixed Feishu P2P route', async () => {
     const service = serviceHarness();
     const host = setupHarness();
     const logs = loggerHarness();
     const config = bridgeConfig();
-    config.ttsAck = {
-      enabled: true,
-      baseUrl: 'http://192.168.66.133:18082',
-      text: '收到',
-      timeoutMs: 2_000,
-    };
-    let confirmationListener: GatewayConfirmationDeliveredListener | undefined;
-    const unsubscribeDelivered = vi.fn();
-    const receiptKey = createTtsReceiptKey('test-run', 'bridge-test-000001');
-    const sendTtsAck = vi.fn(async () => ({
-      requestId: `xiaohuan-received-${receiptKey}`,
-      taskId: 'task-1',
-      queuePosition: 1,
-      duplicate: false,
-    }));
+    config.feishuTranscriptMirrorEnabled = true;
+    const mirrorTranscript = vi.fn(async () => 'om_transcript_1');
     const adapter = createXiaohuanBitableAdapter(config, {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: logs.logger,
-      createReceiptRunId: () => 'test-run',
-      onConfirmationDelivered: (listener) => {
-        confirmationListener = listener;
-        return unsubscribeDelivered;
-      },
-      sendTtsAck,
+      mirrorTranscript,
+      fingerprint: () => 'a'.repeat(64),
     });
 
     await adapter.setup(host.setup);
-    service.dependencies().onWavReady?.({
-      captureId: 'bridge-test-000001',
-      index: 1,
-      reason: 'silence',
-      metadata: {
-        bytes: 32_044,
-        durationMs: 1_000,
-        sampleRate: 16_000,
-        channels: 1,
-        bitsPerSample: 16,
-        audioFormat: 1,
-        dataBytes: 32_000,
-      },
-    });
+    service.dependencies().onOutput?.(output(experiment()));
     await flushPromises();
-    expect(host.events).toHaveLength(0);
-    expect(sendTtsAck).toHaveBeenCalledOnce();
-    expect(sendTtsAck).toHaveBeenCalledWith(config.ttsAck, receiptKey);
-    expect(confirmationListener).toBeDefined();
 
-    await confirmationListener?.({
-      confirmationId: 'confirm-1',
-      kind: 'create',
-      requesterUserId: 'canonical-user-1',
-      channelType: 'feishu',
+    expect(mirrorTranscript).toHaveBeenCalledTimes(1);
+    expect(mirrorTranscript).toHaveBeenCalledWith({
       platformId: 'feishu:p2p:ou_canonical1',
-      threadId: null,
-      resource: 'lab.experiments',
-      correlationId: 'c'.repeat(64),
+      text: '语音指令：样品 A 温度为二十五度。',
     });
-    expect(sendTtsAck).toHaveBeenCalledTimes(1);
     expect(logs.events).toContainEqual(
       expect.objectContaining({
-        event: 'xiaohuan_tts_ack_accepted',
+        event: 'xiaohuan_feishu_transcript_mirrored',
         outcome: 'ok',
+        platformMessageId: 'om_transcript_1',
       }),
     );
 
     await adapter.teardown();
-    expect(unsubscribeDelivered).toHaveBeenCalledOnce();
   });
 
   it('queues later drafts until the matching Host confirmation resolves', async () => {
@@ -394,8 +355,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const fingerprints = ['a'.repeat(64), 'b'.repeat(64)];
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: loggerHarness().logger,
       fingerprint: () => fingerprints.shift()!,
       onConfirmationDelivered: (listener) => {
@@ -451,12 +412,12 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const host = setupHarness();
     const logs = loggerHarness();
     const config = bridgeConfig();
-    config.vadService.maxQueue = 1;
+    config.httpService.maxQueue = 1;
     const fingerprints = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)];
     const adapter = createXiaohuanBitableAdapter(config, {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: logs.logger,
       activeDraftMaxMs: 10,
       fingerprint: () => fingerprints.shift()!,
@@ -490,8 +451,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const fingerprints = ['a'.repeat(64), 'b'.repeat(64)];
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: loggerHarness().logger,
       fingerprint: () => fingerprints.shift()!,
       turnSettleMs: 1,
@@ -528,12 +489,16 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     let turnListener: AgentTurnResolvedListener | undefined;
     const fingerprint = 'a'.repeat(64);
     const fingerprintFn = vi.fn(() => fingerprint);
-    const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
+    const config = bridgeConfig();
+    config.feishuTranscriptMirrorEnabled = true;
+    const mirrorTranscript = vi.fn(async () => 'om_transcript_retry');
+    const adapter = createXiaohuanBitableAdapter(config, {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: loggerHarness().logger,
       fingerprint: fingerprintFn,
+      mirrorTranscript,
       retryDelaysMs: [1, 1],
       onAgentTurnResolved: (listener) => {
         turnListener = listener;
@@ -567,6 +532,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     ) as XiaohuanBitableBridgeEnvelope;
     expect(secondEnvelope.requestFingerprint).toBe(firstEnvelope.requestFingerprint);
     expect(secondEnvelope.idempotencyKey).toBe(firstEnvelope.idempotencyKey);
+    expect(mirrorTranscript).toHaveBeenCalledOnce();
     await adapter.teardown();
   });
 
@@ -579,8 +545,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     );
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: loggerHarness().logger,
       fingerprint: () => fingerprints.shift()!,
       turnSettleMs: 1,
@@ -629,8 +595,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const fingerprints = ['a'.repeat(64), 'b'.repeat(64)];
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: loggerHarness().logger,
       fingerprint: () => fingerprints.shift()!,
       turnSettleMs: 10,
@@ -692,8 +658,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const fingerprints = ['a'.repeat(64), 'b'.repeat(64)];
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: loggerHarness().logger,
       fingerprint: () => fingerprints.shift()!,
       retryDelaysMs: [1, 1],
@@ -743,8 +709,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     let fingerprints = 0;
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: logs.logger,
       mapFields: (result, fieldMap, options) => {
         mapCalls += 1;
@@ -765,8 +731,6 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     await adapter.setup(host.setup);
     service.dependencies().onOutput?.({
       captureId: 'bridge-test-failed-model',
-      index: 1,
-      reason: 'silence',
       errorCode: 'INVALID_STRUCTURED_OUTPUT',
     });
     service.dependencies().onOutput?.(output(experiment('bridge-test-map-failure')));
@@ -794,8 +758,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     config.fieldMap = { 'experiment.notes': 'Notes' };
     const adapter = createXiaohuanBitableAdapter(config, {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: logs.logger,
     });
 
@@ -810,7 +774,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     await adapter.teardown();
   });
 
-  it('aborts the service and waits for an already-started Host delivery on teardown', async () => {
+  it('closes the HTTP service and waits for an already-started Host delivery on teardown', async () => {
     const service = serviceHarness();
     let finishDelivery: (() => void) | undefined;
     const delivery = new Promise<void>((resolve) => {
@@ -819,8 +783,8 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     const host = setupHarness(() => delivery);
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService: service.run,
+      validateHttpConfig: vi.fn(),
+      startHttpService: service.start,
       logger: loggerHarness().logger,
     });
 
@@ -834,7 +798,7 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     });
     await flushPromises();
 
-    expect(service.dependencies().signal?.aborted).toBe(true);
+    expect(service.running().close).toHaveBeenCalledOnce();
     expect(stopped).toBe(false);
     finishDelivery?.();
     await teardown;
@@ -845,32 +809,36 @@ describe('Xiaohuan Bitable bridge ChannelAdapter', () => {
     expect(host.events).toHaveLength(1);
   });
 
-  it('drains a pre-teardown utterance emitted while the VAD service stops', async () => {
+  it('drains a pre-teardown utterance emitted while the HTTP service closes', async () => {
     const host = setupHarness();
-    let captured: VadListeningServiceDependencies | undefined;
-    const runVadService = vi.fn(
+    let captured: WholeUtteranceHttpDependencies | undefined;
+    const startHttpService = vi.fn(
       async (
-        _config: EnabledBridgeConfig['vadService'],
-        dependencies: VadListeningServiceDependencies,
-      ): Promise<VadServiceSummary> => {
+        _config: EnabledBridgeConfig['httpService'],
+        dependencies: WholeUtteranceHttpDependencies,
+      ): Promise<RunningWholeUtteranceHttpService> => {
         captured = dependencies;
-        await new Promise<void>((resolve) => {
-          dependencies.signal?.addEventListener(
-            'abort',
-            () => {
-              dependencies.onOutput?.(output(experiment('bridge-test-drained')));
-              resolve();
-            },
-            { once: true },
-          );
+        let resolveDone: (value: WholeUtteranceHttpSummary) => void = () => undefined;
+        const done = new Promise<WholeUtteranceHttpSummary>((resolve) => {
+          resolveDone = resolve;
         });
-        return summary;
+        return {
+          bindHost: '127.0.0.1',
+          port: 50_020,
+          outputRoot: '/tmp/xiaohuan-http-test',
+          done,
+          close: async () => {
+            await dependencies.onOutput?.(output(experiment('bridge-test-drained')));
+            resolveDone(summary);
+            return summary;
+          },
+        };
       },
     );
     const adapter = createXiaohuanBitableAdapter(bridgeConfig(), {
       validateBinding: vi.fn(),
-      validateVadConfig: vi.fn().mockResolvedValue(undefined),
-      runVadService,
+      validateHttpConfig: vi.fn(),
+      startHttpService,
       logger: loggerHarness().logger,
     });
 

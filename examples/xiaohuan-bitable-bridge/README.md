@@ -1,63 +1,81 @@
-# 小环实验 JSON → 飞书多维表格 Bridge（macOS）
+# 小环整句语音 → 方舟 JSON → 飞书多维表格 Bridge（macOS）
 
-这个 operator-specific 示例把小环的 RTP/Opus 音频交给现有 VAD/方舟
-`experiment-audio.v1` pipeline，再以固定规范用户和固定飞书 P2P 路由送入
-AgentDesk Host。Agent 只按 Bridge 已映射的字段草稿，通过 Backend Gateway
-发现、校验、授权、向原用户确认、创建并按 Record ID 读回验证。
+这个 operator-specific 示例在 macOS 接收小环硬件上传的完整 WAV，交给方舟单阶段
+多模态接口生成 transcript 和 `experiment-audio.v1`，再以固定规范用户和固定飞书
+P2P 路由送入 AgentDesk Host。Agent 只按 Bridge 已映射的字段草稿，通过 Backend
+Gateway 发现、校验、授权、向原用户确认、创建并按 Record ID 读回验证。
 
-Bridge 是默认关闭的入站 Channel。它不持有飞书/Bitable 凭证，不接受
-`app_token`、`table_id` 或 tenant token，不直接调用飞书 API 或 Gateway
-`/execute`。物理表标识与凭证只属于 Gateway 部署。
+硬件负责“你好小环”唤醒、说话起止检测、拍照指令分流和本地提示音。本机不再接收
+RTP/Opus、不运行 FFmpeg/VAD，也不调用设备 TTS 播报“收到”。
+
+Bridge 默认关闭。它不持有飞书/Bitable 凭证，不接受 `app_token`、`table_id` 或
+tenant token，不直接调用飞书 API 或 Gateway `/execute`。
+
+## 接收协议
+
+当前硬件约定：
+
+```text
+Mac 地址: 192.168.66.113
+协议: HTTP/1.1
+端口: 50020/TCP
+方法: POST
+路径: /api/audio
+Content-Type: audio/wav
+Body: 完整 WAV 原始字节
+```
+
+WAV 必须是 PCM signed 16-bit little-endian、16000 Hz、单声道、非空；请求体最大
+4 MiB，时长上限由 Bridge 和方舟共同配置，现场建议 61000 ms。
+
+Bridge 只有在完整 body 通过校验并以临时文件、fsync、原子 rename 落盘后才返回
+HTTP 202。方舟在后台有界串行处理，不阻塞硬件恢复下一次唤醒。完整 WAV 的
+SHA-256 用于派生稳定 capture ID；硬件因响应丢失重试完全相同的字节时返回
+`duplicate: true`，不会创建第二个方舟、Agent 或写表意图。队列满时返回 503 和
+`Retry-After: 1`，由硬件执行自己的有界重试。
+
+健康检查：
+
+```bash
+curl -sS http://127.0.0.1:50020/healthz
+curl -sS http://192.168.66.113:50020/healthz
+```
 
 ## 前置条件
 
-- macOS 主机与小环在可互通的局域网，已安装 Node.js、pnpm、FFmpeg 和 ffprobe。
-- AgentDesk 的 Feishu P2P 路由已经存在；配置的规范用户就是该 P2P 用户。
-- Frontdesk 已采用本变更中的 Bridge envelope 约束；使用 Worker 拓扑时，
-  `bitable` destination 已指向更新后的 Bitable Worker。
-- Gateway 已发布并实现：
-  `feishu.bitable.field.list`、`feishu.bitable.record.create` 和
-  `feishu.bitable.record.get`，且逻辑资源已映射到专用测试表。
-- 小环硬件发送目标与 SDP 的地址、UDP 端口一致。仓库示例 SDP 当前使用
-  `192.168.66.113:50020`；部署地址不同就先复制 SDP 到本机忽略目录并修改
-  `o=`、`c=` 中的 IP，同时把小环发送目标改为相同地址。不要提交现场地址。
+- macOS 与小环在可信、可互通的实验室局域网。
+- Node.js、pnpm 和本仓依赖已安装；生产 Bridge 不再需要 FFmpeg/ffprobe。
+- AgentDesk Feishu P2P 路由已经存在；规范用户就是该 P2P 用户。
+- Frontdesk/Worker 已采用本 change 中的 Bridge envelope 和证据约束归一化规则。
+- Gateway 已发布 `feishu.bitable.field.list`、`feishu.bitable.record.create` 和
+  `feishu.bitable.record.get`，逻辑资源映射到专用测试表。
+- 小环硬件发送目标已设为 `http://192.168.66.113:50020/api/audio`。
 
-先检查依赖和 macOS 防火墙：
+当前 HTTP 协议没有令牌认证，只能用于可信局域网，不得映射到公网。网络来源不能替代
+Host 中 operator 配置的规范用户身份。
+
+## TCP 50020 互斥
+
+Bridge 与硬件同事提供的 `xiaohuan_audio_receiver.py` 都会绑定 TCP 50020，不能同时
+运行。切换前先停止 Python 参考接收器，并检查：
 
 ```bash
-ffmpeg -version
-ffprobe -version
-/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
-lsof -nP -iUDP:50020
+lsof -nP -iTCP:50020 -sTCP:LISTEN
 ```
 
-## UDP 50020 互斥
-
-独立诊断监听器与 Bridge 都会启动 FFmpeg 读取同一个 SDP/UDP 50020，二者不能
-同时运行。包括以下独立入口：
-
-- `realtime-cli.ts`
-- `vad-service-cli.ts`
-- 手工运行的 `ffmpeg -i ...sdp`
-- VLC 或其他绑定/读取该 RTP 端口的程序
-
-切换到 Bridge 前，在独立监听器所在终端按 `Ctrl-C`，等待其清理完成，再检查：
+旧 `realtime-cli.ts`、`vad-service-cli.ts` 使用 UDP 50020，已不是当前硬件生产链路。
+为避免误判，联调期间也应停止它们：
 
 ```bash
 lsof -nP -iUDP:50020
 ```
 
-若进程不在当前终端，先用 `lsof` 确认 PID 和命令，再对那个明确 PID 发送
-`TERM`；不要用模糊进程名批量杀进程，也不要先用 `KILL`：
+若端口被占用，先确认明确 PID 和命令，再发送 `TERM`；不要用模糊名称批量杀进程：
 
 ```bash
 ps -p <PID> -o pid,ppid,command
 kill -TERM <PID>
-lsof -nP -iUDP:50020
 ```
-
-端口仍被占用就停止，不要启动 Bridge。端口冲突会使 Bridge 失败关闭；不要把
-“Host 仍在运行”误认为音频入口已经启动。
 
 ## 配置
 
@@ -69,7 +87,7 @@ cp examples/xiaohuan-bitable-bridge/.env.example \
 chmod 600 examples/xiaohuan-bitable-bridge/.env
 ```
 
-必须显式设置三道开关；任一不是精确的 `true`，Bridge 都不会完成启动：
+三道开关必须精确为 `true`：
 
 ```dotenv
 XIAOHUAN_BITABLE_BRIDGE_ENABLED=true
@@ -77,23 +95,39 @@ XIAOHUAN_BITABLE_ALLOW_EXTERNAL_UPLOAD=true
 XIAOHUAN_BITABLE_ALLOW_AGENT_DELIVERY=true
 ```
 
-它们分别表示启用 Bridge、同意本次服务生命周期内把检测到的语句上传方舟、
-同意把结构化草稿送入 Agent/确认链。请在每次真实监听前重新确认现场人员知情。
+它们分别表示启用 Bridge、同意把硬件触发的完整语句上传方舟、同意把结构化草稿送入
+Agent/确认链。Bridge 不再持续采集环境音。
 
 填写固定部署绑定：
 
 ```dotenv
 XIAOHUAN_BITABLE_AUTHENTICATED_USER_ID=<Host 中已有的规范用户 ID>
 XIAOHUAN_BITABLE_FEISHU_P2P_PLATFORM_ID=feishu:p2p:ou_<该用户 open_id>
+XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED=true
 XIAOHUAN_BITABLE_RESOURCE=<Gateway 中批准的测试表逻辑别名>
-XIAOHUAN_BITABLE_SDP_PATH=<本机 SDP 的绝对路径>
 ```
 
-`XIAOHUAN_BITABLE_RESOURCE` 只能是 Gateway 逻辑别名；形似物理
-`bas...`/`tbl...` 的值会被拒绝。用户、P2P 路由和资源都只来自这份
-operator-controlled 配置，不能从音频、transcript、设备地址或模型输出覆盖。
+`XIAOHUAN_BITABLE_RESOURCE` 只能是 Gateway 逻辑别名；形似物理 `bas...`/`tbl...`
+的值会被拒绝。用户、P2P 路由和资源不能从音频、transcript、设备地址或模型输出覆盖。
 
-字段映射是 `experiment-audio.v1` 源路径到真实表字段名的 JSON。只支持：
+HTTP 接收配置：
+
+```dotenv
+XIAOHUAN_BITABLE_HTTP_BIND=0.0.0.0
+XIAOHUAN_BITABLE_HTTP_PORT=50020
+XIAOHUAN_BITABLE_HTTP_MAX_BODY_BYTES=4194304
+XIAOHUAN_BITABLE_HTTP_MAX_DURATION_MS=61000
+XIAOHUAN_BITABLE_HTTP_MAX_QUEUE=8
+XIAOHUAN_BITABLE_HTTP_REQUEST_TIMEOUT_MS=10000
+XIAOHUAN_BITABLE_KEEP_UTTERANCES=false
+# XIAOHUAN_BITABLE_HTTP_OUTPUT_DIR=/private/tmp/xiaohuan-bitable
+```
+
+默认由程序创建临时目录，方舟处理结束后删除 WAV。只有排障且现场明确批准时才设置
+`KEEP_UTTERANCES=true` 和受控输出目录。`HTTP_MAX_DURATION_MS` 不能超过
+`DOUBAO_WAV_MAX_DURATION_MS`，`HTTP_MAX_BODY_BYTES` 不能超过 4 MiB。
+
+字段映射是 `experiment-audio.v1` 源路径到真实表字段名的 JSON。支持：
 
 - `captureId`
 - `transcript`
@@ -104,201 +138,133 @@ operator-controlled 配置，不能从音频、transcript、设备地址或模�
 - `experiment.observations`
 - `experiment.notes`
 
-例如，先在测试表建好对应文本字段，再按该表的精确字段名配置：
+例如：
 
 ```dotenv
-XIAOHUAN_BITABLE_FIELD_MAP_JSON={"captureId":"Capture ID","transcript":"Transcript","experiment.sampleIds":"Sample IDs","experiment.actions":"Actions","experiment.measurements":"Measurements","experiment.observations":"Observations","experiment.notes":"Notes"}
+XIAOHUAN_BITABLE_FIELD_MAP_JSON={"transcript":{"field":"批次","selector":"text-after-marker","markers":["批次"]},"experiment.actions":{"field":"设备仪器","selector":"action-target","name":"使用"},"experiment.measurements":{"field":"无水氯化铜（克）","selector":"measurement-value","name":"无水氯化铜","unit":"克"}}
 XIAOHUAN_BITABLE_JOIN_SEPARATOR=" | "
 XIAOHUAN_BITABLE_MAX_FIELD_VALUE_BYTES=8192
 ```
 
-字符串值是保留兼容的简写。需要把对象数组映射到单选或数字字段时，只能在对应
-源路径使用以下精确选择器：
+Bridge mapper 不做模糊匹配、别名翻译、单位换算或“取第一项”。未解析的候选字段会
+省略，但完整 transcript、experiment 和锁定的 `fieldMapping` 仍进入 Worker。Worker
+必须先读取实时 Field List，只能在映射目标和明确语音证据内纠正常见同音/近音：
 
-```json
-{
-  "captureId": "Capture ID",
-  "experiment.actions": {
-    "field": "设备仪器",
-    "selector": "action-target",
-    "name": "使用"
-  },
-  "experiment.measurements": {
-    "field": "无水氯化铜（克）",
-    "selector": "measurement-value",
-    "name": "无水氯化铜",
-    "unit": "克"
-  }
-}
-```
+- 已合法的初步字段保持不变；
+- 单选纠正结果必须逐字来自实时 options，且只能有一个合理候选；
+- 数字和单位必须在 transcript 或 measurement 中明确出现；
+- 多候选、证据冲突或必要值缺失时，在确认和写入前停止并澄清。
 
-`action-target` 按动作 `name` 精确匹配并保留唯一命中的非空 `target`；
-`measurement-value` 按测量 `name` 和可选的 `unit` 精确匹配并保留唯一命中的
-非 `null` `value`。省略 `unit` 时只按名称筛选。Bridge mapper 本身不做模糊匹配、
-别名翻译、单位换算或“取第一项”；零匹配、多匹配、空 target、null value 或空数组
-会从初步 `fields` 省略，但完整 transcript、experiment 和 `fieldMapping` 仍会进入
-Bitable Worker，不再因一次结构化漏提取而丢弃整句话。
+`text-after-marker` 只能配置在 `transcript` 上，`markers` 为 1–8 个唯一精确标记。
+它读取 marker 后到下一个中英文句读符或 transcript 末尾的单个非空短语。例如
+`批次测试十号，使用链路测试` 只生成 `批次: "测试十号"`。marker 零命中或多命中时
+候选字段省略，不选择第一项，也不会从其他位置猜测批次。
 
-目标字段名必须唯一。`null` 会省略，字符串数组用固定分隔符连接，对象数组使用
-规范 JSON。Worker 先读取实时 Field List，再只在 `fieldMapping` 声明的目标字段内
-进行有证据的语义归一化：
-
-- 已经合法的初步字段保持不变；
-- transcript 中明确出现的字段标记和单一连续值可用于恢复漏提取文本，例如
-  “批次测试四号”恢复为“测试四号”；
-- ASR 同音/近音值只有在语境和实时 options 共同支持唯一候选时才能纠正，例如
-  “列路测试”归一到唯一 live option“链路测试”；
-- 数字和单位必须在 transcript 或 measurement 中明确出现，禁止默认、推算和换算；
-- 多个候选合理、证据冲突或必要值无法定位时，在确认和写入之前停止并澄清。
-
-归一化后的最终字段会原样显示在确认卡中，仍需原用户批准。运行时 Field List 或
-类型校验失败就零写入。`XIAOHUAN_BITABLE_MAX_FIELD_VALUE_BYTES` 可设为 1–65536。
-
-如需在本机完整收到一句语音后让小环尽早播报“收到”，增加：
-
-```dotenv
-XIAOHUAN_BITABLE_TTS_ACK_ENABLED=true
-XIAOHUAN_BITABLE_TTS_BASE_URL=http://192.168.66.133:18082
-XIAOHUAN_BITABLE_TTS_ACK_TEXT=收到
-XIAOHUAN_BITABLE_TTS_TIMEOUT_MS=2000
-```
-
-TTS 地址只接受带显式端口、无账号密码的私有 IPv4 HTTP origin。VAD 完成切句、
-WAV 写入并通过本地校验后，Bridge 在方舟处理完成前异步调用 `/api/tts/speak`，使用
-`xiaohuan-received-<receiptKey>` 作为设备 `request_id`；receipt key 绑定本次运行和
-capture ID，同一句重放可由设备去重。“收到”只表示本机已拿到完整音频，不表示转写、
-确认或写表成功。HTTP 429、超时或无效响应只记录安全错误，不阻止后续链路。硬件播放
-期间会暂停麦克风和 RTP，短句结束并等待约 200 ms 后自动恢复。
-
-Bridge 对 Agent 入站实行单飞：第一条草稿处于 Agent processing 或 awaiting-confirmation
-时，后续方舟结果先进入容量与 VAD `maxQueue` 相同的 FIFO 队列。Agent 正常结束但未产
-确认卡时，短 settle 窗口后释放并处理下一句；已产卡时仍只有批准、拒绝、过期或失败
-才能释放。可重试的 5xx、超时和限流会保留同一 fingerprint，使用不同 attempt message
-ID 在 5 秒、30 秒后最多追加两次尝试。无关 turn/确认事件不会释放队列；15 分钟仅作为
-processing/confirmation 的最终安全上限，任何超时都不被视为批准。关闭服务时取消退避
-定时器且不再投递排队草稿。
-
-OpenAI-compatible Agent provider 默认按 240000 字符的完整请求预算计算 transcript、
-system instructions 和 tools。可用 `OPENAI_MAX_REQUEST_CONTEXT_CHARS` 调整；超限时先
-摘要压缩再按剩余预算裁剪，固定 instructions/tools 本身超限时本地失败关闭。
-
-最后填写现有方舟配置：
+最后配置方舟；硬件最长 60 秒时，两侧时长上限都设为 61000 ms：
 
 ```dotenv
 DOUBAO_ARK_API_KEY=<火山方舟 API Key>
 DOUBAO_ARK_MODEL=doubao-seed-2-0-lite-260428
 DOUBAO_ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+DOUBAO_REQUEST_TIMEOUT_MS=120000
+DOUBAO_WAV_MAX_BYTES=4194304
+DOUBAO_WAV_MAX_DURATION_MS=61000
 ```
-
-其余 `XIAOHUAN_BITABLE_VAD_*`、队列、超时、归一化和 `DOUBAO_*` 限制见
-`.env.example`。默认不保留 program-created WAV；只有排障且现场批准时才设置
-`XIAOHUAN_BITABLE_KEEP_UTTERANCES=true` 和受控的
-`XIAOHUAN_BITABLE_OUTPUT_DIR`。
 
 ## 启动
 
-先完成 Bitable pilot 拓扑/Gateway 配置，并在单独终端启动真实或测试 Gateway。
-例如本仓 pilot：
+先启动真实或测试 Gateway，再确认 TCP 50020 空闲：
 
 ```bash
-pnpm exec tsx examples/bitable-pilot/configure-topology.ts
-node examples/bitable-pilot/start-gateway.mjs
-```
-
-再次确认 UDP 50020 无其他监听器，然后从仓库根目录启动。下面的源码开发命令先
-自注册 Bridge，再启动 Host；`--env-file` 让 Bridge 配置在任何模块导入前进入
-`process.env`：
-
-```bash
-lsof -nP -iUDP:50020
+lsof -nP -iTCP:50020 -sTCP:LISTEN
 node \
+  --env-file=examples/xiaohuan-doubao-audio/.env \
   --env-file=examples/xiaohuan-bitable-bridge/.env \
   --import tsx \
   --input-type=module \
   --eval 'await import("./examples/xiaohuan-bitable-bridge/index.ts"); await import("./src/index.ts")'
 ```
 
-如果 Host 的其他必需变量没有放在仓库根 `.env`，也要通过进程环境提供。启动
-成功应出现：
+启动成功应出现：
 
+- `xiaohuan_http_audio_service_started`
 - `xiaohuan_bitable_adapter_started`
-- 音频服务 ready 日志
 - Host 的 `Channel adapter started ... type=xiaohuan-bitable`
 
-任何配置、SDP、FFmpeg 或端口错误都应视为 Bridge 未启动。修复后重启；不要另开
-一个直连 Gateway/飞书的脚本作为回退。
+另一个终端执行：
 
-Bridge 的部署包若要通过 `EXTENSIONS_DIR` 加载，必须先把 TypeScript 及其相对
-依赖编译/打包，并确保 `manifest.json` 的 `entry: "./index.js"` 确实存在。本节的
-repo-local 命令用于源码联调，不声称当前示例目录已经是可复制的独立 JS 发布包。
+```bash
+curl -sS http://127.0.0.1:50020/healthz
+```
+
+任何配置、绑定或端口错误都表示音频入口未启动。不要另开直连 Gateway/飞书脚本回退。
+
+## 不调用 TTS
+
+Bridge 已删除 `XIAOHUAN_BITABLE_TTS_*` 配置和 `/api/tts/speak` 客户端。硬件自行负责
+唤醒后的“我在”、普通语句结束提示和拍照提示。HTTP 202、方舟结果、确认卡或写表结果
+都不会触发本机向设备播报。
 
 ## 停止
 
-在 Host 终端按一次 `Ctrl-C`。Host teardown 会：
+在 Host 终端按一次 `Ctrl-C`。teardown 会：
 
-1. 停止接受新的 VAD 输出；
-2. 中止 FFmpeg/监听服务；
-3. 排空已接受的有界模型工作和 Host 入站投递；
-4. 按配置清理 program-created 临时 WAV。
+1. 关闭 TCP listener，不再接受新请求；
+2. 排空已经返回 202 的有界方舟工作；
+3. 排空已开始的 Host 入站投递；
+4. 按配置清理 program-created WAV。
 
-等待 `xiaohuan_bitable_adapter_stopped` 和 Host 退出后检查：
+退出后检查：
 
 ```bash
-lsof -nP -iUDP:50020
+lsof -nP -iTCP:50020 -sTCP:LISTEN
 ```
 
-正常停止后，才可重新启动独立 `vad-service-cli.ts` 做 capture-only 诊断。若 Host
-没有退出，先保留日志并确认具体 PID；不要同时启动第二个 Bridge。
+## 手工 HTTP 冒烟测试
+
+使用符合格式且已获授权的非敏感测试 WAV：
+
+```bash
+curl -sS -X POST http://127.0.0.1:50020/api/audio \
+  -H 'Content-Type: audio/wav' \
+  --data-binary @test.wav
+```
+
+预期立即得到 202 JSON，随后日志出现方舟阶段和 Bridge draft。重复发送同一文件应返回
+`duplicate: true`，且不产生第二个 Agent turn。
+
+## 真实链路验收
+
+1. 使用专用空表和测试逻辑资源，确认规范用户有 writer 权限。
+2. 确认 `FIELD_MAP_JSON` 的目标名与实时 Field List 完全一致。
+3. 启动 Bridge 并检查 `/healthz`。
+4. 对硬件说“你好小环”，等硬件回应后读一条非敏感实验句。
+5. 硬件应自行播放提示并向 Mac POST 一段完整 WAV；本机不应调用设备 TTS。
+6. 日志应只有一个稳定 `captureId`，并生成一个 `xiaohuan-bitable-bridge.v1` 草稿。
+7. 第一次在原用户确认面取消，核对测试表零新增。
+8. 再说一条并批准，核对 Create record ID、Record Get 结果及 Create/Get audit ID。
+9. 只保存 capture ID 脱敏后缀、逻辑资源、状态、record ID、audit ID 和时间；不要保存
+   音频、完整 transcript、敏感字段、凭证或物理表标识。
 
 ## 隐私与安全
 
-- 默认测试话术应为批准的非敏感内容；不要说真实患者、配方、商业秘密或个人信息。
-- 每句音频会发往方舟；Bridge envelope 还包含完整 transcript 和结构化实验对象，
-  并进入该规范用户的 Agent 会话。只有需要的测试人员应可访问该会话和测试表。
-- Key、Authorization、音频 Base64、完整 prompt、完整 transcript 和原始模型响应
-  不应进入普通日志或联调证据。不要把 `.env`、WAV、Host 数据目录或日志上传仓库。
-- Bridge 外层 sender 标签不是身份。Host 的 `authenticatedUserId` 和既有身份链才是
-  Gateway 授权、确认和审计依据。
-- Create 始终需要原规范 P2P 用户的 Host-mediated confirmation。取消、拒绝、超时、
-  不同用户确认或任一步骤失败都必须是零写入。
-
-## 真实测试表联调
-
-先用专用空表和测试逻辑资源，不要直接连接生产表。
-
-1. 在 Gateway 配置逻辑资源到测试表的物理映射；物理 ID 和飞书凭证只留在
-   Gateway 环境。
-2. 确认 Gateway discovery 发布 Field List、单条 Create、Record Get；确认规范
-   用户对该资源有 writer 权限。
-3. 让 `XIAOHUAN_BITABLE_FIELD_MAP_JSON` 的目标名与实时 Field List 完全一致。
-   select options 无需复制到 Bridge 配置，由 Worker 使用实时 Field List；当前数组
-   编码通常应映射到文本字段。
-4. 启动 Bridge，说一句批准的非敏感话术。预期一条有效方舟结果只形成一个
-   `xiaohuan-bitable-bridge.v1` Create 草稿，资源和 mapping 目标固定；只允许在原始
-   证据与实时 Field List 内做受控归一化。
-5. 第一次在原用户确认面选择取消/拒绝。核对测试表无新记录，Gateway 无 Create
-   执行审计；不要用聊天文字代替确认。
-6. 再说一条测试话术，在原用户确认面批准。Create 使用
-   `xiaohuan-bitable-create-<64 位小写 SHA-256>`；该指纹来自不可变的 capture、
-   resource、transcript、experiment 和 fieldMapping。成功后必须以返回 Record ID
-   调 Record Get。
-7. 只记录最小安全证据：capture ID 的脱敏后缀、逻辑资源别名、Record ID、Get
-   验证结果、Create/Get audit ID、确认结果和时间。不要记录完整 transcript、
-   字段敏感值、凭证或物理表标识。
-8. 用同一 envelope 做受控重放时，应复用相同 fingerprint/idempotency key，且
-   不新增第二条记录；如同一来源重试得到不同归一化字段，Gateway 应报告幂等输入
-   冲突，而不是静默覆盖或换键重试。
-
-完成后按“停止”章节退出，删除不再需要的本地 WAV/排障日志，并撤下测试资源的临时
-writer 授权。
+- 每个被硬件判定为普通语句的 WAV 会上传方舟；Bridge envelope 包含完整 transcript。
+- HTTP 入口无鉴权，只能绑定可信 LAN，不得转发公网。
+- Key、Authorization、音频 Base64、完整 prompt/transcript 和原始模型响应不得进入
+  普通日志或联调证据；不要提交 `.env`、WAV、Host 数据目录或现场日志。
+- Create 始终需要原规范 P2P 用户的 Host-mediated confirmation；硬件提示和 HTTP 202
+  都不表示用户批准或写表成功。
+- Bridge 的 sender 标签和设备 IP 都不是身份。Gateway 授权只认 Host 可信身份链。
 
 ## 验证
-
-不绑定 UDP 的静态/结构检查：
 
 ```bash
 pnpm exec tsc -p examples/xiaohuan-bitable-bridge/tsconfig.json
 pnpm exec tsx examples/xiaohuan-bitable-bridge/index.selftest.ts
+pnpm exec vitest run \
+  scripts/xiaohuan-whole-utterance-http.test.ts \
+  scripts/xiaohuan-bitable-bridge-config.test.ts \
+  scripts/xiaohuan-bitable-bridge-adapter.test.ts \
+  scripts/xiaohuan-bitable-bridge-workflow.test.ts
+openspec validate connect-xiaohuan-experiment-json-to-bitable --strict
 ```
-
-专项模拟测试应在真实音频前运行；它们不得要求飞书凭证或真实写表。

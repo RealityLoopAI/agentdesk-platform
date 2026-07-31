@@ -36,7 +36,8 @@ function enabledEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
     XIAOHUAN_BITABLE_FEISHU_P2P_PLATFORM_ID: 'feishu:p2p:ou_alice',
     XIAOHUAN_BITABLE_RESOURCE: 'pilot.records',
     XIAOHUAN_BITABLE_FIELD_MAP_JSON: '{"captureId":"Capture","experiment.sampleIds":"Samples"}',
-    XIAOHUAN_BITABLE_SDP_PATH: './fixtures/xiaohuan.sdp',
+    XIAOHUAN_BITABLE_HTTP_BIND: '0.0.0.0',
+    XIAOHUAN_BITABLE_HTTP_PORT: '50020',
     DOUBAO_ARK_API_KEY: 'ark-secret',
     DOUBAO_ARK_MODEL: 'ark-audio-model',
     ...overrides,
@@ -48,35 +49,36 @@ describe('Xiaohuan Bitable bridge configuration', () => {
     expect(loadBridgeConfig({})).toEqual({ enabled: false });
   });
 
-  it('loads a fixed P2P/user/resource binding and reuses Ark/VAD configuration', () => {
+  it('loads a fixed P2P/user/resource binding and whole-utterance HTTP configuration', () => {
     const config = loadBridgeConfig(enabledEnv()) as EnabledBridgeConfig;
     expect(config.enabled).toBe(true);
     expect(config.authenticatedUserId).toBe('canonical-alice');
     expect(config.platformId).toBe('feishu:p2p:ou_alice');
+    expect(config.feishuTranscriptMirrorEnabled).toBe(false);
     expect(config.resource).toBe('pilot.records');
     expect(config.audio.ark.apiKey).toBe('ark-secret');
-    expect(config.vadService.processUtterances).toBe(true);
-    expect(config.vadService.allowExternalUpload).toBe(true);
-    expect(config.vadService.maxQueue).toBe(4);
-    expect(config.ttsAck).toEqual({ enabled: false });
+    expect(config.httpService).toMatchObject({
+      bindHost: '0.0.0.0',
+      port: 50_020,
+      maxBodyBytes: 4 * 1024 * 1024,
+      maxDurationMs: 20_000,
+      expectedSampleRate: 16_000,
+      maxQueue: 8,
+      requestTimeoutMs: 10_000,
+      keepUtterances: false,
+    });
   });
 
-  it('loads an explicit credential-free private-LAN TTS acknowledgement binding', () => {
+  it('enables transcript mirroring only through an explicit boolean switch', () => {
     const config = loadBridgeConfig(
-      enabledEnv({
-        XIAOHUAN_BITABLE_TTS_ACK_ENABLED: 'true',
-        XIAOHUAN_BITABLE_TTS_BASE_URL: 'http://192.168.66.133:18082',
-        XIAOHUAN_BITABLE_TTS_ACK_TEXT: '收到',
-        XIAOHUAN_BITABLE_TTS_TIMEOUT_MS: '2500',
-      }),
+      enabledEnv({ XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED: 'true' }),
     ) as EnabledBridgeConfig;
-
-    expect(config.ttsAck).toEqual({
-      enabled: true,
-      baseUrl: 'http://192.168.66.133:18082',
-      text: '收到',
-      timeoutMs: 2500,
-    });
+    expect(config.feishuTranscriptMirrorEnabled).toBe(true);
+    expect(() =>
+      loadBridgeConfig(
+        enabledEnv({ XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED: 'yes' }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: 'INVALID_BOOLEAN' }));
   });
 
   it.each([
@@ -90,20 +92,12 @@ describe('Xiaohuan Bitable bridge configuration', () => {
   });
 
   it.each([
-    ['public endpoint', 'http://203.0.113.10:18082'],
-    ['credential-bearing endpoint', 'http://user:pass@192.168.66.133:18082'],
-    ['endpoint path', 'http://192.168.66.133:18082/api'],
-    ['missing explicit port', 'http://192.168.66.133'],
-    ['TLS endpoint outside the hardware contract', 'https://192.168.66.133:18082'],
-  ])('rejects unsafe TTS binding: %s', (_name, baseUrl) => {
-    expect(() =>
-      loadBridgeConfig(
-        enabledEnv({
-          XIAOHUAN_BITABLE_TTS_ACK_ENABLED: 'true',
-          XIAOHUAN_BITABLE_TTS_BASE_URL: baseUrl,
-        }),
-      ),
-    ).toThrowError(expect.objectContaining({ code: 'INVALID_TTS_BASE_URL' }));
+    ['port out of range', { XIAOHUAN_BITABLE_HTTP_PORT: '70000' }],
+    ['body over hardware contract', { XIAOHUAN_BITABLE_HTTP_MAX_BODY_BYTES: '4194305' }],
+    ['queue is zero', { XIAOHUAN_BITABLE_HTTP_MAX_QUEUE: '0' }],
+    ['duration exceeds Ark limit', { XIAOHUAN_BITABLE_HTTP_MAX_DURATION_MS: '20001' }],
+  ])('rejects invalid HTTP receiver configuration: %s', (_name, override) => {
+    expect(() => loadBridgeConfig(enabledEnv(override))).toThrow();
   });
 });
 
@@ -387,6 +381,75 @@ describe('Xiaohuan Bitable field mapping', () => {
     });
   });
 
+  it('recovers the real spoken batch deterministically after one configured transcript marker', () => {
+    const asrMiss: ExperimentAudioV1 = {
+      schemaVersion: 'experiment-audio.v1',
+      captureId: 'xiaohuan-http-b0169e79',
+      transcript: '批次测试十号，使用链路测试设备，无水氯化铜四克',
+      experiment: {
+        title: null,
+        sampleIds: [],
+        actions: [{ name: '使用', target: '链路测试设备' }],
+        measurements: [{ name: '无水氯化铜', value: 4, unit: '克' }],
+        observations: [],
+        notes: null,
+      },
+    };
+    const mapping = parseFieldMap(
+      JSON.stringify({
+        transcript: {
+          field: '批次',
+          selector: 'text-after-marker',
+          markers: ['批次'],
+        },
+        'experiment.actions': {
+          field: '设备仪器',
+          selector: 'action-target',
+          name: '使用',
+        },
+        'experiment.measurements': {
+          field: '无水氯化铜（克）',
+          selector: 'measurement-value',
+          name: '无水氯化铜',
+          unit: '克',
+        },
+      }),
+    );
+
+    expect(mapExperimentCandidateFields(asrMiss, mapping)).toEqual({
+      批次: '测试十号',
+      设备仪器: '链路测试设备',
+      '无水氯化铜（克）': 4,
+    });
+    expect(mapExperimentFields(asrMiss, mapping)).toEqual({
+      批次: '测试十号',
+      设备仪器: '链路测试设备',
+      '无水氯化铜（克）': 4,
+    });
+  });
+
+  it.each([
+    ['missing marker', '本次实验使用链路测试设备', {}],
+    ['multiple marker phrases', '批次测试十号，批次测试十一号。', {}],
+  ])('omits an unsafe text-after-marker candidate: %s', (_name, transcript, expected) => {
+    const selected = { ...result, transcript };
+    const mapping = parseFieldMap(
+      '{"transcript":{"field":"批次","selector":"text-after-marker","markers":["批次"]}}',
+    );
+    expect(mapExperimentCandidateFields(selected, mapping)).toEqual(expected);
+    expect(() => mapExperimentFields(selected, mapping)).toThrowError(
+      expect.objectContaining({ code: 'SELECTOR_MATCH_COUNT' }),
+    );
+  });
+
+  it('uses the longest configured marker at one position and allows transcript end as a boundary', () => {
+    const selected = { ...result, transcript: '本次实验的批次为测试十二号' };
+    const mapping = parseFieldMap(
+      '{"transcript":{"field":"批次","selector":"text-after-marker","markers":["批次","批次为"]}}',
+    );
+    expect(mapExperimentCandidateFields(selected, mapping)).toEqual({ 批次: '测试十二号' });
+  });
+
   it('omits unresolved selectors instead of rejecting the whole candidate draft', () => {
     const unresolved: ExperimentAudioV1 = {
       ...result,
@@ -415,5 +478,30 @@ describe('Xiaohuan Bitable field mapping', () => {
     expect(mapExperimentCandidateFields(unresolved, mapping)).toEqual({
       Capture: 'capture-001',
     });
+  });
+
+  it.each([
+    [
+      'text selector on a non-transcript source',
+      '{"experiment.sampleIds":{"field":"批次","selector":"text-after-marker","markers":["批次"]}}',
+      'SELECTOR_SOURCE_MISMATCH',
+    ],
+    [
+      'empty marker list',
+      '{"transcript":{"field":"批次","selector":"text-after-marker","markers":[]}}',
+      'INVALID_SELECTOR_MARKERS',
+    ],
+    [
+      'duplicate markers',
+      '{"transcript":{"field":"批次","selector":"text-after-marker","markers":["批次","批次"]}}',
+      'INVALID_SELECTOR_MARKERS',
+    ],
+    [
+      'unsupported text selector key',
+      '{"transcript":{"field":"批次","selector":"text-after-marker","markers":["批次"],"name":"x"}}',
+      'INVALID_SELECTOR_SHAPE',
+    ],
+  ])('rejects invalid text-after-marker configuration: %s', (_name, raw, code) => {
+    expect(() => parseFieldMap(raw)).toThrowError(expect.objectContaining({ code }));
   });
 });

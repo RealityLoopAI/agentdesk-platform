@@ -55,3 +55,14 @@ export {
   type VadServiceSummary,
 } from './vad-listening-service.js';
 export { loadWav, parseWav, validateCaptureId, type LoadedWav, type WavMetadata } from './wav.js';
+export {
+  startWholeUtteranceHttpService,
+  validateWholeUtteranceHttpConfig,
+  WHOLE_UTTERANCE_AUDIO_PATH,
+  WHOLE_UTTERANCE_HEALTH_PATH,
+  type RunningWholeUtteranceHttpService,
+  type WholeUtteranceHttpConfig,
+  type WholeUtteranceHttpDependencies,
+  type WholeUtteranceHttpOutput,
+  type WholeUtteranceHttpSummary,
+} from './whole-utterance-http-service.js';

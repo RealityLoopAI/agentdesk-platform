@@ -1,4 +1,4 @@
-# ADR-0082: 视觉 JSON 按封闭场景路由到多维表格
+# ADR-0089: 视觉 JSON 按封闭场景路由到多维表格
 
 - **Status**: Accepted
 - **Date**: 2026-07-30
@@ -11,7 +11,7 @@
 
 ## Context
 
-ADR-0080 建立了内容绑定的自动写表入口，但最初部署把所有合格 JSON 指向一个
+ADR-0087 建立了内容绑定的自动写表入口，但最初部署把所有合格 JSON 指向一个
 克数表。真实多维表格按实验场景拆成多个表；因此 `场景一 / 650 rpm` 被错误地
 拿去校验 `无水氯化铜（克）`，在单位检查阶段拒绝。
 
@@ -19,7 +19,7 @@ ADR-0080 建立了内容绑定的自动写表入口，但最初部署把所有�
 
 运营配置提供封闭的 `场景 -> 逻辑资源 + 测量字段 + 允许单位 + 值类型 + 静态字段`
 映射。Host 在 Agent 入口前做精确场景匹配、单位校验和字段构造，并把所选逻辑
-资源及精确字段绑定进 ADR-0080 的 HMAC。每个逻辑资源由 Gateway 映射到对应物理
+资源及精确字段绑定进 ADR-0087 的 HMAC。每个逻辑资源由 Gateway 映射到对应物理
 表并保留独立 Schema、writer policy、审计和幂等校验。
 
 当前部署为：
@@ -44,6 +44,6 @@ ADR-0080 建立了内容绑定的自动写表入口，但最初部署把所有�
 
 ## References
 
-- ADR-0056（飞书 Bitable 只经 Backend Gateway）
-- ADR-0080（内容绑定的视觉 JSON 自动写表）
+- ADR-0063（飞书 Bitable 只经 Backend Gateway）
+- ADR-0087（内容绑定的视觉 JSON 自动写表）
 - OpenSpec change `add-voice-photo-json-bitable-auto-ingest`

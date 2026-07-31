@@ -1,22 +1,41 @@
 ## ADDED Requirements
 
 ### Requirement: Start only with an explicit trusted deployment binding
-The Bridge SHALL default to disabled and SHALL require explicit continuous-upload consent, an operator-configured canonical user, a Feishu P2P platform route, an approved logical Bitable resource and a valid field mapping before opening the audio listener.
+The Bridge SHALL default to disabled and SHALL require explicit Ark-upload consent, an operator-configured canonical user, a Feishu P2P platform route, an approved logical Bitable resource and a valid field mapping before opening the audio listener.
 
 #### Scenario: Required binding is incomplete
 - **WHEN** the Bridge is enabled but any required consent, identity, route, resource or mapping value is missing or invalid
-- **THEN** it fails before binding UDP, uploading audio or creating an Agent turn
+- **THEN** it fails before binding TCP, uploading audio to Ark or creating an Agent turn
 
 #### Scenario: Group target is configured
 - **WHEN** the configured Feishu destination is not a P2P route
 - **THEN** the Bridge rejects the configuration
 
-### Requirement: Reuse the bounded Xiaohuan audio pipeline
-The Bridge SHALL reuse the continuous RTP/VAD/WAV/Ark pipeline and SHALL accept only validated `experiment-audio.v1` results for downstream delivery.
+### Requirement: Receive bounded whole-utterance WAV uploads
+The Bridge SHALL expose `POST /api/audio` on the operator-configured TCP bind and port, SHALL accept only a raw `audio/wav` body with explicit bounded `Content-Length`, SHALL validate PCM signed 16-bit little-endian, 16000 Hz, mono, non-empty and bounded duration before durable acceptance, and SHALL expose a content-safe `GET /healthz`.
+
+#### Scenario: Valid whole utterance is uploaded
+- **WHEN** hardware POSTs one valid bounded WAV and capacity is available
+- **THEN** the Bridge atomically stores it, enqueues exactly one Ark job, returns HTTP 202 with a safe filename and duration, and remains ready for later requests
+
+#### Scenario: Upload contract is invalid
+- **WHEN** the method, path, content type, content length, body completeness or WAV format violates the contract
+- **THEN** the Bridge returns a bounded non-2xx JSON error and creates no Ark or Agent work
+
+#### Scenario: Audio queue is full
+- **WHEN** a new valid non-duplicate WAV arrives while the bounded Ark queue has no capacity
+- **THEN** the Bridge returns a retryable non-2xx response and does not claim the utterance was accepted
+
+#### Scenario: Hardware retries identical bytes
+- **WHEN** an already accepted WAV payload is POSTed again in the same Bridge process
+- **THEN** the Bridge returns a successful duplicate response and does not create another Ark job, Agent turn or business intent
+
+### Requirement: Reuse the bounded Xiaohuan Ark pipeline
+The Bridge SHALL reuse WAV validation, the single-stage Ark multimodal extractor and `experiment-audio.v1` validation, and SHALL accept only Schema-valid results for downstream delivery.
 
 #### Scenario: Valid utterance completes
-- **WHEN** VAD completes one valid utterance and Ark returns a Schema-valid result
-- **THEN** the Bridge creates exactly one bounded downstream draft for that capture while audio listening continues
+- **WHEN** one accepted WAV returns a Schema-valid Ark result
+- **THEN** the Bridge creates exactly one bounded downstream draft for that capture while HTTP listening continues
 
 #### Scenario: One utterance fails
 - **WHEN** WAV validation, Ark processing or structured-output validation fails for one utterance
@@ -45,6 +64,14 @@ The Bridge SHALL map only supported `experiment-audio.v1` source paths to unique
 - **WHEN** a measurement-value rule finds exactly one measurement whose name and optional unit exactly match the configured selector and whose value is non-null
 - **THEN** the Bridge maps that numeric or string value unchanged to the configured field
 
+#### Scenario: Transcript marker selector has one bounded match
+- **WHEN** a text-after-marker rule on transcript finds exactly one configured marker followed by one non-empty phrase ending at a supported sentence delimiter or transcript end
+- **THEN** the Bridge maps only the trimmed phrase after the marker to the configured field
+
+#### Scenario: Transcript marker selector is unsafe
+- **WHEN** a text-after-marker rule is configured on another source, contains invalid markers, has zero or multiple matches, or has no bounded phrase terminator
+- **THEN** configuration errors fail startup, while unresolved runtime candidates are omitted without guessing and complete-draft mapping fails closed
+
 #### Scenario: Selector is ambiguous or missing in structured output
 - **WHEN** an action or measurement selector finds zero matches, multiple matches, an empty target or a null value
 - **THEN** the Bridge omits that preliminary field, preserves the mapping and source evidence for the Worker, and does not itself choose, translate, convert or infer a value
@@ -52,6 +79,10 @@ The Bridge SHALL map only supported `experiment-audio.v1` source paths to unique
 #### Scenario: Empty collection was extracted
 - **WHEN** a mapped string collection is empty but the transcript may still contain the requested fact
 - **THEN** the Bridge omits the empty preliminary value while preserving the mapping and transcript for bounded downstream normalization
+
+#### Scenario: Ark omits an explicitly spoken batch
+- **WHEN** transcript contains a bounded phrase such as `批次测试十号，` but structured `sampleIds` is empty and the deployment maps transcript with marker `批次`
+- **THEN** the Bridge deterministically emits `测试十号` for the locked batch target without waiting for Agent re-extraction
 
 ### Requirement: Normalize only within transcript evidence and live Field List
 The Worker SHALL treat Bridge fields as preliminary, SHALL obtain the live Field List before normalization, and SHALL produce final fields only for operator-configured mapping targets using explicit transcript or structured experiment evidence and the live field type and options.
@@ -110,30 +141,18 @@ The Bridge MUST NOT accept or retain Feishu app credentials, tenant tokens, phys
 - **THEN** Bitable credentials remain only in the Gateway deployment and every business write remains attributable to a Host/Gateway audit chain
 
 ### Requirement: Shut down without leaking audio or pending work
-The Bridge SHALL stop FFmpeg on teardown, drain already accepted bounded model work, clean program-created temporary WAV files by default and stop producing new Agent turns.
+The Bridge SHALL stop accepting HTTP requests on teardown, drain already accepted bounded model work, clean program-created temporary WAV files by default and stop producing new Agent turns.
 
 #### Scenario: Host shuts down
 - **WHEN** Channel teardown occurs during idle or active capture
-- **THEN** the audio child process terminates, eligible accepted work is bounded and drained, temporary audio is cleaned and no later turn is emitted
+- **THEN** the TCP listener closes, eligible accepted work is bounded and drained, temporary audio is cleaned and no later turn is emitted
 
-### Requirement: Acknowledge a locally completed utterance through optional device TTS
-The Bridge SHALL optionally acknowledge an utterance after its complete WAV has been written and validated locally and before Ark processing completes, through the operator-configured Xiaohuan TTS HTTP endpoint using a run-and-capture-bound stable request ID, and SHALL treat the acknowledgement as auxiliary rather than transcription, authorization or write state.
+### Requirement: Leave wake, endpointing and audible feedback to hardware
+The Bridge SHALL NOT perform wake-word detection, VAD endpointing, photo-command routing or device TTS acknowledgement; these behaviors belong to the hardware audio state machine.
 
-#### Scenario: Complete WAV is locally ready
-- **WHEN** VAD completes one utterance and its WAV passes local validation
-- **THEN** the Bridge asynchronously submits `text="收到"` with `request_id="xiaohuan-received-<receiptKey>"` before waiting for Ark transcription or structured output
-
-#### Scenario: WAV callback is repeated
-- **WHEN** the same capture callback is observed more than once in one Bridge process
-- **THEN** every attempt uses the same hardware request ID so the device can deduplicate it
-
-#### Scenario: Hardware acknowledgement fails
-- **WHEN** the TTS endpoint times out, rejects the request, returns a non-202 status, a mismatched request ID or an invalid response
-- **THEN** the Bridge records a content-safe typed error without changing confirmation status, retrying the card, calling Gateway, or writing Bitable
-
-#### Scenario: TTS acknowledgement is disabled
-- **WHEN** the Bridge runs without explicit TTS acknowledgement enablement and a valid operator endpoint
-- **THEN** audio ingestion and the existing confirmation workflow behave exactly as before and no TTS HTTP request is made
+#### Scenario: An utterance is accepted or processed
+- **WHEN** the Bridge receives, transcribes, confirms or writes an utterance
+- **THEN** it makes no request to the device TTS endpoint and does not attempt to control hardware recording state
 
 ### Requirement: Serialize drafts across confirmation lifecycles
 The Bridge SHALL allow at most one active Agent draft, SHALL distinguish Agent processing from awaiting confirmation, SHALL queue later structured results in bounded FIFO order, and SHALL release or retry the active draft only from a correlated Agent-turn or confirmation terminal event.

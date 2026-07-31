@@ -2,30 +2,19 @@ import path from 'node:path';
 
 import {
   loadConfig as loadAudioConfig,
-  parseVadServiceArgs,
   type DoubaoAudioConfig,
-  type VadServiceConfig,
+  type WholeUtteranceHttpConfig,
 } from '../xiaohuan-doubao-audio/index.js';
 import { parseFieldMap, type ExperimentFieldMap } from './mapper.js';
 
 export const BRIDGE_ENV_PREFIX = 'XIAOHUAN_BITABLE_';
 export const DEFAULT_FIELD_JOIN_SEPARATOR = ' | ';
 export const DEFAULT_MAX_FIELD_VALUE_BYTES = 8 * 1024;
-export const DEFAULT_TTS_ACK_TEXT = '收到';
-export const DEFAULT_TTS_ACK_TIMEOUT_MS = 2_000;
-
-export interface DisabledTtsAckConfig {
-  enabled: false;
-}
-
-export interface EnabledTtsAckConfig {
-  enabled: true;
-  baseUrl: string;
-  text: string;
-  timeoutMs: number;
-}
-
-export type TtsAckConfig = DisabledTtsAckConfig | EnabledTtsAckConfig;
+export const DEFAULT_HTTP_BIND_HOST = '0.0.0.0';
+export const DEFAULT_HTTP_PORT = 50_020;
+export const DEFAULT_HTTP_MAX_BODY_BYTES = 4 * 1024 * 1024;
+export const DEFAULT_HTTP_MAX_QUEUE = 8;
+export const DEFAULT_HTTP_REQUEST_TIMEOUT_MS = 10_000;
 
 export interface DisabledBridgeConfig {
   enabled: false;
@@ -35,12 +24,12 @@ export interface EnabledBridgeConfig {
   enabled: true;
   authenticatedUserId: string;
   platformId: string;
+  feishuTranscriptMirrorEnabled: boolean;
   resource: string;
   fieldMap: ExperimentFieldMap;
   joinSeparator: string;
   maxFieldValueBytes: number;
-  ttsAck: TtsAckConfig;
-  vadService: VadServiceConfig;
+  httpService: WholeUtteranceHttpConfig;
   audio: DoubaoAudioConfig;
 }
 
@@ -100,39 +89,6 @@ function boundedInteger(
   return value;
 }
 
-function optionalVadArg(env: NodeJS.ProcessEnv, args: string[], envName: string, option: string): void {
-  const value = env[envName]?.trim();
-  if (value) args.push(option, value);
-}
-
-function loadVadConfig(env: NodeJS.ProcessEnv): VadServiceConfig {
-  const args = [
-    '--sdp',
-    path.resolve(requiredText(env, 'XIAOHUAN_BITABLE_SDP_PATH', 4_096)),
-    '--process',
-    '--allow-external-upload',
-  ];
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_FFMPEG_PATH', '--ffmpeg');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_VAD_THRESHOLD_DB', '--threshold-db');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_VAD_FRAME_MS', '--frame-ms');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_VAD_START_FRAMES', '--start-frames');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_VAD_PRE_ROLL_MS', '--pre-roll-ms');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_VAD_TRAILING_SILENCE_MS', '--trailing-silence-ms');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_VAD_MIN_SPEECH_MS', '--min-speech-ms');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_VAD_MAX_UTTERANCE_MS', '--max-utterance-ms');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_MAX_QUEUE', '--max-queue');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_FIRST_AUDIO_TIMEOUT_MS', '--first-audio-timeout-ms');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_STOP_GRACE_MS', '--stop-grace-ms');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_OUTPUT_DIR', '--output-dir');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_CAPTURE_PREFIX', '--capture-prefix');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_NORMALIZE_PEAK_DB', '--normalize-peak-db');
-  optionalVadArg(env, args, 'XIAOHUAN_BITABLE_MAX_NORMALIZE_GAIN_DB', '--max-normalize-gain-db');
-  if (booleanValue(env, 'XIAOHUAN_BITABLE_KEEP_UTTERANCES')) {
-    args.push('--keep-utterances');
-  }
-  return parseVadServiceArgs(args);
-}
-
 function validateLogicalResource(value: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value) || /^(?:bas|tbl)[A-Za-z0-9_-]+$/i.test(value)) {
     throw new BridgeConfigError(
@@ -143,72 +99,51 @@ function validateLogicalResource(value: string): string {
   return value;
 }
 
-function isPrivateIpv4(hostname: string): boolean {
-  const parts = hostname.split('.').map(Number);
-  if (
-    parts.length !== 4 ||
-    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
-  ) {
-    return false;
-  }
-  return (
-    parts[0] === 10 ||
-    parts[0] === 127 ||
-    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
-    (parts[0] === 192 && parts[1] === 168)
-  );
-}
-
-function loadTtsAckConfig(env: NodeJS.ProcessEnv): TtsAckConfig {
-  if (!booleanValue(env, 'XIAOHUAN_BITABLE_TTS_ACK_ENABLED')) {
-    return { enabled: false };
-  }
-  const rawBaseUrl = requiredText(env, 'XIAOHUAN_BITABLE_TTS_BASE_URL', 512);
-  let url: URL;
-  try {
-    url = new URL(rawBaseUrl);
-  } catch {
-    throw new BridgeConfigError(
-      'INVALID_TTS_BASE_URL',
-      'XIAOHUAN_BITABLE_TTS_BASE_URL must be an absolute trusted-LAN HTTP URL',
-    );
-  }
-  if (
-    url.protocol !== 'http:' ||
-    !isPrivateIpv4(url.hostname) ||
-    !url.port ||
-    url.username ||
-    url.password ||
-    url.pathname !== '/' ||
-    url.search ||
-    url.hash
-  ) {
-    throw new BridgeConfigError(
-      'INVALID_TTS_BASE_URL',
-      'XIAOHUAN_BITABLE_TTS_BASE_URL must be a credential-free private-IPv4 HTTP origin with an explicit port',
-    );
-  }
-  const text = env.XIAOHUAN_BITABLE_TTS_ACK_TEXT?.trim() || DEFAULT_TTS_ACK_TEXT;
-  if (
-    text.length > 500 ||
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)
-  ) {
-    throw new BridgeConfigError(
-      'INVALID_TTS_TEXT',
-      'XIAOHUAN_BITABLE_TTS_ACK_TEXT must contain 1-500 safe characters',
-    );
-  }
+function loadHttpServiceConfig(
+  env: NodeJS.ProcessEnv,
+  audio: DoubaoAudioConfig,
+): WholeUtteranceHttpConfig {
+  const outputDir = env.XIAOHUAN_BITABLE_HTTP_OUTPUT_DIR?.trim();
   return {
-    enabled: true,
-    baseUrl: url.origin,
-    text,
-    timeoutMs: boundedInteger(
+    bindHost: env.XIAOHUAN_BITABLE_HTTP_BIND?.trim() || DEFAULT_HTTP_BIND_HOST,
+    port: boundedInteger(
       env,
-      'XIAOHUAN_BITABLE_TTS_TIMEOUT_MS',
-      DEFAULT_TTS_ACK_TIMEOUT_MS,
-      100,
-      10_000,
+      'XIAOHUAN_BITABLE_HTTP_PORT',
+      DEFAULT_HTTP_PORT,
+      1,
+      65_535,
     ),
+    ...(outputDir ? { outputDir: path.resolve(outputDir) } : {}),
+    maxBodyBytes: boundedInteger(
+      env,
+      'XIAOHUAN_BITABLE_HTTP_MAX_BODY_BYTES',
+      Math.min(DEFAULT_HTTP_MAX_BODY_BYTES, audio.maxWavBytes),
+      1,
+      DEFAULT_HTTP_MAX_BODY_BYTES,
+    ),
+    maxDurationMs: boundedInteger(
+      env,
+      'XIAOHUAN_BITABLE_HTTP_MAX_DURATION_MS',
+      audio.maxWavDurationMs,
+      1,
+      audio.maxWavDurationMs,
+    ),
+    expectedSampleRate: 16_000,
+    maxQueue: boundedInteger(
+      env,
+      'XIAOHUAN_BITABLE_HTTP_MAX_QUEUE',
+      DEFAULT_HTTP_MAX_QUEUE,
+      1,
+      64,
+    ),
+    requestTimeoutMs: boundedInteger(
+      env,
+      'XIAOHUAN_BITABLE_HTTP_REQUEST_TIMEOUT_MS',
+      DEFAULT_HTTP_REQUEST_TIMEOUT_MS,
+      100,
+      60_000,
+    ),
+    keepUtterances: booleanValue(env, 'XIAOHUAN_BITABLE_KEEP_UTTERANCES'),
   };
 }
 
@@ -242,10 +177,15 @@ export function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): BridgeCo
     );
   }
 
+  const audio = loadAudioConfig(env);
   return {
     enabled: true,
     authenticatedUserId: requiredText(env, 'XIAOHUAN_BITABLE_AUTHENTICATED_USER_ID'),
     platformId,
+    feishuTranscriptMirrorEnabled: booleanValue(
+      env,
+      'XIAOHUAN_BITABLE_FEISHU_TRANSCRIPT_MIRROR_ENABLED',
+    ),
     resource: validateLogicalResource(requiredText(env, 'XIAOHUAN_BITABLE_RESOURCE', 128)),
     fieldMap: parseFieldMap(requiredText(env, 'XIAOHUAN_BITABLE_FIELD_MAP_JSON', 8_192)),
     joinSeparator,
@@ -256,8 +196,7 @@ export function loadBridgeConfig(env: NodeJS.ProcessEnv = process.env): BridgeCo
       1,
       64 * 1024,
     ),
-    ttsAck: loadTtsAckConfig(env),
-    vadService: loadVadConfig(env),
-    audio: loadAudioConfig(env),
+    httpService: loadHttpServiceConfig(env, audio),
+    audio,
   };
 }

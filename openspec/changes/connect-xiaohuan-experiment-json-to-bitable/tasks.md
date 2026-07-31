@@ -44,7 +44,7 @@
 - [x] 5.1 使用真实小环和方舟生成一条 Bridge 入站，并记录不含完整 transcript/凭证的安全证据
 - [ ] 5.2 在用户提供测试表逻辑资源与字段映射后，完成一次取消和一次确认 Create，核对 record ID、Get 结果与 audit ID
 - [x] 5.3 检查真实设备 healthz，并验证旧版确认卡时序可触发一次“收到”回执（已由 5.4 的提前时序取代）
-- [ ] 5.4 真实验证本地完整 WAV 后立即播报“收到”，且连续两句在第一条确认解决前不投递第二个 Agent turn
+- [x] 5.4 旧版本机“收到”播报验收已取消；硬件提示音与本机链路解耦，连续语句串行仍由 6.x 回归覆盖
 
 ## 6. Agent 终态、重试与上下文保护
 
@@ -55,3 +55,18 @@
 - [x] 6.5 OpenAI provider 按 transcript + system instructions + tools 的完整请求预算触发压缩和动态硬裁剪，固定开销超限时失败关闭
 - [x] 6.6 添加 Runner/Host/Bridge/provider 回归测试，覆盖连续五句、502、无确认完成、迟到确认、重试耗尽、错误路由和完整请求预算
 - [x] 6.7 更新运行手册与 ADR，执行 typecheck、全量测试和 OpenSpec strict validation
+
+## 7. 硬件整句 HTTP WAV 接入
+
+- [x] 7.1 新增 ADR 并更新 proposal/design/spec，记录 TCP 50020 `POST /api/audio` 取代 UDP RTP/VAD、本机移除 TTS、硬件拥有唤醒/切句/反馈的边界
+- [x] 7.2 实现整句 HTTP 接收服务：严格请求/WAV 校验、4 MiB 与约 60 秒上限、原子落盘、健康检查、有界串行方舟队列、内容摘要去重和优雅停止
+- [x] 7.3 将 Bridge 配置与 Adapter 切换到 HTTP 服务，移除 SDP/FFmpeg/VAD/TTS 生产依赖和环境变量，同时保留固定身份、方舟、草稿串行、确认与 Gateway 链路
+- [x] 7.4 更新专项测试、`.env.example` 和 macOS 运行手册，覆盖正常上传、非法请求、重复上传、队满、单句失败隔离、teardown 和无 TTS
+- [ ] 7.5 使用真实小环完成“硬件唤醒 → 整句 HTTP WAV → 方舟 JSON → 确认卡/多维表格”的人工联调，并保存不含音频、完整 transcript 或凭证的安全证据
+
+## 8. 批次漏提取修复
+
+- [x] 8.1 在字段映射契约中增加仅限 transcript 的 `text-after-marker` 确定性选择器，零/多命中和空短语失败关闭
+- [x] 8.2 更新方舟提示词，明确 `sampleIds` 对“批次测试十号”等批次标记语句的提取要求
+- [x] 8.3 更新部署样例、真实 Bridge 字段映射和运行文档，使用 marker 选择器生成“批次”
+- [x] 8.4 添加真实句式、非法配置、歧义、末尾边界和提示词回归，并运行专项测试、typecheck 与 OpenSpec strict validation

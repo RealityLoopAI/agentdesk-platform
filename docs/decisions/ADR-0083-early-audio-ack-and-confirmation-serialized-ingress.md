@@ -1,11 +1,11 @@
 # ADR-0083: 完整 WAV 立即回执并按确认生命周期串行投递语音草稿
 
-- **Status**: Accepted
+- **Status**: Accepted (TTS acknowledgement superseded by ADR-0088; no-confirmation timeout superseded by ADR-0084)
 - **Date**: 2026-07-30
 - **Decider(s)**: 小环实验链路运营者；coding agent（提案、执行、验证）
 - **Tags**: `xiaohuan`, `tts`, `gateway-confirmation`, `queue`, `vad`, `host-runtime`, `examples`
 - **Supersedes**: ADR-0081
-- **Superseded by**: 无
+- **Superseded by**: ADR-0088（仅本机 TTS 回执）、ADR-0084（未产确认时的 Turn 终态与有界重试）；确认生命周期串行仍有效
 
 ---
 
@@ -50,7 +50,7 @@ confirmation ID、规范用户和 P2P 路由才能释放下一条。15 分钟未
 - **Positive**: 后续语句可以继续完成音频和模型处理，但不会抢占当前确认。
 - **Positive**: 核心事件保持业务无关且只读，不改变身份、授权、确认或 Gateway 执行路径。
 - **Negative**: 等待确认时结构化结果占用有界内存；长时间不确认会触发队列溢出并丢弃新草稿。
-- **Negative**: active draft 若在确认卡之前失败，只能依赖 15 分钟保护超时释放；当前没有通用 Agent turn 终态事件。
+- **Negative**: 原设计中 active draft 若在确认卡之前失败只能依赖 15 分钟保护超时释放；该限制后由 ADR-0084 的通用 Agent Turn 终态事件消除。
 - **Neutral / Trade-offs**: 批准终态释放下一条时，上一条 Worker 可能仍在执行 Create/Get；Host 会话消息串行性负责保持顺序，本 ADR 不把“收到”或队列释放解释为写入完成。
 
 ## Implementation Notes

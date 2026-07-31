@@ -136,6 +136,12 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0082](ADR-0082-evidence-bounded-voice-field-normalization.md) | 以原始证据和实时表 Schema 约束语音字段归一化 | Accepted | 2026-07-30 | `voice`, `bitable`, `normalization`, `evidence` |
 | [ADR-0083](ADR-0083-early-audio-ack-and-confirmation-serialized-ingress.md) | 完整 WAV 立即回执并按确认生命周期串行投递语音草稿 | Accepted | 2026-07-30 | `voice`, `confirmation`, `serialization`, `tts` |
 | [ADR-0084](ADR-0084-agent-turn-terminal-and-bounded-voice-retry.md) | 用 Agent Turn 终态驱动语音队列与有界重试 | Accepted | 2026-07-30 | `agent-runner`, `host-runtime`, `voice`, `retry`, `queue`, `openai` |
+| [ADR-0085](ADR-0085-fixed-p2p-voice-transcript-mirror.md) | 将语音摘要显式同步到固定飞书私聊 | Accepted | 2026-07-30 | `voice`, `feishu`, `transcript`, `p2p`, `delivery` |
+| [ADR-0086](ADR-0086-operator-specific-windows-gui-mcp-worker.md) | 以专用 MCP Worker 接入 Windows GUI 控制服务 | Accepted | 2026-07-30 | `examples`, `windows`, `gui`, `mcp`, `worker`, `isolation` |
+| [ADR-0087](ADR-0087-content-bound-json-machine-ingest.md) | 用内容绑定凭证自动写入视觉 JSON 结果 | Accepted | 2026-07-30 | `vision`, `json`, `bitable`, `gateway`, `hmac`, `ingest` |
+| [ADR-0088](ADR-0088-hardware-segmented-http-wav-ingress.md) | 由硬件切句并以整句 HTTP WAV 接入语音链路 | Accepted | 2026-07-30 | `voice`, `wav`, `http`, `hardware`, `ingress` |
+| [ADR-0089](ADR-0089-closed-scene-routed-voice-json-ingest.md) | 视觉 JSON 按封闭场景路由到多维表格 | Accepted | 2026-07-30 | `vision`, `json`, `bitable`, `routing`, `closed-scene` |
+| [ADR-0090](ADR-0090-deterministic-transcript-marker-field-extraction.md) | 用配置化 transcript 标记选择器补齐关键语音字段 | Accepted | 2026-07-30 | `voice`, `transcript`, `field-mapping`, `configuration` |
 
 ---
 

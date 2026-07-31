@@ -27,7 +27,17 @@ export interface MeasurementValueFieldRule {
   readonly unit?: string;
 }
 
-export type ExperimentFieldRule = string | ActionTargetFieldRule | MeasurementValueFieldRule;
+export interface TextAfterMarkerFieldRule {
+  readonly field: string;
+  readonly selector: 'text-after-marker';
+  readonly markers: readonly string[];
+}
+
+export type ExperimentFieldRule =
+  | string
+  | ActionTargetFieldRule
+  | MeasurementValueFieldRule
+  | TextAfterMarkerFieldRule;
 export type ExperimentFieldMap = Readonly<Partial<Record<ExperimentSourcePath, ExperimentFieldRule>>>;
 export type BitableDraftFields = Record<string, string | number | boolean>;
 
@@ -59,6 +69,9 @@ const DEFAULT_JOIN_SEPARATOR = ' | ';
 const DEFAULT_MAX_FIELD_VALUE_BYTES = 8 * 1024;
 const MAX_TARGET_FIELD_NAME_LENGTH = 128;
 const MAX_SELECTOR_TEXT_LENGTH = 256;
+const MAX_TEXT_MARKERS = 8;
+const MAX_TEXT_MARKER_LENGTH = 32;
+const TEXT_VALUE_BOUNDARY = /[，,；;。.!！？?\r\n]/u;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -91,15 +104,21 @@ function validConfiguredText(value: unknown, maximumLength: number): value is st
 function parseSelectorRule(
   source: string,
   value: Record<string, unknown>,
-): ActionTargetFieldRule | MeasurementValueFieldRule {
+): ActionTargetFieldRule | MeasurementValueFieldRule | TextAfterMarkerFieldRule {
   const selector = value.selector;
-  if (selector !== 'action-target' && selector !== 'measurement-value') {
+  if (
+    selector !== 'action-target' &&
+    selector !== 'measurement-value' &&
+    selector !== 'text-after-marker'
+  ) {
     throw new FieldMappingError('INVALID_SELECTOR', `Invalid selector for source path: ${source}`);
   }
 
   const expectedKeys =
     selector === 'action-target'
       ? ['field', 'name', 'selector']
+      : selector === 'text-after-marker'
+        ? ['field', 'markers', 'selector']
       : value.unit === undefined
         ? ['field', 'name', 'selector']
         : ['field', 'name', 'selector', 'unit'];
@@ -109,6 +128,28 @@ function parseSelectorRule(
   }
   if (!validConfiguredText(value.field, MAX_TARGET_FIELD_NAME_LENGTH)) {
     throw new FieldMappingError('INVALID_TARGET_FIELD', `Invalid target field for source path: ${source}`);
+  }
+  if (selector === 'text-after-marker') {
+    if (source !== 'transcript') {
+      throw new FieldMappingError('SELECTOR_SOURCE_MISMATCH', 'text-after-marker requires transcript');
+    }
+    if (
+      !Array.isArray(value.markers) ||
+      value.markers.length < 1 ||
+      value.markers.length > MAX_TEXT_MARKERS ||
+      !value.markers.every((marker) => validConfiguredText(marker, MAX_TEXT_MARKER_LENGTH)) ||
+      new Set(value.markers).size !== value.markers.length
+    ) {
+      throw new FieldMappingError(
+        'INVALID_SELECTOR_MARKERS',
+        `text-after-marker requires 1-${MAX_TEXT_MARKERS} unique bounded markers`,
+      );
+    }
+    return Object.freeze({
+      field: value.field,
+      selector,
+      markers: Object.freeze([...value.markers]),
+    });
   }
   if (!validConfiguredText(value.name, MAX_SELECTOR_TEXT_LENGTH)) {
     throw new FieldMappingError('INVALID_SELECTOR_NAME', `Invalid selector name for source path: ${source}`);
@@ -209,7 +250,30 @@ function encodedBytes(value: string | number | boolean): number {
   return Buffer.byteLength(typeof value === 'string' ? value : canonicalJson(value), 'utf8');
 }
 
-function selectValue(result: ExperimentAudioV1, rule: ActionTargetFieldRule | MeasurementValueFieldRule): unknown {
+function textAfterMarkerMatches(
+  transcript: string,
+  markers: readonly string[],
+): string[] {
+  const matches: string[] = [];
+  for (let index = 0; index < transcript.length; index += 1) {
+    const marker = markers
+      .filter((candidate) => transcript.startsWith(candidate, index))
+      .sort((left, right) => right.length - left.length)[0];
+    if (!marker) continue;
+    const valueStart = index + marker.length;
+    const suffix = transcript.slice(valueStart);
+    const boundary = suffix.search(TEXT_VALUE_BOUNDARY);
+    const rawValue = suffix.slice(0, boundary === -1 ? suffix.length : boundary).trim();
+    if (rawValue) matches.push(rawValue);
+    index = valueStart - 1;
+  }
+  return matches;
+}
+
+function selectValue(
+  result: ExperimentAudioV1,
+  rule: ActionTargetFieldRule | MeasurementValueFieldRule | TextAfterMarkerFieldRule,
+): unknown {
   if (rule.selector === 'action-target') {
     const matches = result.experiment.actions.filter((action) => action.name === rule.name);
     if (matches.length !== 1) {
@@ -220,6 +284,17 @@ function selectValue(result: ExperimentAudioV1, rule: ActionTargetFieldRule | Me
       throw new FieldMappingError('EMPTY_SELECTOR_VALUE', 'action-target selector matched an empty target');
     }
     return target;
+  }
+
+  if (rule.selector === 'text-after-marker') {
+    const matches = textAfterMarkerMatches(result.transcript, rule.markers);
+    if (matches.length !== 1) {
+      throw new FieldMappingError(
+        'SELECTOR_MATCH_COUNT',
+        'text-after-marker selector must match exactly one bounded phrase',
+      );
+    }
+    return matches[0];
   }
 
   const matches = result.experiment.measurements.filter(
@@ -242,13 +317,18 @@ const OMIT_FIELD = Symbol('omit-field');
 
 function selectCandidateValue(
   result: ExperimentAudioV1,
-  rule: ActionTargetFieldRule | MeasurementValueFieldRule,
+  rule: ActionTargetFieldRule | MeasurementValueFieldRule | TextAfterMarkerFieldRule,
 ): unknown | typeof OMIT_FIELD {
   if (rule.selector === 'action-target') {
     const matches = result.experiment.actions.filter((action) => action.name === rule.name);
     if (matches.length !== 1) return OMIT_FIELD;
     const target = matches[0].target;
     return target === null || target.trim().length === 0 ? OMIT_FIELD : target;
+  }
+
+  if (rule.selector === 'text-after-marker') {
+    const matches = textAfterMarkerMatches(result.transcript, rule.markers);
+    return matches.length === 1 ? matches[0] : OMIT_FIELD;
   }
 
   const matches = result.experiment.measurements.filter(

@@ -1,10 +1,9 @@
-import { randomUUID } from 'node:crypto';
-
 import type {
   ChannelAdapter,
   ChannelSetup,
   OutboundMessage,
 } from '../../src/channels/adapter.js';
+import { getChannelAdapter } from '../../src/channels/channel-registry.js';
 import { getMessagingGroupWithAgentCount } from '../../src/db/messaging-groups.js';
 import { log } from '../../src/log.js';
 import {
@@ -20,14 +19,14 @@ import {
 import { getUser } from '../../src/modules/permissions/db/users.js';
 import { createAudioPipeline, type SafeLogger } from '../xiaohuan-doubao-audio/pipeline.js';
 import type { ExperimentAudioV1 } from '../xiaohuan-doubao-audio/experiment-schema.js';
-import { validateVadServiceConfig } from '../xiaohuan-doubao-audio/vad-service-config.js';
 import {
-  runVadListeningService,
-  type VadListeningServiceDependencies,
-  type VadServiceOutput,
-  type VadServiceSummary,
-  type VadWavReadyEvent,
-} from '../xiaohuan-doubao-audio/vad-listening-service.js';
+  startWholeUtteranceHttpService,
+  validateWholeUtteranceHttpConfig,
+  type RunningWholeUtteranceHttpService,
+  type WholeUtteranceHttpDependencies,
+  type WholeUtteranceHttpOutput,
+  type WholeUtteranceHttpSummary,
+} from '../xiaohuan-doubao-audio/whole-utterance-http-service.js';
 import type { EnabledBridgeConfig } from './config.js';
 import { createBridgeEnvelope } from './envelope.js';
 import {
@@ -36,11 +35,6 @@ import {
   mapExperimentCandidateFields,
   type BitableDraftFields,
 } from './mapper.js';
-import {
-  createTtsReceiptKey,
-  sendTtsAcknowledgement,
-} from './tts-ack.js';
-
 export const XIAOHUAN_BITABLE_CHANNEL_TYPE = 'xiaohuan-bitable';
 
 export interface BridgeAdapterLogger {
@@ -50,17 +44,16 @@ export interface BridgeAdapterLogger {
 
 export interface XiaohuanBitableAdapterDependencies {
   validateBinding?: typeof validateDeploymentBinding;
-  validateVadConfig?: typeof validateVadServiceConfig;
+  validateHttpConfig?: typeof validateWholeUtteranceHttpConfig;
   createPipeline?: typeof createAudioPipeline;
-  runVadService?: typeof runVadListeningService;
+  startHttpService?: typeof startWholeUtteranceHttpService;
   mapFields?: typeof mapExperimentCandidateFields;
   fingerprint?: typeof createRequestFingerprint;
   idempotencyKey?: typeof createIdempotencyKey;
   onConfirmationDelivered?: typeof onGatewayConfirmationDelivered;
   onConfirmationResolved?: typeof onGatewayConfirmationResolved;
   onAgentTurnResolved?: typeof onAgentTurnResolved;
-  sendTtsAck?: typeof sendTtsAcknowledgement;
-  createReceiptRunId?: () => string;
+  mirrorTranscript?: typeof mirrorTranscriptToFeishu;
   activeDraftMaxMs?: number;
   turnSettleMs?: number;
   retryDelaysMs?: readonly number[];
@@ -93,11 +86,34 @@ interface ActiveDraft {
   result: ExperimentAudioV1;
   attempt: number;
   sourceMessageId: string;
+  transcriptMirrored: boolean;
   state: 'processing' | 'awaiting-confirmation' | 'retry-backoff';
   confirmationId?: string;
   timeout?: NodeJS.Timeout;
   settleTimeout?: NodeJS.Timeout;
   retryTimeout?: NodeJS.Timeout;
+}
+
+export interface FeishuTranscriptMirrorInput {
+  platformId: string;
+  text: string;
+}
+
+/**
+ * Reuse the initialized Host Feishu adapter so the Bridge never owns Feishu
+ * credentials or accepts a transcript-derived destination.
+ */
+export async function mirrorTranscriptToFeishu(
+  input: FeishuTranscriptMirrorInput,
+): Promise<string | undefined> {
+  const feishu = getChannelAdapter('feishu');
+  if (!feishu?.isConnected()) {
+    throw new BridgeLifecycleError('FEISHU_ADAPTER_UNAVAILABLE');
+  }
+  return feishu.deliver(input.platformId, null, {
+    kind: 'chat',
+    content: { text: input.text },
+  });
 }
 
 function safeErrorCode(error: unknown, fallback: string): string {
@@ -121,7 +137,7 @@ function serviceLogger(logger: BridgeAdapterLogger): SafeLogger {
 }
 
 /**
- * Resolve the operator binding against Host-owned state before FFmpeg starts.
+ * Resolve the operator binding against Host-owned state before TCP listening starts.
  * This is deployment validation only; authorization remains exclusively in
  * the Gateway workflow carried by the envelope.
  */
@@ -140,20 +156,24 @@ export function validateDeploymentBinding(config: EnabledBridgeConfig): void {
 }
 
 /**
- * Create an ingress-only ChannelAdapter.
+ * Create a voice-ingress ChannelAdapter.
  *
  * The adapter targets an existing Feishu P2P messaging group through
- * `onInboundEvent`; it never delivers outbound messages, calls Gateway
- * execution, or owns Feishu/Bitable credentials.
+ * `onInboundEvent`. When explicitly enabled it also asks the already
+ * initialized Host Feishu adapter to mirror the concise transcript to that
+ * same fixed P2P route. It never calls Gateway execution or owns
+ * Feishu/Bitable credentials.
  */
 export function createXiaohuanBitableAdapter(
   config: EnabledBridgeConfig,
   dependencies: XiaohuanBitableAdapterDependencies = {},
 ): ChannelAdapter {
   const validateBinding = dependencies.validateBinding ?? validateDeploymentBinding;
-  const validateVadConfig = dependencies.validateVadConfig ?? validateVadServiceConfig;
+  const validateHttpConfig =
+    dependencies.validateHttpConfig ?? validateWholeUtteranceHttpConfig;
   const createPipeline = dependencies.createPipeline ?? createAudioPipeline;
-  const runVadService = dependencies.runVadService ?? runVadListeningService;
+  const startHttpService =
+    dependencies.startHttpService ?? startWholeUtteranceHttpService;
   const mapFields = dependencies.mapFields ?? mapExperimentCandidateFields;
   const fingerprint = dependencies.fingerprint ?? createRequestFingerprint;
   const idempotencyKey = dependencies.idempotencyKey ?? createIdempotencyKey;
@@ -162,8 +182,7 @@ export function createXiaohuanBitableAdapter(
   const subscribeResolution =
     dependencies.onConfirmationResolved ?? onGatewayConfirmationResolved;
   const subscribeAgentTurn = dependencies.onAgentTurnResolved ?? onAgentTurnResolved;
-  const sendTtsAck = dependencies.sendTtsAck ?? sendTtsAcknowledgement;
-  const createReceiptRunId = dependencies.createReceiptRunId ?? randomUUID;
+  const mirrorTranscript = dependencies.mirrorTranscript ?? mirrorTranscriptToFeishu;
   const activeDraftMaxMs = dependencies.activeDraftMaxMs ?? ACTIVE_DRAFT_MAX_MS;
   const turnSettleMs = dependencies.turnSettleMs ?? TURN_SETTLE_MS;
   const retryDelaysMs = dependencies.retryDelaysMs ?? RETRY_DELAYS_MS;
@@ -171,15 +190,13 @@ export function createXiaohuanBitableAdapter(
   const now = dependencies.now ?? (() => new Date());
 
   let hostSetup: ChannelSetup | null = null;
-  let controller: AbortController | null = null;
+  let runningService: RunningWholeUtteranceHttpService | null = null;
   let servicePromise: Promise<void> | null = null;
   let unsubscribeConfirmationDelivered: (() => void) | null = null;
   let unsubscribeConfirmationResolved: (() => void) | null = null;
   let unsubscribeAgentTurnResolved: (() => void) | null = null;
-  let receiptRunId: string | null = null;
   let acceptingOutputs = false;
   const pendingDeliveries = new Set<Promise<void>>();
-  const pendingTtsAcks = new Set<Promise<void>>();
   const draftQueue: ExperimentAudioV1[] = [];
   let activeDraft: ActiveDraft | null = null;
   let drainPromise: Promise<void> | null = null;
@@ -188,46 +205,6 @@ export function createXiaohuanBitableAdapter(
   const trackDelivery = (promise: Promise<void>): void => {
     pendingDeliveries.add(promise);
     void promise.finally(() => pendingDeliveries.delete(promise));
-  };
-
-  const trackTtsAck = (promise: Promise<void>): void => {
-    pendingTtsAcks.add(promise);
-    void promise.finally(() => pendingTtsAcks.delete(promise));
-  };
-
-  const handleWavReady = (event: VadWavReadyEvent): void => {
-    if (!config.ttsAck.enabled || !receiptRunId) return;
-    let receiptKey: string;
-    try {
-      receiptKey = createTtsReceiptKey(receiptRunId, event.captureId);
-    } catch (error) {
-      logger.error({
-        event: 'xiaohuan_tts_ack_failed',
-        outcome: 'error',
-        captureId: event.captureId,
-        code: safeErrorCode(error, 'TTS_RECEIPT_KEY_FAILED'),
-      });
-      return;
-    }
-    const acknowledgement = sendTtsAck(config.ttsAck, receiptKey)
-      .then((accepted) => {
-        logger.info({
-          event: 'xiaohuan_tts_ack_accepted',
-          outcome: 'ok',
-          captureId: event.captureId,
-          duplicate: accepted.duplicate,
-          queuePosition: accepted.queuePosition,
-        });
-      })
-      .catch((error) => {
-        logger.error({
-          event: 'xiaohuan_tts_ack_failed',
-          outcome: 'error',
-          captureId: event.captureId,
-          code: safeErrorCode(error, 'TTS_ACK_FAILED'),
-        });
-      });
-    trackTtsAck(acknowledgement);
   };
 
   const releaseActiveDraft = (
@@ -392,6 +369,31 @@ export function createXiaohuanBitableAdapter(
           isGroup: false,
         },
       });
+      if (config.feishuTranscriptMirrorEnabled && !current.transcriptMirrored) {
+        try {
+          const platformMessageId = await mirrorTranscript({
+            platformId: config.platformId,
+            text: `语音指令：${result.transcript}`,
+          });
+          current.transcriptMirrored = true;
+          logger.info({
+            event: 'xiaohuan_feishu_transcript_mirrored',
+            outcome: 'ok',
+            captureId: result.captureId,
+            requestFingerprint: current.requestFingerprint,
+            platformMessageId: platformMessageId ?? null,
+          });
+        } catch (error) {
+          logger.error({
+            event: 'xiaohuan_feishu_transcript_mirror_failed',
+            stage: 'feishu-delivery',
+            outcome: 'error',
+            captureId: result.captureId,
+            requestFingerprint: current.requestFingerprint,
+            code: safeErrorCode(error, 'FEISHU_TRANSCRIPT_MIRROR_FAILED'),
+          });
+        }
+      }
       logger.info({
         event: 'xiaohuan_bitable_draft_delivered',
         outcome: 'ok',
@@ -450,6 +452,7 @@ export function createXiaohuanBitableAdapter(
       result,
       attempt: 0,
       sourceMessageId: `${XIAOHUAN_BITABLE_CHANNEL_TYPE}-${requestFingerprint}-attempt-1`,
+      transcriptMirrored: false,
       state: 'processing',
     };
     activeDraft = current;
@@ -484,7 +487,7 @@ export function createXiaohuanBitableAdapter(
     trackDelivery(pending);
   };
 
-  const handleOutput = (output: VadServiceOutput): void => {
+  const handleOutput = (output: WholeUtteranceHttpOutput): void => {
     if (!acceptingOutputs) return;
     if (!output.result) {
       logger.error({
@@ -496,7 +499,7 @@ export function createXiaohuanBitableAdapter(
       });
       return;
     }
-    if (draftQueue.length >= config.vadService.maxQueue) {
+    if (draftQueue.length >= config.httpService.maxQueue) {
       logger.error({
         event: 'xiaohuan_bitable_draft_failed',
         stage: 'confirmation-queue',
@@ -518,41 +521,48 @@ export function createXiaohuanBitableAdapter(
     async setup(setup: ChannelSetup): Promise<void> {
       if (hostSetup || servicePromise) throw new BridgeLifecycleError('BRIDGE_ALREADY_STARTED');
 
-      // This check verifies SDP/FFmpeg/output paths before runVadService can
-      // spawn FFmpeg and bind the configured UDP listener.
+      // Validate Host identity and the HTTP contract before binding TCP 50020.
       await validateBinding(config);
-      await validateVadConfig(config.vadService);
+      validateHttpConfig(config.httpService);
       const pipeline = createPipeline(config.audio, { logger: serviceLogger(logger) });
-      const abortController = new AbortController();
 
       hostSetup = setup;
-      controller = abortController;
-      receiptRunId = createReceiptRunId();
       unsubscribeConfirmationDelivered = subscribeConfirmation(handleConfirmationDelivered);
       unsubscribeConfirmationResolved = subscribeResolution(handleConfirmationResolved);
       unsubscribeAgentTurnResolved = subscribeAgentTurn(handleAgentTurnResolved);
       acceptingOutputs = true;
 
-      const serviceDependencies: VadListeningServiceDependencies = {
-        signal: abortController.signal,
+      const serviceDependencies: WholeUtteranceHttpDependencies = {
         logger: serviceLogger(logger),
-        maxWavBytes: config.audio.maxWavBytes,
-        maxWavDurationMs: config.audio.maxWavDurationMs,
         processUtterance: (filePath, captureId) =>
           pipeline.processWav(filePath, captureId),
-        onWavReady: handleWavReady,
         onOutput: handleOutput,
       };
 
-      servicePromise = runVadService(config.vadService, serviceDependencies)
-        .then((summary: VadServiceSummary) => {
+      try {
+        runningService = await startHttpService(config.httpService, serviceDependencies);
+      } catch (error) {
+        acceptingOutputs = false;
+        unsubscribeConfirmationDelivered?.();
+        unsubscribeConfirmationResolved?.();
+        unsubscribeAgentTurnResolved?.();
+        unsubscribeConfirmationDelivered = null;
+        unsubscribeConfirmationResolved = null;
+        unsubscribeAgentTurnResolved = null;
+        hostSetup = null;
+        throw error;
+      }
+
+      servicePromise = runningService.done
+        .then((summary: WholeUtteranceHttpSummary) => {
           logger.info({
             event: 'xiaohuan_bitable_service_stopped',
             outcome: 'ok',
-            accepted: summary.accepted,
+            accepted: summary.received,
+            duplicates: summary.duplicates,
             succeeded: summary.succeeded,
             failed: summary.failed,
-            discarded: summary.discarded,
+            rejected: summary.rejected,
           });
         })
         .catch((error: unknown) => {
@@ -564,7 +574,7 @@ export function createXiaohuanBitableAdapter(
         })
         .finally(() => {
           acceptingOutputs = false;
-          controller = null;
+          runningService = null;
         });
 
       logger.info({
@@ -574,14 +584,12 @@ export function createXiaohuanBitableAdapter(
     },
 
     async teardown(): Promise<void> {
-      controller?.abort();
-      // runVadListeningService drains its bounded model queue after FFmpeg
-      // stops. Keep accepting those pre-teardown results until it resolves.
+      // Stop accepting HTTP requests and drain already accepted model work.
+      await runningService?.close();
       await servicePromise;
       acceptingOutputs = false;
       draftQueue.splice(0);
       await Promise.allSettled([...pendingDeliveries]);
-      await Promise.allSettled([...pendingTtsAcks]);
       unsubscribeConfirmationDelivered?.();
       unsubscribeConfirmationResolved?.();
       unsubscribeAgentTurnResolved?.();
@@ -592,9 +600,8 @@ export function createXiaohuanBitableAdapter(
       if (activeDraft?.settleTimeout) clearTimeout(activeDraft.settleTimeout);
       if (activeDraft?.retryTimeout) clearTimeout(activeDraft.retryTimeout);
       activeDraft = null;
-      receiptRunId = null;
       hostSetup = null;
-      controller = null;
+      runningService = null;
       servicePromise = null;
       drainPromise = null;
       logger.info({

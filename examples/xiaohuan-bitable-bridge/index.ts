@@ -2,8 +2,8 @@
  * Fork-free registration entry for the operator-bound Xiaohuan Bitable bridge.
  *
  * Importing this module only registers a factory. The factory returns null
- * while the bridge is disabled, so the default deployment never opens UDP or
- * uploads audio.
+ * while the bridge is disabled, so the default deployment never binds the
+ * whole-utterance HTTP listener or uploads audio.
  */
 import { registerChannelAdapter } from '../../src/channels/channel-registry.js';
 import { createXiaohuanBitableAdapter } from './adapter.js';

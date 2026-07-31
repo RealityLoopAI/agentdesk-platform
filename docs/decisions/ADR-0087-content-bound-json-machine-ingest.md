@@ -1,4 +1,4 @@
-# ADR-0080: 用内容绑定凭证自动写入视觉 JSON 结果
+# ADR-0087: 用内容绑定凭证自动写入视觉 JSON 结果
 
 - **Status**: Accepted
 - **Date**: 2026-07-30
@@ -22,7 +22,7 @@ JSON：只有清晰、完整且采用帧与最终读数一致时，才把固定�
 ## Options Considered
 
 - **Option A：监控器持飞书凭证直接写表。** 最短，但形成平行授权与审计路径，
-  违反 ADR-0056。
+  违反 ADR-0063。
 - **Option B：向普通飞书会话发文本，让通用 Worker 自动写表。** 复用现有路由，
   但用户文本与机器事件无法形成可靠权限边界。
 - **Option C：专用 Host ChannelAdapter、专用 Worker 和 Gateway 内容绑定凭证。**
@@ -62,6 +62,6 @@ Worker 只执行 Describe、Authorize、Create、Record Get。Gateway 对
 
 ## References
 
-- ADR-0056（飞书 Bitable 只经 Backend Gateway）
-- ADR-0061（Bitable 可信用户读取与单条新增）
-- ADR-0064（Group 专属指令）
+- ADR-0063（飞书 Bitable 只经 Backend Gateway）
+- ADR-0068（Bitable 可信用户读取与单条新增）
+- ADR-0071（Group 专属指令）

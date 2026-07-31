@@ -1,4 +1,4 @@
-# ADR-0079: 以专用 MCP Worker 接入 Windows GUI 控制服务
+# ADR-0086: 以专用 MCP Worker 接入 Windows GUI 控制服务
 
 - **Status**: Accepted
 - **Date**: 2026-07-30
