@@ -106,6 +106,21 @@ describe('Windows GUI Agent MCP bridge', () => {
     expect(treeUrl.searchParams.get('scope')).toBe('foreground');
   });
 
+  it('does not fetch a screenshot unless the caller explicitly requests one', async () => {
+    const fetchImpl = vi.fn(async () => response('{"success":true,"root":{"name":"Console"}}')) as unknown as FetchLike;
+    const client = new GuiAgentClient('http://192.168.66.98:8000', fetchImpl);
+
+    const defaultResult = await callGuiTool(client, 'gui_observe');
+    const explicitFalseResult = await callGuiTool(client, 'gui_observe', { include_screenshot: false });
+
+    expect(defaultResult.content).toHaveLength(1);
+    expect(explicitFalseResult.content).toHaveLength(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    for (const call of fetchImpl.mock.calls) {
+      expect(new URL(String(call[0])).pathname).toBe('/a11y_tree');
+    }
+  });
+
   it('fails closed on invalid coordinates and oversized declared responses', async () => {
     const fetchImpl = vi.fn(async () => response('{}', { contentLength: 3 * 1024 * 1024 })) as unknown as FetchLike;
     const client = new GuiAgentClient('http://192.168.66.98:8000', fetchImpl);

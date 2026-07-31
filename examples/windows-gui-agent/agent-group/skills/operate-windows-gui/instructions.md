@@ -7,11 +7,12 @@ received the input; verify the application result separately.
 ## Start safely
 
 1. Call `gui_health` before the first desktop action in each user request.
-2. Call `gui_observe` with `scope: "foreground"`.
+2. Call `gui_observe` with `scope: "foreground"` and
+   `include_screenshot: false`.
 3. Identify the application, target control, enabled/off-screen state, and
    current value from the accessibility tree.
-4. Use the screenshot returned by `gui_observe` only when the tree does not
-   sufficiently describe the visible layout.
+4. Only when the tree does not sufficiently describe the visible layout, make
+   a second bounded `gui_observe` call with `include_screenshot: true`.
 5. If the intended window is not foreground, use a shallow
    `scope: "desktop"` observation or `gui_find_element` to locate it. Do not
    enumerate unrelated windows more deeply than necessary.

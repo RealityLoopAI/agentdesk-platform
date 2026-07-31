@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { initTestSessionDb } from '../db/connection.js';
 import { getContinuation, setContinuation } from '../db/session-state.js';
 import type { ProviderEvent } from './types.js';
-import { estimateFullRequestChars, OpenAIProvider } from './openai.js';
+import {
+  boundTranscriptToRequestBudget,
+  estimateFullRequestChars,
+  formatToolResult,
+  OpenAIProvider,
+} from './openai.js';
 
 const originalFetch = globalThis.fetch;
 
@@ -153,6 +158,44 @@ describe('OpenAIProvider', () => {
     expect(failure).toBeInstanceOf(Error);
     expect((failure as Error).message).toMatch(/routing.*tool call/i);
     expect(requests).toEqual(['https://example.com/v1/responses']);
+  });
+
+  it('omits MCP image bytes instead of serializing base64 into tool text', () => {
+    const base64 = Buffer.alloc(1_024, 0xab).toString('base64');
+    const output = formatToolResult({
+      content: [
+        { type: 'text', text: '{"window":"Console"}' },
+        { type: 'image', data: base64, mimeType: 'image/png' },
+      ],
+    });
+
+    expect(output).toContain('{"window":"Console"}');
+    expect(output).toContain('MCP image omitted from text tool output: image/png, 1024 decoded bytes');
+    expect(output).not.toContain(base64);
+  });
+
+  it('caps MCP text results and asks the model to retry with narrower parameters', () => {
+    const output = formatToolResult({
+      content: [{ type: 'text', text: 'x'.repeat(80_000) }],
+    });
+
+    expect(output.length).toBeLessThan(65_000);
+    expect(output).toContain('Tool output truncated');
+    expect(output).toContain('Retry with narrower parameters');
+  });
+
+  it('re-applies the request budget without retaining an orphaned tool output', () => {
+    const transcript = [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'inspect' }] },
+      { type: 'function_call', call_id: 'call_large', name: 'observe', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_large', output: 'x'.repeat(20_000) },
+    ];
+
+    const bounded = boundTranscriptToRequestBudget(transcript, undefined, [], 16_000);
+
+    expect(bounded.trimmed).toBe(true);
+    expect(bounded.transcript.some((item) => item.type === 'function_call_output')).toBe(false);
+    expect(estimateFullRequestChars(bounded.transcript, undefined, []).totalChars).toBeLessThanOrEqual(16_000);
   });
 
   it('counts instructions and tool schemas in the full request budget', () => {

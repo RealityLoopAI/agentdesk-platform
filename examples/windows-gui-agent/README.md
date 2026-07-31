@@ -74,7 +74,10 @@ curl --noproxy '*' --fail \
 
 Then ask Frontdesk to inspect the current Windows foreground window. The worker
 must call `gui_health`, observe the UI, and report the current window without
-performing a consequential action.
+performing a consequential action. `gui_observe` is tree-only by default;
+request `include_screenshot: true` only when the accessibility tree is
+insufficient. On text-only OpenAI-compatible provider paths, binary MCP image
+blocks are intentionally omitted rather than serialized as base64 text.
 
 ## Security and rollback
 

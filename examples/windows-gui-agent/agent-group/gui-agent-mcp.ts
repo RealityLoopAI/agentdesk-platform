@@ -138,7 +138,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'gui_observe',
-    description: 'Read the current Windows accessibility tree and optionally capture a screenshot.',
+    description:
+      'Read the current Windows accessibility tree. Capture a screenshot only when include_screenshot is explicitly true.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -146,7 +147,7 @@ const TOOL_DEFINITIONS = [
         max_depth: { type: 'integer', minimum: 1, maximum: 10, default: 6 },
         max_children_per_node: { type: 'integer', minimum: 1, maximum: 500, default: 200 },
         scope: { type: 'string', enum: ['foreground', 'desktop'], default: 'foreground' },
-        include_screenshot: { type: 'boolean', default: true },
+        include_screenshot: { type: 'boolean', default: false },
       },
     },
   },
@@ -242,7 +243,7 @@ export async function callGuiTool(client: GuiAgentClient, name: string, args: Js
           scope,
         });
         const content: ToolContent[] = [{ type: 'text', text: JSON.stringify(tree) }];
-        if (args.include_screenshot !== false) {
+        if (args.include_screenshot === true) {
           const screenshot = await client.screenshot();
           content.push({ type: 'image', ...screenshot });
         }

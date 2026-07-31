@@ -34,6 +34,7 @@ const MAX_REPLAY_TRANSCRIPT_ITEMS = 128;
 const MAX_REPLAY_TRANSCRIPT_CHARS = 120_000;
 const DEFAULT_MAX_REQUEST_CONTEXT_CHARS = 240_000;
 const MIN_MAX_REQUEST_CONTEXT_CHARS = 16_000;
+const DEFAULT_MAX_TOOL_RESULT_TEXT_CHARS = 64_000;
 // Soft threshold (chars of JSON-serialized transcript) above which we trigger
 // summary-based compaction *before* the next API call. Sits between the
 // 120k hard trim ceiling and Claude's 165k-token auto-compact window so the
@@ -239,7 +240,18 @@ function toolInputSchema(tool: Tool): Record<string, unknown> {
   return isRecord(raw) ? raw : defaultInputSchema();
 }
 
-function formatToolResult(result: CallToolResult): string {
+function decodedBase64Bytes(data: string): number {
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
+
+function truncateToolResult(text: string): string {
+  if (text.length <= DEFAULT_MAX_TOOL_RESULT_TEXT_CHARS) return text;
+  const omitted = text.length - DEFAULT_MAX_TOOL_RESULT_TEXT_CHARS;
+  return `${text.slice(0, DEFAULT_MAX_TOOL_RESULT_TEXT_CHARS)}\n\n[Tool output truncated: ${omitted} characters omitted. Retry with narrower parameters.]`;
+}
+
+export function formatToolResult(result: CallToolResult): string {
   const parts: string[] = [];
   const withStructured = result as CallToolResult & { structuredContent?: unknown };
 
@@ -261,6 +273,15 @@ function formatToolResult(result: CallToolResult): string {
         parts.push(JSON.stringify(item.json, null, 2));
         continue;
       }
+      if (item.type === 'image') {
+        const mimeType = typeof item.mimeType === 'string' ? item.mimeType : 'unknown';
+        const bytes = typeof item.data === 'string' ? decodedBase64Bytes(item.data) : 0;
+        parts.push(
+          `[MCP image omitted from text tool output: ${mimeType}, ${bytes} decoded bytes. ` +
+            'This provider path does not advertise multimodal tool-result support.]',
+        );
+        continue;
+      }
       parts.push(JSON.stringify(item, null, 2));
     }
   }
@@ -273,9 +294,9 @@ function formatToolResult(result: CallToolResult): string {
     .filter((part) => part.trim().length > 0)
     .join('\n\n')
     .trim();
-  return (
+  return truncateToolResult(
     joined ||
-    (result.isError ? 'Tool returned an error with no details.' : 'Tool completed successfully with no output.')
+      (result.isError ? 'Tool returned an error with no details.' : 'Tool completed successfully with no output.'),
   );
 }
 
@@ -328,6 +349,10 @@ function trimTranscriptTo(items: JsonObject[], maxChars: number): JsonObject[] {
     total -= sizes[start] ?? 0;
     start += 1;
   }
+  // Never retain the output half of a tool pair after its call was trimmed.
+  while (start < capped.length && capped[start]?.type === 'function_call_output') {
+    start += 1;
+  }
   return capped.slice(start);
 }
 
@@ -370,6 +395,33 @@ export function estimateFullRequestChars(
     fixedChars,
     totalChars: fixedChars + totalTranscriptChars(transcript),
   };
+}
+
+export function boundTranscriptToRequestBudget(
+  transcript: JsonObject[],
+  instructions: string | undefined,
+  tools: OpenAIFunctionTool[],
+  maxRequestContextChars: number,
+): { transcript: JsonObject[]; trimmed: boolean } {
+  const requestBudget = estimateFullRequestChars(transcript, instructions, tools);
+  const transcriptBudget = maxRequestContextChars - requestBudget.fixedChars;
+  if (transcriptBudget <= 0) {
+    throw new Error(
+      `OpenAI fixed request context exceeds configured budget (${requestBudget.fixedChars}/${maxRequestContextChars} chars)`,
+    );
+  }
+  if (requestBudget.totalChars <= maxRequestContextChars) {
+    return { transcript, trimmed: false };
+  }
+
+  const bounded = trimTranscriptTo(transcript, transcriptBudget);
+  const boundedRequest = estimateFullRequestChars(bounded, instructions, tools);
+  if (boundedRequest.totalChars > maxRequestContextChars) {
+    throw new Error(
+      `OpenAI request context exceeds configured budget after compaction (${boundedRequest.totalChars}/${maxRequestContextChars} chars)`,
+    );
+  }
+  return { transcript: bounded, trimmed: true };
 }
 
 /**
@@ -1181,21 +1233,14 @@ export class OpenAIProvider implements AgentProvider {
       }
     }
 
-    const requestBudget = estimateFullRequestChars(transcript, params.instructions, tools);
-    const transcriptBudget = this.maxRequestContextChars - requestBudget.fixedChars;
-    if (transcriptBudget <= 0) {
-      throw new Error(
-        `OpenAI fixed request context exceeds configured budget (${requestBudget.fixedChars}/${this.maxRequestContextChars} chars)`,
-      );
-    }
-    if (requestBudget.totalChars > this.maxRequestContextChars) {
-      transcript = trimTranscriptTo(transcript, transcriptBudget);
-      const trimmedRequest = estimateFullRequestChars(transcript, params.instructions, tools);
-      if (trimmedRequest.totalChars > this.maxRequestContextChars) {
-        throw new Error(
-          `OpenAI request context exceeds configured budget after compaction (${trimmedRequest.totalChars}/${this.maxRequestContextChars} chars)`,
-        );
-      }
+    const initialBound = boundTranscriptToRequestBudget(
+      transcript,
+      params.instructions,
+      tools,
+      this.maxRequestContextChars,
+    );
+    transcript = initialBound.transcript;
+    if (initialBound.trimmed) {
       mode = 'stateless';
       previousResponseId = undefined;
     }
@@ -1330,6 +1375,20 @@ export class OpenAIProvider implements AgentProvider {
       }
 
       transcript = appendTranscript(transcript, [...responseItems, ...toolOutputs]);
+      // Tool output is new context. Re-apply the request ceiling before every
+      // subsequent model call; checking only at turn entry lets one large tool
+      // result bypass the guard.
+      const postToolBound = boundTranscriptToRequestBudget(
+        transcript,
+        params.instructions,
+        tools,
+        this.maxRequestContextChars,
+      );
+      transcript = postToolBound.transcript;
+      if (postToolBound.trimmed) {
+        mode = 'stateless';
+        previousResponseId = undefined;
+      }
       const continuation = serializeContinuationState({
         v: 2,
         mode,
@@ -1338,7 +1397,7 @@ export class OpenAIProvider implements AgentProvider {
         transcript,
       });
       this.persistExecutionContinuation(continuation);
-      previousResponseId = responseId;
+      previousResponseId = postToolBound.trimmed ? undefined : responseId;
       nextInput = transport === 'responses' && mode === 'responses' ? toolOutputs : transcript;
     }
   }
@@ -1513,6 +1572,12 @@ export class OpenAIProvider implements AgentProvider {
     if (this.reasoningEffort) {
       body.reasoning = { effort: this.reasoningEffort };
     }
+    const serializedBody = JSON.stringify(body);
+    if (serializedBody.length > this.maxRequestContextChars) {
+      throw new Error(
+        `OpenAI serialized request exceeds configured budget (${serializedBody.length}/${this.maxRequestContextChars} chars)`,
+      );
+    }
 
     try {
       for (let attempt = 1; attempt <= this.maxRequestAttempts; attempt += 1) {
@@ -1522,7 +1587,7 @@ export class OpenAIProvider implements AgentProvider {
             fetch(`${this.baseUrl}/responses`, {
               method: 'POST',
               headers: this.requestHeaders(),
-              body: JSON.stringify(body),
+              body: serializedBody,
               signal: controller.signal,
             }),
           );
@@ -1625,6 +1690,12 @@ export class OpenAIProvider implements AgentProvider {
       body.tool_choice = 'auto';
       body.parallel_tool_calls = false;
     }
+    const serializedBody = JSON.stringify(body);
+    if (serializedBody.length > this.maxRequestContextChars) {
+      throw new Error(
+        `OpenAI serialized chat completion request exceeds configured budget (${serializedBody.length}/${this.maxRequestContextChars} chars)`,
+      );
+    }
 
     try {
       for (let attempt = 1; attempt <= this.maxRequestAttempts; attempt += 1) {
@@ -1634,7 +1705,7 @@ export class OpenAIProvider implements AgentProvider {
             fetch(`${this.baseUrl}/chat/completions`, {
               method: 'POST',
               headers: this.requestHeaders(),
-              body: JSON.stringify(body),
+              body: serializedBody,
               signal: controller.signal,
             }),
           );

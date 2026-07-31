@@ -143,6 +143,7 @@ ADR 是低成本的反熵机制：5 分钟落一份，下一个 agent 节省数�
 | [ADR-0089](ADR-0089-closed-scene-routed-voice-json-ingest.md) | 视觉 JSON 按封闭场景路由到多维表格 | Accepted | 2026-07-30 | `vision`, `json`, `bitable`, `routing`, `closed-scene` |
 | [ADR-0090](ADR-0090-deterministic-transcript-marker-field-extraction.md) | 用配置化 transcript 标记选择器补齐关键语音字段 | Accepted | 2026-07-30 | `voice`, `transcript`, `field-mapping`, `configuration` |
 | [ADR-0091](ADR-0091-host-projected-read-only-web-question-cards.md) | 由 Host 投影 Web 只读问题卡片 | Accepted | 2026-07-31 | `web`, `feishu`, `interactive`, `history`, `security`, `backward-compat` |
+| [ADR-0092](ADR-0092-binary-mcp-results-and-per-request-budgets.md) | 隔离二进制 MCP 结果并逐次约束模型请求 | Accepted | 2026-07-31 | `agent-runner`, `openai`, `mcp`, `multimodal`, `context-budget`, `reliability` |
 
 ---
 

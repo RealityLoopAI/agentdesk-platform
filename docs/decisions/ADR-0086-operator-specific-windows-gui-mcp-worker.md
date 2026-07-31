@@ -61,6 +61,7 @@ operation，而不是把本示例当成平行业务授权路径。
    后果性动作先向原用户确认；
 6. `operate-windows-gui` 作为 Worker 私有 Skill，固化
    observe → target → confirm → act → verify 工作流，只在该组启用；
+   `gui_observe` 默认只返回 a11y tree，截图必须显式请求（见 ADR-0092）；
 7. 拓扑安装器只在专用 Worker 注册该 MCP，并用 `gui` alias 接入 Frontdesk；
 8. 运营者必须用 AgentDesk 组访问控制及网络 ACL 把该 Worker 限定给可信用户，
    不得将无认证端口暴露到公网或不可信 LAN。
@@ -68,7 +69,8 @@ operation，而不是把本示例当成平行业务授权路径。
 ## Consequences
 
 - **Positive**: 平台核心、DB、Gateway contract 和通道契约零改动；GUI 能力按组
-  隔离；a11y tree 与截图可在一次观察中共同返回；端点漂移只改一处配置。
+  隔离；显式请求时 a11y tree 与截图可在一次观察中共同返回；端点漂移只改一处
+  配置。
 - **Negative**: Windows 服务不接收 AgentDesk 可信身份，也没有服务端确认令牌；
   因而本示例不能为 ERP/CRM 等逐用户业务授权场景提供安全边界。提示词确认是
   人机交互保护，不等价于后端授权。
