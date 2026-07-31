@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Operate Windows GUI'
+  short_description: 'Inspect and safely operate a Windows desktop'
+  default_prompt: 'Use $operate-windows-gui to inspect the current Windows foreground application without making changes.'
