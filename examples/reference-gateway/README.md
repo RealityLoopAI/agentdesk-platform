@@ -23,6 +23,13 @@ operations, but is still a reference implementation: its idempotency and
 confirmation-use stores are in memory. Production must persist those records
 transactionally.
 
+A dedicated unattended single-record Create resource may additionally set
+`machineIngestRequired: true` and a Gateway-only `machineIngestHmacKey` of at
+least 32 characters. The Gateway then requires an idempotency proof bound to
+the source digest, logical resource and exact fields. The key is never exposed
+through Describe, and canonical requester, writer policy, schema validation,
+audit and idempotency checks still apply.
+
 > **Going to production?** [`docs/gateway-kickstart.md`](../../docs/gateway-kickstart.md)
 > walks this skeleton → your backend, with the hardening recipes (identity
 > mapping, permission denial, idempotency, audit, HMAC + clock-skew + nonce

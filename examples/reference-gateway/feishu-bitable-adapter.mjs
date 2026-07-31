@@ -305,6 +305,9 @@ export function createFeishuBitableAdapter(options) {
       const dryRun = req?.dryRun === true;
       const mutating = WRITE_OPERATIONS.has(operation);
       const idempotencyKey = typeof req?.idempotencyKey === 'string' ? req.idempotencyKey.trim() : '';
+      if (operation === 'feishu.bitable.record.create' && resource.machineIngestRequired && !dryRun) {
+        verifyMachineIngestIdempotencyKey(idempotencyKey, input, resource);
+      }
       let idempotencyBinding;
       if (mutating && !dryRun) {
         if (!idempotencyKey) {
@@ -1386,6 +1389,12 @@ function normalizeResources(resources) {
         throw new Error(`resource ${alias} has invalid atomic batch operation: ${operation}`);
       }
     }
+    if (value.machineIngestRequired !== undefined && typeof value.machineIngestRequired !== 'boolean') {
+      throw new Error(`resources.${alias}.machineIngestRequired must be a boolean`);
+    }
+    if (value.machineIngestRequired !== true && value.machineIngestHmacKey !== undefined) {
+      throw new Error(`resources.${alias}.machineIngestHmacKey requires machineIngestRequired=true`);
+    }
     normalized.set(alias, {
       alias,
       appToken: value.appToken.trim(),
@@ -1400,9 +1409,51 @@ function normalizeResources(resources) {
       sorts: normalizeAliasMap(value.sorts),
       atomicBatchOperations,
       allowedOperations,
+      machineIngestRequired: value.machineIngestRequired === true,
+      machineIngestHmacKey:
+        value.machineIngestRequired === true
+          ? (requireSecret(`resources.${alias}.machineIngestHmacKey`, value.machineIngestHmacKey, 32),
+            value.machineIngestHmacKey.trim())
+          : null,
     });
   }
   return normalized;
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+    .join(',')}}`;
+}
+
+function verifyMachineIngestIdempotencyKey(idempotencyKey, input, resource) {
+  const match = /^voice-photo-json-v1:([a-f0-9]{64}):([a-f0-9]{64})$/.exec(idempotencyKey);
+  if (!match) {
+    throw new AdapterError(
+      'MACHINE_INGEST_PROOF_REQUIRED',
+      'this logical resource requires a valid machine-ingest proof for record creation',
+      { status: 403 },
+    );
+  }
+  const [, digest, suppliedSignature] = match;
+  const payload = canonicalJson({
+    version: 'voice-photo-json.v1',
+    digest,
+    resource: resource.alias,
+    fields: input.fields,
+  });
+  const expected = crypto.createHmac('sha256', resource.machineIngestHmacKey).update(payload).digest();
+  const supplied = Buffer.from(suppliedSignature, 'hex');
+  if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) {
+    throw new AdapterError(
+      'MACHINE_INGEST_PROOF_INVALID',
+      'machine-ingest proof does not match the requested resource and fields',
+      { status: 403 },
+    );
+  }
 }
 
 function validateOperationInput(operation, rawInput) {

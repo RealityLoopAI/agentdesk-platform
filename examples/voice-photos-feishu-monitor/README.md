@@ -1,172 +1,97 @@
-# Voice Photos → Feishu Monitor
+# Voice-photo JSON → Feishu Bitable
 
-This optional operator service recursively polls an OS-mounted
-`voice_photos` SMB directory and sends each completed image that appears after
-the first durable baseline to one configured RealityLoop bot private
-conversation.
+This operator-specific example runs two independent pollers over the read-only
+mounted form of `smb://192.168.66.149/video_database/voice_photos`:
 
-It is intentionally separate from Agent execution:
+- the original image monitor continues pushing stable post-baseline images to
+  the configured RealityLoop Feishu private chat;
+- the JSON monitor validates stable post-baseline analysis files and
+  automatically writes qualifying results to Bitable.
 
-- no inbound chat or synthetic Agent turn;
-- no LLM, skill, Backend Gateway, Conversation Lane subscription, or Session
-  `messages_out` write;
-- no SMB credential in Node configuration;
-- no write, delete, rename, lock, or acknowledgement in the monitored tree.
+Each path keeps its own SQLite baseline, retries, and completion state. A
+failure in one path does not stop the other.
 
-## 1. Mount the SMB share read-only
+## Qualification and mapping
 
-The service accepts a local absolute path, not an `smb://` URL. Keep SMB
-credentials in the operating-system credential facility.
+A file qualifies only when the top-level result is `画面状态=清晰`,
+`有读数=true`, required fields and confidences are valid, and `采用图片`
+references a clear frame whose numeric value and unit match the final result.
+Its exact scene must exist in `VOICE_PHOTOS_SCENE_ROUTES_JSON`, and its unit
+must be accepted by that route.
 
-macOS example (the command prompts or uses Keychain; do not put a password in
-shell history):
+| JSON scene | Logical resource          | Target fields                                                                      |
+| ---------- | ------------------------- | ---------------------------------------------------------------------------------- |
+| `场景一`   | `voice.photo.scene1`      | `批次=测试版本`, `转速=<最终数值>`; unit `rpm`                                     |
+| `场景二`   | `voice.photo.scene2`      | `批次=测试版本`, `设备仪器=链路测试`, `无水氯化铜（克）=<最终数值>`; unit `g`/`克` |
+| `环境`     | `voice.photo.environment` | `批次=测试版本`, `温度="<最终数值> <单位>"`                                        |
 
-```bash
-sudo mkdir -p /Volumes/video_database
-mount_smbfs -o ro //SMB_USER@192.168.66.149/video_database /Volumes/video_database
-```
+The current scene-two table exposes `链路测试` as its compatible
+`设备仪器` single-select option. If operators add an exact `测试版本` option,
+they may change only that route's static value after verifying the live schema.
+Unknown scenes never fall back to another table.
 
-Linux example using a root-readable credentials file:
+Qualified JSON data is written automatically; no Feishu confirmation card is
+created. The Host constructs fields and a content/resource/fields-bound HMAC.
+The Gateway verifies it. The JSON path has no physical Bitable IDs or direct
+Gateway/Bitable client. The image path retains the existing Feishu credentials
+only for upload and delivery to its fixed P2P target.
 
-```bash
-sudo mkdir -p /mnt/video_database
-sudo mount -t cifs //192.168.66.149/video_database /mnt/video_database \
-  -o ro,credentials=/root/.smb-video-database,vers=3.0
-```
+## Deployment
 
-Confirm that the local monitor root is readable and not writable by the
-service account. The expected root is:
+1. Mount the SMB directory read-only and load `.env.example` from an
+   operator-owned secret environment.
+2. Create the dedicated machine route and group-specific Worker instructions:
 
-```text
-/Volumes/video_database/voice_photos
-```
+   ```bash
+   pnpm voice-photos:configure -- \
+     --user-id <existing-canonical-user-id> \
+     --platform-id voice-photo-json:realityloop
+   ```
 
-or the corresponding Linux path.
+   The reconciler also adds that canonical user as a member of only this
+   dedicated Worker group and copies the Provider/Backend Gateway connection
+   from the existing `agentdesk-bitable-worker`. Override
+   `--gateway-template-folder` only when the deployment uses another approved
+   Gateway-enabled Worker template.
 
-## 2. Configure
+3. Create one dedicated logical resource alias for every scene table in
+   `FEISHU_BITABLE_RESOURCES_JSON`. Keep the normal writer policy, allow Field
+   List, Record Create and Record Get, then add this policy to every alias:
 
-Copy `.env.example` to an operator-owned secret file outside version control.
-Required values are:
+   ```json
+   {
+     "machineIngestRequired": true,
+     "machineIngestHmacKey": "<same secret as VOICE_PHOTOS_MACHINE_INGEST_HMAC_KEY>"
+   }
+   ```
 
-- `VOICE_PHOTOS_ROOT`: local absolute mounted directory.
-- `VOICE_PHOTOS_STATE_DB`: writable local SQLite path outside the SMB root.
-- `VOICE_PHOTOS_FEISHU_TARGET`: exactly one `feishu:p2p:ou_*` address.
-- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`: the existing RealityLoop bot app.
+4. Keep `VOICE_PHOTOS_IMAGE_MONITOR_ENABLED=true`, set
+   `VOICE_PHOTOS_JSON_MONITOR_ENABLED=true`, configure the closed
+   `VOICE_PHOTOS_SCENE_ROUTES_JSON` mapping, and provide two different state
+   paths:
 
-The monitor rejects SMB URLs, relative paths, state files inside the monitored
-root, group targets, malformed Open IDs, missing credentials, and unsafe
-numeric limits before scanning or contacting Feishu.
+   - `VOICE_PHOTOS_STATE_DB` for images;
+   - `VOICE_PHOTOS_JSON_STATE_DB` for JSON ingestion.
 
-Recommended production defaults:
+   Then run:
 
-```env
-VOICE_PHOTOS_POLL_INTERVAL_MS=5000
-VOICE_PHOTOS_STABILITY_SCANS=2
-VOICE_PHOTOS_MAX_IMAGE_BYTES=20971520
-VOICE_PHOTOS_MAX_CANDIDATES_PER_SCAN=100000
-VOICE_PHOTOS_DELIVERY_CONCURRENCY=1
-VOICE_PHOTOS_MAX_SENDS_PER_MINUTE=30
-```
+   ```bash
+   pnpm voice-photos:monitor
+   ```
 
-Protect the state directory because it contains filenames, event IDs, delivery
-status, and Feishu message IDs:
+Wait for both `voice_photo_monitor_ready` and
+`voice_photo_json_baseline_complete`; neither baseline emits output. Then add a
+new image and a new valid JSON. Verify one image reaches the fixed RealityLoop
+private chat, `voice_photo_json_submitted` appears, the Gateway audit contains
+the Create/Get, a real Record ID exists, and no confirmation card appears.
+Each JSON digest gets an isolated thread/session, so an earlier Worker response
+cannot become context for a later file.
 
-```bash
-install -d -m 0700 /absolute/writable/path/voice-photo-monitor
-```
+## Rotation and rollback
 
-## 3. Start and establish the baseline
-
-Load the secret environment with the operator's process manager, then run:
-
-```bash
-pnpm voice-photos:monitor
-```
-
-On the first successful complete scan, every existing supported image is
-stored as historical baseline state and **none is sent**. Notification
-semantics start only after this structured log appears:
-
-```json
-{ "level": "info", "event": "voice_photo_monitor_ready", "baselineCount": 123 }
-```
-
-An image visible during that initial scan and included in the committed
-snapshot is historical. If the share is unavailable or the bounded scan fails,
-the baseline does not partially commit and the service stays unready.
-
-Keep the SQLite database across restarts. Removing it is an explicit reset and
-causes a new no-send baseline. A normal restart reuses the old baseline,
-delivery states, and stable Feishu request UUIDs.
-
-## Detection and delivery behavior
-
-- Polls recursively and serially; correctness does not depend on `fs.watch`.
-- Supports `.jpg`, `.jpeg`, `.png`, `.gif`, `.webp`, and `.bmp`.
-- Ignores hidden, temporary, symlinked, non-regular, and unsupported entries.
-- Requires unchanged identity, size, modification time, and change time across
-  at least two successful scans.
-- Rechecks metadata before and after a bounded read and validates image magic
-  bytes.
-- Sends each image as a separate Feishu image message.
-- Stores path/content event identity before sending and reuses one Feishu
-  request UUID across retries.
-- Applies persistent retry scheduling, single-owner leases, concurrency and
-  per-minute send limits.
-- Treats an SMB outage as unavailable state; it does not reset the baseline,
-  infer deletions, or replay historical images after reconnect.
-
-A file created and removed entirely between two polls cannot be detected. The
-producer must retain completed files.
-
-## Health and diagnosis
-
-Important structured events:
-
-- `voice_photo_monitor_ready`
-- `voice_photo_scan_complete`
-- `voice_photo_scan_unavailable`
-- `voice_photo_validation_failed`
-- `voice_photo_delivery_retry`
-- `voice_photo_delivered`
-- `voice_photo_delivery_terminal`
-
-Logs omit credentials, tokens, image bytes, the concrete configured Open ID,
-and unbounded provider response bodies. Queue depth in
-`voice_photo_scan_complete` should normally return to zero.
-
-Common failures:
-
-- `SMB_UNAVAILABLE`: verify the OS mount and permissions; do not delete state.
-- `SCAN_LIMIT_EXCEEDED`: inspect root size and deliberately raise the candidate
-  bound if the tree is trusted.
-- `INVALID_IMAGE_SIGNATURE`: producer created an unsupported or malformed file.
-- `IMAGE_TOO_LARGE`: raise the byte limit only after checking Feishu and memory
-  constraints.
-- `FEISHU_*_TIMEOUT` / throttling: retained and retried with bounded backoff.
-- ownership error: another process is using the same state database.
-
-## Safe smoke test
-
-1. Start the service with a fresh local state database and the real read-only
-   mount.
-2. Wait for `voice_photo_monitor_ready`; verify the historical tree caused zero
-   `voice_photo_delivered` events and no private-chat images.
-3. Ask the producer or an approved fixture writer—not the monitor process—to
-   create one uniquely named valid image after readiness. Keep the monitor's
-   mount read-only.
-4. Wait for two polls and verify exactly one image in the configured private
-   conversation plus one `voice_photo_delivered` event.
-5. Restart with the same state database and verify the image is not replayed.
-
-Do not edit or delete producer-owned historical files for this test.
-
-## Shutdown and rollback
-
-`SIGINT` and `SIGTERM` stop new scans, abort the poll wait, release the
-single-owner lease, and close SQLite. The process manager should allow at least
-`VOICE_PHOTOS_SHUTDOWN_DEADLINE_MS`.
-
-Rollback is to stop and disable this optional service. Retain the SQLite
-database so a later re-enable does not replay history. AgentDesk host routing,
-containers, Gateways, and conversation databases require no rollback.
+For key rotation, stop the Host, update both machine-key locations, then
+restart. Old proofs fail closed. To disable only JSON ingestion, set
+`VOICE_PHOTOS_JSON_MONITOR_ENABLED=false`; image notification remains enabled.
+The NAS is never mutated. Retaining both SQLite files preserves independent
+deduplication; replacing either DB deliberately establishes a fresh baseline
+for only that path.

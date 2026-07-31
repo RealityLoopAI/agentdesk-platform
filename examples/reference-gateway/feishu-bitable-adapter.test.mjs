@@ -6,6 +6,7 @@ import {
   createFeishuBitableAdapter,
   loadFeishuBitableConfigFromEnv,
 } from './feishu-bitable-adapter.mjs';
+import crypto from 'node:crypto';
 
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
@@ -1108,6 +1109,80 @@ test('idempotency replay returns the first committed record and rejects key rebi
     input: { resource: 'sales.pipeline', fields: { Name: 'Different input' } },
   });
   assert.equal(rebound.body.code, 'CONFLICT');
+  assert.equal(createCalls, 1);
+});
+
+test('machine-ingest resources only accept a proof bound to resource and exact create fields', async () => {
+  const key = 'machine-ingest-secret-at-least-32-characters';
+  let createCalls = 0;
+  const resources = {
+    'voice.measurements': {
+      appToken: APP_TOKEN,
+      tableId: TABLE_ID,
+      readers: [ALICE],
+      writers: [ALICE],
+      requiredFields: ['Name'],
+      allowedOperations: ['feishu.bitable.record.create'],
+      machineIngestRequired: true,
+      machineIngestHmacKey: key,
+    },
+  };
+  const { adapter } = makeHarness(
+    ({ url, body }) => {
+      if (url.pathname.endsWith('/records')) {
+        createCalls += 1;
+        return json({ code: 0, data: { record: { record_id: 'rec-machine', fields: body.fields } } });
+      }
+      throw new Error(`unexpected path ${url.pathname}`);
+    },
+    { resources },
+  );
+  const fields = { Name: '测试版本' };
+  const digest = crypto.createHash('sha256').update('analysis').digest('hex');
+  const canonical = JSON.stringify({
+    digest,
+    fields,
+    resource: 'voice.measurements',
+    version: 'voice-photo-json.v1',
+  });
+  const signature = crypto.createHmac('sha256', key).update(canonical).digest('hex');
+  const validKey = `voice-photo-json-v1:${digest}:${signature}`;
+
+  const missing = await adapter.execute(
+    request(
+      'feishu.bitable.record.create',
+      { resource: 'voice.measurements', fields },
+      { idempotencyKey: 'ordinary-create' },
+    ),
+  );
+  assert.equal(missing.body.code, 'MACHINE_INGEST_PROOF_REQUIRED');
+
+  const tampered = await adapter.execute(
+    request(
+      'feishu.bitable.record.create',
+      { resource: 'voice.measurements', fields: { Name: 'tampered' } },
+      { idempotencyKey: validKey },
+    ),
+  );
+  assert.equal(tampered.body.code, 'MACHINE_INGEST_PROOF_INVALID');
+
+  const wrongDigest = await adapter.execute(
+    request(
+      'feishu.bitable.record.create',
+      { resource: 'voice.measurements', fields },
+      { idempotencyKey: validKey.replace(digest, '0'.repeat(64)) },
+    ),
+  );
+  assert.equal(wrongDigest.body.code, 'MACHINE_INGEST_PROOF_INVALID');
+
+  const created = await adapter.execute(
+    request('feishu.bitable.record.create', { resource: 'voice.measurements', fields }, { idempotencyKey: validKey }),
+  );
+  assert.equal(created.result.recordId, 'rec-machine');
+  const replayed = await adapter.execute(
+    request('feishu.bitable.record.create', { resource: 'voice.measurements', fields }, { idempotencyKey: validKey }),
+  );
+  assert.equal(replayed.replayed, true);
   assert.equal(createCalls, 1);
 });
 
