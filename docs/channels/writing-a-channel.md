@@ -50,7 +50,7 @@ Inbound flows in via the `ChannelSetup` callbacks the host passes to `setup()`:
 `onAction`. See the in-tree `cli` adapter (`src/channels/cli.ts`) for a small,
 complete reference.
 
-### 可信发送者身份（ADR-0054）
+### 可信发送者身份（ADR-0061）
 
 如果平台回调已经以签名、长连接 SDK 或等价协议验证了发送者，适配器可以在
 `InboundMessage.senderIdentity` 中附带：

@@ -248,7 +248,11 @@ function normalizeProviderModel(value: unknown): string | undefined {
   // Docker receives argv directly, but control characters can still split or
   // corrupt environment entries and logs. Printable Unicode is otherwise
   // accepted because OpenAI-compatible relays own their model naming scheme.
-  return /[\u0000-\u001f\u007f]/u.test(trimmed) ? undefined : trimmed;
+  for (const character of trimmed) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)) return undefined;
+  }
+  return trimmed;
 }
 
 /**

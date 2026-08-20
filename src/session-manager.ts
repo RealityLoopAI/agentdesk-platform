@@ -173,7 +173,7 @@ function isUserScopedSessionMode(
  * frontdesk-style sessions start at 0.
  *
  * `conversationLaneId` is a Host-verified cross-channel structural key
- * (ADR-0055). It is never derived from conversation_thread_id.
+ * (ADR-0062). It is never derived from conversation_thread_id.
  */
 export function resolveSession(
   agentGroupId: string,
@@ -405,7 +405,7 @@ export function writeSessionMessage(
      * who ultimately triggered the chain. Propagates identity into worker
      * sessions so downstream ERP calls don't fall back to agent-asserted.
      * On channel-side inbound, the Host stamps the canonical user resolved by
-     * the permissions module (ADR-0054). Legacy rows may still be NULL and fall
+     * the permissions module (ADR-0061). Legacy rows may still be NULL and fall
      * back to senderId embedded in content.
      */
     originUserId?: string | null;

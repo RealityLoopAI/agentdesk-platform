@@ -3,7 +3,7 @@
  *
  * Zero dependencies: Node built-ins + global fetch only. The adapter deliberately
  * lives under the reference Gateway, not under src/channels/feishu: chat ingress
- * must never become a parallel business-data path (ADR-0056).
+ * must never become a parallel business-data path (ADR-0063).
  *
  * This is a security-focused reference, not a production persistence layer.
  * Production deployments must replace the in-memory idempotency and confirmation

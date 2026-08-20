@@ -605,8 +605,18 @@ describe('stale continuation recovery', () => {
     // first attempt resumed, second ran fresh — same turn, no error reply
     expect(provider.continuations).toEqual(['stale-1', undefined]);
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('recovered');
+    const chat = out.filter((message) => message.kind === 'chat');
+    const resolved = out.find((message) => {
+      if (message.kind !== 'system') return false;
+      return JSON.parse(message.content).action === 'agent_turn_resolved';
+    });
+    expect(chat).toHaveLength(1);
+    expect(JSON.parse(chat[0].content).text).toBe('recovered');
+    expect(JSON.parse(resolved!.content)).toMatchObject({
+      action: 'agent_turn_resolved',
+      status: 'completed',
+      retryable: false,
+    });
     // the stale id was cleared and the fresh session persisted
     expect(getContinuation('mock')).toBe('fresh-1');
 

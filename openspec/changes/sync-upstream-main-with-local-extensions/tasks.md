@@ -10,60 +10,60 @@
 
 ## 2. 将本地提交重放到远端底座
 
-- [ ] 2.1 在当前功能分支执行普通 `git rebase origin/main`，记录 rebase 起始目标且不使用 `--rebase-merges`、全局 ours/theirs 或自动 skip
-- [ ] 2.2 对每个冲突使用 `git rebase --show-current-patch` 和 index stages 确认 base/远端底座/本地提交的语义后再解决
-- [ ] 2.3 合并 SECURITY、CI、`package.json` 和供应链改动，保留远端安全修复与本地实际需要的脚本/依赖声明
-- [ ] 2.4 合并 Runner Provider 与入口，保留远端 dual-LLM、persona、context budget/continuation 机制和本地 OpenAI-compatible transport、重试、provider model 能力
-- [ ] 2.5 合并 Gateway 工具与文档，保留远端 memory/persona 契约和本地 Bitable/confirmation 契约，并检查签名代理、RequestIdentity 与 `gateway_audit` 未被绕过
-- [ ] 2.6 合并 container config/runner，保留远端安全读写、per-user state、OCI runtime 和本地 `providerModel`、skills、MCP servers 配置
-- [ ] 2.7 人工复核 Router、Session Manager、Delivery、poll-loop、host-sweep、metrics、A2A 和 schema 的所有自动合并结果
-- [ ] 2.8 完成全部提交重放，确认没有未解决冲突标记、没有未经证明的 skipped commit，并保存 rebase 前后提交映射
+- [x] 2.1 在当前功能分支执行普通 `git rebase origin/main`，记录 rebase 起始目标且不使用 `--rebase-merges`、全局 ours/theirs 或自动 skip
+- [x] 2.2 对每个冲突使用 `git rebase --show-current-patch` 和 index stages 确认 base/远端底座/本地提交的语义后再解决
+- [x] 2.3 合并 SECURITY、CI、`package.json` 和供应链改动，保留远端安全修复与本地实际需要的脚本/依赖声明
+- [x] 2.4 合并 Runner Provider 与入口，保留远端 dual-LLM、persona、context budget/continuation 机制和本地 OpenAI-compatible transport、重试、provider model 能力
+- [x] 2.5 合并 Gateway 工具与文档，保留远端 memory/persona 契约和本地 Bitable/confirmation 契约，并检查签名代理、RequestIdentity 与 `gateway_audit` 未被绕过
+- [x] 2.6 合并 container config/runner，保留远端安全读写、per-user state、OCI runtime 和本地 `providerModel`、skills、MCP servers 配置
+- [x] 2.7 人工复核 Router、Session Manager、Delivery、poll-loop、host-sweep、metrics、A2A 和 schema 的所有自动合并结果
+- [x] 2.8 完成全部提交重放，确认没有未解决冲突标记、没有未经证明的 skipped commit，并保存 rebase 前后提交映射
 
 ## 3. ADR 编号迁移
 
-- [ ] 3.1 生成并审查本地 ADR 映射表：0054→0061、0055→0062，依次直到 0085→0092，同时保留远端 0054～0060
-- [ ] 3.2 使用两阶段临时文件名重命名本地 ADR 文件，避免顺序重命名时覆盖目标文件
-- [ ] 3.3 更新每份 ADR 的编号、自身标题、相互引用、`docs/decisions/README.md` 索引、代码注释和相关架构/配置文档
-- [ ] 3.4 更新 OpenSpec proposal/design/tasks/spec/verification 中指向本地旧 ADR 语义的引用，不误改指向远端新 ADR-0054～0060 的引用
-- [ ] 3.5 全仓校验 ADR 文件名和索引编号唯一、0061～0092 连续，并逐项判断残留的 0054～0060 引用确实属于远端 ADR
+- [x] 3.1 生成并审查本地 ADR 映射表：0054→0061、0055→0062，依次直到 0085→0092，同时保留远端 0054～0060
+- [x] 3.2 使用两阶段临时文件名重命名本地 ADR 文件，避免顺序重命名时覆盖目标文件
+- [x] 3.3 更新每份 ADR 的编号、自身标题、相互引用、`docs/decisions/README.md` 索引、代码注释和相关架构/配置文档
+- [x] 3.4 更新 OpenSpec proposal/design/tasks/spec/verification 中指向本地旧 ADR 语义的引用，不误改指向远端新 ADR-0054～0060 的引用
+- [x] 3.5 全仓校验 ADR 文件名和索引编号唯一、0061～0092 连续，并逐项判断残留的 0054～0060 引用确实属于远端 ADR
 
 ## 4. 数据库迁移编号与升级兼容
 
-- [ ] 4.1 保留远端 `036-agent-group-role.ts`，将本地 036～044 迁移文件和对应测试文件安全顺延为 037～045
-- [ ] 4.2 更新本地迁移导出标识、import、迁移数组与测试引用，固定顺序为 035 organizations → 036 agent-group-role → 037 user-identities → 038～045 本地后续迁移
-- [ ] 4.3 逐项断言本地迁移对象的持久化 `name` 与 rebase 前完全一致，并增加防止 name 意外变化或重复的回归测试
-- [ ] 4.4 合并 `schema.ts` 的远端 `agent_groups.role` 与本地 identity/Web/Lane/Gateway schema，运行 schema/migration drift 守卫
-- [ ] 4.5 更新 `docs/db-central.md`、ADR、OpenSpec verification 和测试命令中的迁移文件编号引用
-- [ ] 4.6 在空数据库上运行完整迁移，验证全部表、索引、约束、`agent_groups.role` 和本地扩展 schema
-- [ ] 4.7 在升级前数据库副本上运行迁移，验证已有本地 migration name 不重复执行、缺失的 `agent-group-role` 正确补跑且业务数据保持不变
-- [ ] 4.8 重复运行合并后的迁移计划，验证幂等且 `schema_version.name` 无重复或遗漏
+- [x] 4.1 保留远端 `036-agent-group-role.ts`，将本地 036～044 迁移文件和对应测试文件安全顺延为 037～045
+- [x] 4.2 更新本地迁移导出标识、import、迁移数组与测试引用，固定顺序为 035 organizations → 036 agent-group-role → 037 user-identities → 038～045 本地后续迁移
+- [x] 4.3 逐项断言本地迁移对象的持久化 `name` 与 rebase 前完全一致，并增加防止 name 意外变化或重复的回归测试
+- [x] 4.4 合并 `schema.ts` 的远端 `agent_groups.role` 与本地 identity/Web/Lane/Gateway schema，运行 schema/migration drift 守卫
+- [x] 4.5 更新 `docs/db-central.md`、ADR、OpenSpec verification 和测试命令中的迁移文件编号引用
+- [x] 4.6 在空数据库上运行完整迁移，验证全部表、索引、约束、`agent_groups.role` 和本地扩展 schema
+- [x] 4.7 在升级前数据库副本上运行迁移，验证已有本地 migration name 不重复执行、缺失的 `agent-group-role` 正确补跑且业务数据保持不变
+- [x] 4.8 重复运行合并后的迁移计划，验证幂等且 `schema_version.name` 无重复或遗漏
 
 ## 5. 依赖与静态质量门
 
-- [ ] 5.1 人工确认合并后的 `package.json` 同时保留远端依赖升级、安全 overrides、lint 配置和本地 Web/Bitable/语音/GUI 依赖
-- [ ] 5.2 从无冲突的 manifest 使用 pnpm 重新生成 `pnpm-lock.yaml`，确认文件中无 conflict marker 且 lockfile 可以冻结安装
-- [ ] 5.3 执行 `pnpm typecheck` 和 CI 对应的 eslint 检查，修复所有由接口合并或依赖升级导致的错误
-- [ ] 5.4 执行完整 `pnpm test`，对需要监听本地端口的测试使用允许 loopback 的测试环境，不把 sandbox `EPERM` 误判为代码失败
-- [ ] 5.5 执行仓库供应链审计和 schema drift 检查，确认远端已修复的高危 advisory 未被本地 lockfile 回退
+- [x] 5.1 人工确认合并后的 `package.json` 同时保留远端依赖升级、安全 overrides、lint 配置和本地 Web/Bitable/语音/GUI 依赖
+- [x] 5.2 从无冲突的 manifest 使用 pnpm 重新生成 `pnpm-lock.yaml`，确认文件中无 conflict marker 且 lockfile 可以冻结安装
+- [x] 5.3 执行 `pnpm typecheck` 和 CI 对应的 eslint 检查，修复所有由接口合并或依赖升级导致的错误
+- [x] 5.4 执行完整 `pnpm test`，对需要监听本地端口的测试使用允许 loopback 的测试环境，不把 sandbox `EPERM` 误判为代码失败
+- [x] 5.5 执行仓库供应链审计和 schema drift 检查，确认远端已修复的高危 advisory 未被本地 lockfile 回退
 
 ## 6. 平台载重不变量与核心能力回归
 
-- [ ] 6.1 验证 batch RequestIdentity、`origin_user_id` A2A 传播、HMAC、Gateway signing proxy 和 `gateway_audit` 的身份信任链测试
-- [ ] 6.2 验证 Host 侧跨组织拒绝、RBAC scope、Gateway org 隔离以及 Backend Gateway-only 业务访问路径
-- [ ] 6.3 验证中央 DB/inbound.db/outbound.db 单写者、open-write-close 和附件路径 containment 未被本地扩展削弱
-- [ ] 6.4 验证 per-user state scope、旧 session continuation、自愈逻辑和 Conversation Lane 同时成立且不会跨用户串上下文
-- [ ] 6.5 验证 A2A owner cross-check、turn-anchor return path 与本地 cross-channel reply mirroring 不产生重复回复或跨用户回传
-- [ ] 6.6 验证 dual-LLM frontdesk 路由/执行、Provider continuation、context budget、`providerModel` 和 OpenAI-compatible transport 组合
-- [ ] 6.7 验证 OCI runtime 配置、container config 保全、admission queue FIFO/关闭排空和相关 Prometheus 指标
+- [x] 6.1 验证 batch RequestIdentity、`origin_user_id` A2A 传播、HMAC、Gateway signing proxy 和 `gateway_audit` 的身份信任链测试
+- [x] 6.2 验证 Host 侧跨组织拒绝、RBAC scope、Gateway org 隔离以及 Backend Gateway-only 业务访问路径
+- [x] 6.3 验证中央 DB/inbound.db/outbound.db 单写者、open-write-close 和附件路径 containment 未被本地扩展削弱
+- [x] 6.4 验证 per-user state scope、旧 session continuation、自愈逻辑和 Conversation Lane 同时成立且不会跨用户串上下文
+- [x] 6.5 验证 A2A owner cross-check、turn-anchor return path 与本地 cross-channel reply mirroring 不产生重复回复或跨用户回传
+- [x] 6.6 验证 dual-LLM frontdesk 路由/执行、Provider continuation、context budget、`providerModel` 和 OpenAI-compatible transport 组合
+- [x] 6.7 验证 OCI runtime 配置、container config 保全、admission queue FIFO/关闭排空和相关 Prometheus 指标
 
 ## 7. 本地业务扩展回归
 
-- [ ] 7.1 验证 Feishu SSO、Web 登录、会话列表、SSE 重放、消息幂等和 Web/飞书同一 Conversation Lane
-- [ ] 7.2 验证 Bitable `field.list`、查询、新增、更新、删除确认、逻辑资源审计和 Gateway confirmation 生命周期
-- [ ] 7.3 验证语音 Bridge 的早期确认、转录镜像、重试边界、字段归一化与确认后写表链路
-- [ ] 7.4 验证图片/JSON Adapter 的内容绑定、场景路由、飞书投递、Archive 检索和 Bitable 写入链路
-- [ ] 7.5 验证 Windows GUI Worker、二进制 MCP 结果预算和远端 Provider/context 改动兼容
-- [ ] 7.6 验证业务扩展仍位于 `examples/` 或 operator 部署层，没有向平台核心引入华聚/实验室专用逻辑
+- [x] 7.1 验证 Feishu SSO、Web 登录、会话列表、SSE 重放、消息幂等和 Web/飞书同一 Conversation Lane
+- [x] 7.2 验证 Bitable `field.list`、查询、新增、更新、删除确认、逻辑资源审计和 Gateway confirmation 生命周期
+- [x] 7.3 验证语音 Bridge 的早期确认、转录镜像、重试边界、字段归一化与确认后写表链路
+- [x] 7.4 验证图片/JSON Adapter 的内容绑定、场景路由、飞书投递、Archive 检索和 Bitable 写入链路
+- [x] 7.5 验证 Windows GUI Worker、二进制 MCP 结果预算和远端 Provider/context 改动兼容
+- [x] 7.6 验证业务扩展仍位于 `examples/` 或 operator 部署层，没有向平台核心引入华聚/实验室专用逻辑
 
 ## 8. 恢复 WIP 并二次验证
 

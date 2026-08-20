@@ -93,7 +93,7 @@ CREATE TABLE messaging_group_agents (
 );
 
 -- Canonical authorization subjects. Legacy ids remain namespaced channel
--- handles; new external identities link through user_identities (ADR-0054).
+-- handles; new external identities link through user_identities (ADR-0061).
 CREATE TABLE users (
   id           TEXT PRIMARY KEY,
   kind         TEXT NOT NULL,
@@ -117,7 +117,7 @@ CREATE TABLE user_identities (
 );
 CREATE INDEX idx_user_identities_user ON user_identities(user_id);
 
--- Hash-only, expiring and revocable browser sessions (ADR-0054/0055).
+-- Hash-only, expiring and revocable browser sessions (ADR-0061/0062).
 CREATE TABLE web_auth_sessions (
   id_hash             TEXT PRIMARY KEY,
   user_id             TEXT NOT NULL REFERENCES users(id),
@@ -129,6 +129,8 @@ CREATE TABLE web_auth_sessions (
   revoked_at          TEXT,
   auth_context_hash   TEXT
 );
+CREATE INDEX idx_web_auth_sessions_user
+  ON web_auth_sessions(user_id, revoked_at, absolute_expires_at);
 
 -- One-use OAuth state; codes and provider tokens are never persisted.
 CREATE TABLE web_auth_transactions (
@@ -141,6 +143,8 @@ CREATE TABLE web_auth_transactions (
   used_at                  TEXT,
   authorization_code_hash  TEXT UNIQUE
 );
+CREATE INDEX idx_web_auth_transactions_expiry
+  ON web_auth_transactions(expires_at, used_at);
 
 -- Role grants on users. Privilege is user-level, not group-level.
 --   role ∈ {owner, admin}
@@ -219,8 +223,11 @@ CREATE INDEX idx_sessions_lookup ON sessions(messaging_group_id, thread_id);
 CREATE INDEX idx_sessions_lookup_owner ON sessions(agent_group_id, messaging_group_id, owner_user_id, thread_id);
 CREATE INDEX idx_sessions_agent_root ON sessions(agent_group_id, root_session_id);
 CREATE INDEX idx_sessions_conversation_lane ON sessions(conversation_lane_id);
+CREATE UNIQUE INDEX idx_sessions_conversation_lane_root
+  ON sessions(conversation_lane_id)
+  WHERE conversation_lane_id IS NOT NULL AND id = root_session_id;
 
--- User-owned cross-channel conversation structure (ADR-0055). Organization
+-- User-owned cross-channel conversation structure (ADR-0062). Organization
 -- scope is deliberately derived through agent_group_id, never copied here.
 CREATE TABLE conversation_lanes (
   id              TEXT PRIMARY KEY,
@@ -234,6 +241,8 @@ CREATE TABLE conversation_lanes (
 );
 CREATE INDEX idx_conversation_lanes_owner
   ON conversation_lanes(owner_user_id, status, created_at);
+CREATE INDEX idx_conversation_lanes_agent_owner
+  ON conversation_lanes(agent_group_id, owner_user_id, status, created_at);
 CREATE UNIQUE INDEX idx_conversation_lanes_root
   ON conversation_lanes(root_session_id) WHERE root_session_id IS NOT NULL;
 
@@ -587,7 +596,8 @@ CREATE TABLE gateway_audit (
   proxy_request_id          TEXT,
   identity_mismatch         INTEGER,
   requester_source_coerced  INTEGER,
-  audit_phase               TEXT
+  audit_phase               TEXT,
+  logical_resource          TEXT
 );
 
 CREATE INDEX idx_gateway_audit_at ON gateway_audit(occurred_at);
@@ -597,6 +607,9 @@ CREATE INDEX idx_gateway_audit_user ON gateway_audit(user_id, occurred_at);
 CREATE INDEX idx_gateway_audit_operation ON gateway_audit(operation, occurred_at);
 
 CREATE INDEX idx_gateway_audit_proxy_req ON gateway_audit(proxy_request_id);
+
+CREATE INDEX idx_gateway_audit_logical_resource
+  ON gateway_audit(logical_resource, occurred_at);
 
 -- Per-session unforgeable tokens for the host-side gateway signing proxy
 -- (ADR-0034), so "signingKey" never enters the container. Purged on a TTL.

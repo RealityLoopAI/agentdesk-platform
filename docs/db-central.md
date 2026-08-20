@@ -72,7 +72,7 @@ CREATE TABLE messaging_group_agents (
 
 规范用户，也就是角色、成员关系、Session Owner 和审计共同引用的授权主体。旧部署的 ID
 通常仍是带渠道前缀的形式，例如 `feishu:ou_xxx`；迁移不会重写这些主键。新代码必须把
-`users.id` 当作不透明值，通过 `user_identities` 连接外部身份（ADR-0054）。
+`users.id` 当作不透明值，通过 `user_identities` 连接外部身份（ADR-0061）。
 
 ```sql
 CREATE TABLE users (
@@ -85,7 +85,7 @@ CREATE TABLE users (
 
 - **Writers/readers:** `src/modules/permissions/db/users.ts`、`src/db/user-identities.ts`、认证流程
 
-### 1.4a `user_identities`（ADR-0054）
+### 1.4a `user_identities`（ADR-0061）
 
 把一个经过 Provider 协议验证的外部 Subject 连接到规范用户。该表不保存 OAuth Token、
 飞书 App Secret 或任何可用于调用 Provider 的凭证。
@@ -233,10 +233,10 @@ CREATE INDEX idx_sessions_conversation_lane ON sessions(conversation_lane_id);
 
 - **Resolved by:** `resolveSession()` in `src/session-manager.ts`.
 - `conversation_lane_id` 是跨渠道结构查询键；`conversation_thread_id` 只用于观测关联，严禁用于
-  Lane 路由或授权（ADR-0039、ADR-0055）。
+  Lane 路由或授权（ADR-0039、ADR-0062）。
 - Creating a session also provisions the session folder and both session DBs via `initSessionFolder()` — see [db-session.md](db-session.md).
 
-### 1.8a `conversation_lanes` 与 `conversation_bindings`（ADR-0055）
+### 1.8a `conversation_lanes` 与 `conversation_bindings`（ADR-0062）
 
 `conversation_lanes` 表示“一个规范用户在一个 Agent Group 中的一条逻辑会话”，并指向该会话的
 根 Session。`conversation_bindings` 把经过验证的飞书/Web 地址映射到 Lane。Organization 不在
@@ -276,7 +276,7 @@ CREATE TABLE conversation_bindings (
 - 旧飞书 Session 只能通过“精确 Session ID + 已验证外部身份”的确定性操作关联，不扫描或合并
   其他用户的历史。
 - **访问层：** `src/db/conversation-lanes.ts`；**结构迁移：**
-  `src/db/migrations/038-conversation-lanes.ts`。
+  `src/db/migrations/039-conversation-lanes.ts`。
 
 ### 1.8b `web_message_receipts`
 
@@ -301,7 +301,7 @@ CREATE TABLE web_message_receipts (
 
 这张表不保存消息正文、附件路径、Cookie 或 Token。消息真相源仍是 Lane 根 Session 的
 `inbound.db` / `outbound.db`。**访问层：** `src/db/web-message-receipts.ts`；
-**结构迁移：** `src/db/migrations/039-web-message-receipts.ts`。
+**结构迁移：** `src/db/migrations/040-web-message-receipts.ts`。
 
 ### 1.8c `web_events`
 
@@ -324,7 +324,7 @@ CREATE TABLE web_events (
 
 该表不包含消息正文、Token、Cookie、Organization 或授权快照。SSE 重放时仍需按当前 Lane
 Owner 和 Host 访问门重新授权。**访问层：** `src/db/web-events.ts`；**结构迁移：**
-`src/db/migrations/040-web-events.ts`。
+`src/db/migrations/041-web-events.ts`。
 
 ### 1.8d `delivery_subscriptions` 与 `cross_channel_deliveries`
 
@@ -374,7 +374,7 @@ CREATE TABLE cross_channel_deliveries (
 投递账本只保存出站行引用、稳定 Origin/Delivery ID、状态和失败码，不复制消息正文。飞书 Adapter
 把稳定 Delivery ID 转为最长 50 字符的请求 `uuid`，使 Host 重试和飞书请求幂等协同工作。
 **访问层：** `src/db/delivery-subscriptions.ts`；**结构迁移：**
-`src/db/migrations/041-cross-channel-delivery.ts`。
+`src/db/migrations/042-cross-channel-delivery.ts`。
 
 ### 1.9 `pending_questions`
 
@@ -584,8 +584,11 @@ CREATE TABLE schema_version (
 Migrations live in `src/db/migrations/`, one file per migration. Runner: `runMigrations()` in `src/db/migrations/index.ts`. It:
 
 1. Creates `schema_version` if absent.
-2. Reads `MAX(version)` — call it `current`.
-3. For each migration with `version > current`, executes `up(db)` inside a transaction and appends a `schema_version` row.
+2. Reads the applied migration `name` values. Persistent names, rather than
+   source-file numbers, are the compatibility key so independently installed
+   modules and rebased migrations cannot accidentally re-run old DDL.
+3. For each unapplied name, executes `up(db)` inside a transaction and appends
+   a monotonically ordered `schema_version` row. Re-running the plan is a no-op.
 
 | #   | File                                     | Introduces                                                                                                                                                           |
 | --- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -596,10 +599,17 @@ Migrations live in `src/db/migrations/`, one file per migration. Runner: `runMig
 | 007 | `007-pending-approvals-title-options.ts` | `ALTER TABLE pending_approvals` add `title`, `options_json` (retrofits DBs created between 003 and 007)                                                              |
 | 008 | `008-dropped-messages.ts`                | `unregistered_senders`                                                                                                                                               |
 | 009 | `009-drop-pending-credentials.ts`        | Drop the defunct `pending_credentials` table                                                                                                                         |
-| 036 | `036-user-identities.ts`                 | 规范用户与 Provider Scope 感知的外部身份映射                                                                                                                         |
-| 037 | `037-web-auth.ts`                        | Hash 化 Web Session 与一次性 SSO 登录事务                                                                                                                            |
-| 038 | `038-conversation-lanes.ts`              | 跨渠道 Lane、Binding 和 `sessions.conversation_lane_id`                                                                                                              |
-| 039 | `039-web-message-receipts.ts`            | 不含正文的 Web 客户端消息幂等回执                                                                                                                                    |
+| 035 | `035-multi-tenant-organizations.ts`      | Organization 隔离轴及其 Host 侧访问元数据                                                                                                                            |
+| 036 | `036-agent-group-role.ts`                | Agent Group 的 `frontdesk` / `worker` 拓扑角色                                                                                                                       |
+| 037 | `037-user-identities.ts`                 | 规范用户与 Provider Scope 感知的外部身份映射；持久化名称仍为 `federated-user-identities`                                                                             |
+| 038 | `038-web-auth.ts`                        | Hash 化 Web Session 与一次性 SSO 登录事务                                                                                                                            |
+| 039 | `039-conversation-lanes.ts`              | 跨渠道 Lane、Binding 和 `sessions.conversation_lane_id`                                                                                                              |
+| 040 | `040-web-message-receipts.ts`            | 不含正文的 Web 客户端消息幂等回执                                                                                                                                    |
+| 041 | `041-web-events.ts`                      | 不含消息正文的 Web SSE 事件游标与重放索引                                                                                                                            |
+| 042 | `042-cross-channel-delivery.ts`          | 飞书/Web 跨渠道订阅与幂等投递账本                                                                                                                                    |
+| 043 | `043-gateway-audit-logical-resource.ts`  | Gateway 审计逻辑资源标识                                                                                                                                              |
+| 044 | `044-gateway-confirmations.ts`           | Host 持有的 Gateway 写操作确认状态                                                                                                                                    |
+| 045 | `045-gateway-confirmation-delete-kind.ts`| 确认类型增加可恢复删除操作                                                                                                                                            |
 
 Numbers 005 and 006 are intentionally absent — migrations were renumbered during early development.
 

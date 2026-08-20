@@ -33,7 +33,7 @@ export interface DeliveryAddress {
 }
 
 /**
- * External identity verified by a channel adapter (ADR-0054).
+ * External identity verified by a channel adapter (ADR-0061).
  *
  * This metadata lives on the Host envelope, outside `message.content`, so it
  * is not exposed to the Agent as prompt data. Only adapter/server code may
@@ -61,7 +61,7 @@ export interface InboundEvent {
   platformId: string;
   threadId: string | null;
   /**
-   * Host-verified structural conversation key (ADR-0055).
+   * Host-verified structural conversation key (ADR-0062).
    *
    * Only an authenticated server-side adapter may set this field. Browser
    * payloads and chat message content must never be copied into it.

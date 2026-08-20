@@ -53,7 +53,7 @@ export interface MessagingGroup {
 // ── Identity & privilege ──
 
 /**
- * Canonical platform user (ADR-0054).
+ * Canonical platform user (ADR-0061).
  *
  * Legacy installations commonly use a namespaced channel handle such as
  * `feishu:ou_...` as the id. That remains supported so existing roles,
@@ -68,7 +68,7 @@ export interface User {
   created_at: string;
 }
 
-/** A provider-verified external login or channel identity (ADR-0054). */
+/** A provider-verified external login or channel identity (ADR-0061). */
 export interface UserIdentity {
   id: string;
   user_id: string;
@@ -260,7 +260,7 @@ export interface Session {
    */
   conversation_thread_id?: string | null;
   /**
-   * Structural cross-channel owner lane (ADR-0055). Unlike
+   * Structural cross-channel owner lane (ADR-0062). Unlike
    * conversation_thread_id, this field is allowed in routing lookups after
    * lane ownership and Agent Group access are checked.
    */

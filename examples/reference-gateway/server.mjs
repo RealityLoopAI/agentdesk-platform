@@ -78,7 +78,7 @@ const SIGNING_KEY = process.env.GATEWAY_SIGNING_KEY?.trim() || null;
 const CONTRACT_VERSION = 1;
 
 /**
- * Optional Feishu Bitable business adapter (ADR-0056). No Bitable operation is
+ * Optional Feishu Bitable business adapter (ADR-0063). No Bitable operation is
  * advertised unless the full Gateway-only credential/resource configuration is
  * present. Secrets and tenant tokens stay inside the adapter closure.
  */

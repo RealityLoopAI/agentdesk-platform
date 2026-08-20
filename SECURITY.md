@@ -96,8 +96,12 @@ vulnerabilities, and don't "fix" them without raising the trade-off first.
   understand; its dependencies are tracked manually against upstream advisories
   via `bun audit` (run in `container/agent-runner/`). Reachable advisories are
   remediated with bun `overrides` in `container/agent-runner/package.json`
-  (currently `hono`, `fast-uri`, `ip-address`, `qs` pinned to patched in-major
-  versions, clearing the `fast-uri` path-traversal/host-confusion HIGHs).
+  (currently `@hono/node-server`, `body-parser`, `hono`, `fast-uri`,
+  `ip-address`, `protobufjs`, and `qs` pinned to patched in-major versions).
+  The 2026-08-20 refresh clears the MCP HTTP stack's traversal/request-isolation
+  advisories, the `ip-address` SSRF bypasses, the `fast-uri` host-confusion
+  HIGH, and the OTEL `protobufjs` parser DoS without changing a direct
+  dependency's major version.
 
 ### Suppressed advisories
 

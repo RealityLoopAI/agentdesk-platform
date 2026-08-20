@@ -127,14 +127,14 @@ writes when the source is agent-asserted).
    host-validated `origin_user_id`. NULL on pre-migration / channel-only rows.
 
 Before `origin_user_id` is stamped, provider identities are normalized through
-`user_identities` (ADR-0054). A native adapter may attach
+`user_identities` (ADR-0061). A native adapter may attach
 `InboundEvent.senderIdentity` as Host-envelope metadata containing
 `provider/providerScope/identifierType/externalSubject`. It is intentionally
 outside `message.content`: the Agent sees content, but only trusted adapter or
 authentication code may establish identity metadata. The unique mapping lets
 Feishu chat and Feishu SSO resolve to the same opaque `users.id`.
 
-4. **Conversation Lane（ADR-0055）。** `conversation_lanes` 是跨渠道结构键，将一个规范用户和
+4. **Conversation Lane（ADR-0062）。** `conversation_lanes` 是跨渠道结构键，将一个规范用户和
    一个 Agent Group 连接到同一个根 Session；`conversation_bindings` 保存经过验证的飞书/Web
    入口。Router 可用 Web Server 已授权的 Lane，或用可信外部身份精确查找 Binding。解析过程
    同时校验 Owner、Agent Group 和用户级 Session Mode。`conversation_thread_id` 仍只用于
@@ -844,7 +844,7 @@ CREATE TABLE users (
   created_at   TEXT NOT NULL
 );
 
--- Provider-verified external identities (ADR-0054); no tokens/credentials.
+-- Provider-verified external identities (ADR-0061); no tokens/credentials.
 CREATE TABLE user_identities (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),

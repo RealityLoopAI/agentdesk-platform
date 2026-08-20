@@ -796,7 +796,7 @@ async function deliverToAgent(
             threadId: deliveryAddr.threadId,
             content: event.message.content,
             trigger: wake ? 1 : 0,
-            // Host-established canonical identity (ADR-0054). This takes
+            // Host-established canonical identity (ADR-0061). This takes
             // precedence over message.content.senderId in A2A propagation,
             // which is essential when an external id maps to a non-legacy
             // canonical user.

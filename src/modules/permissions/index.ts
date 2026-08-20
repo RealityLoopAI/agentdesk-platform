@@ -94,7 +94,7 @@ export function extractAndUpsertUser(event: InboundEvent): string | null {
   // Native adapters can attach a provider-confirmed identity to the Host
   // envelope. Resolve this before consulting message content: the content is
   // Agent-visible payload, while senderIdentity is adapter-established trust
-  // metadata (ADR-0054). The legacy id preserves existing role/session FKs.
+  // metadata (ADR-0061). The legacy id preserves existing role/session FKs.
   if (event.senderIdentity) {
     return resolveOrCreateCanonicalUser({
       provider: event.senderIdentity.provider,
