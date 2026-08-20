@@ -2,9 +2,12 @@ import { SendHorizontal } from 'lucide-react';
 import { useRef, useState, type KeyboardEvent } from 'react';
 
 import { Button } from '@/components/ui/Button';
+import { ModelSelector } from '@/messages/ModelSelector';
+import { DEFAULT_MODEL_OPTION_ID, type ModelOptionId } from '@/messages/modelOptions';
 
 export function MessageComposer({ disabled, onSend }: { disabled?: boolean; onSend: (text: string) => void }) {
   const [text, setText] = useState('');
+  const [selectedModelId, setSelectedModelId] = useState<ModelOptionId>(DEFAULT_MODEL_OPTION_ID);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const submit = () => {
     const normalized = text.trim();
@@ -38,9 +41,20 @@ export function MessageComposer({ disabled, onSend }: { disabled?: boolean; onSe
           onChange={(event) => setText(event.target.value)}
           onKeyDown={onKeyDown}
         />
-        <div className="flex items-center justify-between gap-3 px-1 pt-1">
-          <span className="text-xs text-muted">Enter 发送 · Shift + Enter 换行</span>
-          <Button size="icon" aria-label="发送消息" disabled={disabled || !text.trim()} onClick={submit}>
+        <div className="flex items-center justify-between gap-2 px-1 pt-1">
+          <div className="flex min-w-0 items-center gap-3">
+            <ModelSelector disabled={disabled} selectedId={selectedModelId} onChange={setSelectedModelId} />
+            <span className="hidden whitespace-nowrap text-xs text-muted md:inline">
+              Enter 发送 · Shift + Enter 换行
+            </span>
+          </div>
+          <Button
+            size="icon"
+            aria-label="发送消息"
+            className="shrink-0"
+            disabled={disabled || !text.trim()}
+            onClick={submit}
+          >
             <SendHorizontal aria-hidden="true" className="size-4" />
           </Button>
         </div>

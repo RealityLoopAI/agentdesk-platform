@@ -123,14 +123,18 @@ describe('ConversationPage', () => {
     const user = userEvent.setup();
     renderPage();
 
+    await user.click(await screen.findByRole('button', { name: '选择模型，当前：自动选择' }));
+    await user.click(screen.getByRole('option', { name: /Claude Opus 5/ }));
     const composer = await screen.findByLabelText('输入消息');
     await user.type(composer, '请总结这份数据');
     await user.click(screen.getByRole('button', { name: '发送消息' }));
 
     expect(screen.getByText('请总结这份数据')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText('已接收')).toBeInTheDocument());
-    expect(submitted).toMatchObject({ text: '请总结这份数据' });
-    expect(submitted.clientMessageId).toMatch(/^web:/);
+    expect(submitted).toEqual({
+      clientMessageId: expect.stringMatching(/^web:/),
+      text: '请总结这份数据',
+    });
   });
 
   it('retries a failed send with the same stable client message id', async () => {

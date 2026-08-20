@@ -200,6 +200,23 @@ pnpm dev                # 开发模式
 pnpm build && pnpm start
 ```
 
+### macOS 全量评测组合一键启动
+
+如果使用仓库里的小环语音、图片/JSON、Bitable 与 Vision Archive 示例组合，
+可以把组合 Host 和两个 Gateway 安装为当前用户的 `launchd` 常驻服务：
+
+```bash
+pnpm services:install   # 首次安装并启动
+pnpm services:status    # 查看进程与健康探针
+pnpm services:restart   # 完整重启
+pnpm services:logs      # 跟踪持久化日志
+pnpm services:stop      # 停止但保留配置和数据
+```
+
+终端关闭后服务不会退出，异常退出会被自动拉起。脚本还会启动监控 Compose
+栈，并验证 Host、Web、语音和各网关。完整说明见
+[`examples/local-evaluation-stack/README.md`](examples/local-evaluation-stack/README.md)。
+
 ## 常用命令
 
 ```bash
@@ -209,6 +226,12 @@ pnpm run audit                                          # 供应链门:prod 依�
 pnpm container:build
 pnpm init:enterprise
 pnpm configure:enterprise-gateway --base-url <gateway>
+
+# macOS 本地全量评测组合
+pnpm services:install
+pnpm services:status
+pnpm services:restart
+pnpm services:logs
 
 # 治理 / 多租户运维(ADR-0049 / 0051 / 0052)
 pnpm exec tsx scripts/org.ts list                       # org 管理:create / assign / grant-admin / add-member

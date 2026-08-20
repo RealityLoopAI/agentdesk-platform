@@ -18,6 +18,9 @@ Web/飞书统一消息的首次部署、Feature Flag 灰度和完整回滚演练
 host 是裸 Node 进程，由操作员的进程管理器拉起。`deploy/` 提供 systemd / launchd
 **单元模板**（填 `<PLACEHOLDERS>` 后安装，见 `deploy/README.md`）；若你用的是自己的
 单元名，"进程活着"按你的服务名查，否则一律按 host 健康探针 `/healthz` 查。
+仓库内 macOS 小环全量评测组合可以直接用 `pnpm services:install` 安装三个
+LaunchAgent，用 `pnpm services:status` 检查，详见
+`examples/local-evaluation-stack/README.md`。
 
 | 检查 | 命令 / Panel | 期望 |
 |---|---|---|
@@ -761,7 +764,7 @@ for db in data/v2-sessions/*/*/inbound.db; do
   sqlite3 "$db" "update messages_in set status='pending' where status='processing'"
 done
 
-# 重启 host（用你的进程管理器；本平台不带 launchd/systemd 单元）
+# 重启 host（macOS 全量评测组合可用 pnpm services:restart；其他部署用自己的进程管理器）
 ```
 
 ### 8.3 临时屏蔽某个用户
