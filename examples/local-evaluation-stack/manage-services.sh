@@ -258,6 +258,31 @@ wait_for_http_listener() {
   die "${name} did not start listening within 60 seconds: ${url}"
 }
 
+configured_path() {
+  local key="$1"
+  "${NODE_BIN}" \
+    "--env-file=${PROJECT_DIR}/.env" \
+    "--env-file=${PROJECT_DIR}/examples/xiaohuan-doubao-audio/.env" \
+    "--env-file=${PROJECT_DIR}/examples/xiaohuan-bitable-bridge/.env" \
+    -e 'process.stdout.write(process.env[process.argv[1]]?.trim() ?? "")' \
+    "${key}"
+}
+
+wait_for_readable_directory() {
+  local name="$1"
+  local path="$2"
+  local attempt
+  [[ -n "${path}" ]] || die "${name} path is not configured."
+  for attempt in $(seq 1 30); do
+    if [[ -d "${path}" && -r "${path}" ]]; then
+      info "Ready: ${name} (${path})"
+      return
+    fi
+    sleep 1
+  done
+  die "${name} is unavailable or unreadable: ${path}"
+}
+
 start_observability() {
   [[ "${START_OBSERVABILITY}" == '1' ]] || return
   info 'Starting the observability stack...'
@@ -275,12 +300,18 @@ stop_observability() {
 }
 
 verify_services() {
+  local voice_photos_root archive_root
+  voice_photos_root="$(configured_path VOICE_PHOTOS_ROOT)"
+  archive_root="$(configured_path VISION_ARCHIVE_ROOT)"
+
   wait_for_http_listener 'Bitable Gateway' 'http://127.0.0.1:8088/describe'
   wait_for_http_listener 'Archive Gateway' 'http://127.0.0.1:8090/describe'
   wait_for_http_ok 'Host' 'http://127.0.0.1:3200/readyz'
   wait_for_http_ok 'Voice Bridge' 'http://127.0.0.1:50020/healthz'
   wait_for_http_ok 'Web' 'http://127.0.0.1:3100/login'
   wait_for_http_listener 'Gateway signing proxy' 'http://127.0.0.1:8799/describe'
+  wait_for_readable_directory 'Voice photo/JSON root' "${voice_photos_root}"
+  wait_for_readable_directory 'Vision Archive root' "${archive_root}"
 
   if [[ "${START_OBSERVABILITY}" == '1' ]]; then
     wait_for_http_ok 'Grafana' 'http://127.0.0.1:3001/api/health'
@@ -368,8 +399,22 @@ probe_listener_status() {
   return 1
 }
 
+probe_directory_status() {
+  local name="$1"
+  local path="$2"
+  if [[ -n "${path}" && -d "${path}" && -r "${path}" ]]; then
+    printf '  [OK]   %-18s %s\n' "${name}" "${path}"
+    return 0
+  fi
+  printf '  [FAIL] %-18s %s\n' "${name}" "${path:-not configured}"
+  return 1
+}
+
 status_services() {
   local failed=0
+  local voice_photos_root archive_root
+  voice_photos_root="$(configured_path VOICE_PHOTOS_ROOT)"
+  archive_root="$(configured_path VISION_ARCHIVE_ROOT)"
   info 'launchd jobs:'
   job_status "${BITABLE_LABEL}" || failed=1
   job_status "${ARCHIVE_LABEL}" || failed=1
@@ -382,6 +427,8 @@ status_services() {
   probe_status 'Voice Bridge' 'http://127.0.0.1:50020/healthz' || failed=1
   probe_status 'Web' 'http://127.0.0.1:3100/login' || failed=1
   probe_listener_status 'Signing proxy' 'http://127.0.0.1:8799/describe' || failed=1
+  probe_directory_status 'Photo/JSON root' "${voice_photos_root}" || failed=1
+  probe_directory_status 'Archive root' "${archive_root}" || failed=1
 
   if [[ "${START_OBSERVABILITY}" == '1' ]]; then
     probe_status 'Grafana' 'http://127.0.0.1:3001/api/health' || failed=1

@@ -338,7 +338,8 @@ tail -n 1000 data/runtime-logs/host.out.log | rg \
 ### T30 — 前置条件和基线
 
 1. 确认 NAS 是只读挂载，且 Host 用户能读取
-   `/Volumes/video_database/voice_photos`。
+   `/Volumes/video_database/voice_photos`。`pnpm services:status` 必须同时将
+   `Photo/JSON root` 和 `Archive root` 显示为 `[OK]`；仅端口健康不代表采集卷可用。
 2. 启动日志中已经出现 `voice_photo_monitor_ready` 和
    `voice_photo_json_baseline_complete`。
 3. 必须在基线完成后产生新文件；启动前已存在的文件只进入 baseline，不应被重新发送。

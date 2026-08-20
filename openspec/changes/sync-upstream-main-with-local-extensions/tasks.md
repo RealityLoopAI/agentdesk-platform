@@ -67,15 +67,15 @@
 
 ## 8. 恢复 WIP 并二次验证
 
-- [ ] 8.1 仅在第 4～7 组全部通过后 cherry-pick pre-rebase WIP 快照，保留备份分支直到最终验收完成
-- [ ] 8.2 解决 WIP 的 `package.json` 冲突，保留新底座依赖和 overrides，同时恢复 `services:*` 评测脚本，并重新生成 lockfile
-- [ ] 8.3 复核本地评测文档、launchd 服务脚本、监控 Compose、Web 模型选择器和对应测试在新底座上的行为
-- [ ] 8.4 再次执行 typecheck、lint、完整测试、迁移兼容、身份隔离和供应链检查
-- [ ] 8.5 比较备份快照与最终分支，确认每项 WIP 已恢复、明确替代或记录为有意舍弃，没有静默丢失文件
+- [x] 8.1 仅在第 4～7 组全部通过后 cherry-pick pre-rebase WIP 快照，保留备份分支直到最终验收完成
+- [x] 8.2 解决 WIP 的 `package.json` 冲突，保留新底座依赖和 overrides，同时恢复 `services:*` 评测脚本，并重新生成 lockfile
+- [x] 8.3 复核本地评测文档、launchd 服务脚本、监控 Compose、Web 模型选择器和对应测试在新底座上的行为
+- [x] 8.4 再次执行 typecheck、lint、完整测试、迁移兼容、身份隔离和供应链检查
+- [x] 8.5 比较备份快照与最终分支，确认每项 WIP 已恢复、明确替代或记录为有意舍弃，没有静默丢失文件
 
 ## 9. 服务恢复、人工验收与交付
 
-- [ ] 9.1 在所有自动化门通过后重新构建 agent 容器镜像，并使用统一服务进程启动 Host、Web、语音 Bridge、图片/JSON Adapter、Bitable/Archive Worker 和监控栈
+- [x] 9.1 在所有自动化门通过后重新构建 agent 容器镜像，并使用统一服务进程启动 Host、Web、语音 Bridge、图片/JSON Adapter、Bitable/Archive Worker 和监控栈
 - [ ] 9.2 验证 Web、Host `/readyz`、语音入口、签名代理、Bitable、Archive、Prometheus、Grafana 和 Phoenix 的端口与健康探针
 - [ ] 9.3 人工完成飞书/Web 普通对话、语音唤醒、拍照/JSON、确认卡、Bitable 查询/写入和归档查询的端到端演示
 - [ ] 9.4 检查日志、`gateway_audit`、企业审计、指标和 trace，确认没有身份漂移、跨用户混线、重复投递、502 或未消费任务

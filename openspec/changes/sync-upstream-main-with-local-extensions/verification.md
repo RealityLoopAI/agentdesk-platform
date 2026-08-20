@@ -109,3 +109,42 @@
   均位于 `examples/`。
 
 WIP 恢复、第二次全量质量门和运行态验收结果在后续步骤追加。
+
+## WIP 恢复与第二次质量门
+
+- 在第 4～7 组全部通过后，将 `ceb2dfb` 恢复为 `0bdc94f`；唯一冲突是同一路径新增的
+  OpenSpec `tasks.md`，解决方式是保留当前已完成状态，不回退为备份中的未执行状态。
+- `package.json` 自动合并并保留全部新底座依赖/overrides，以及 `services:install/start/restart/stop/status/logs`
+  六个本地评测命令；重新生成/冻结安装校验后 lockfile 无变化。
+- 备份新增的代码、文档、模型选择器和统一服务脚本与 `ceb2dfb` 逐字一致；备份中的 sync OpenSpec
+  planning 文件已由 `fc09e35` 和当前验证记录替代，没有静默丢失文件。
+- 服务脚本通过 `bash -n`，监控 Compose 通过 `docker compose config --quiet`，三个 launchd plist
+  在隔离的临时目录成功渲染并通过 `plutil`。
+- 第二轮检查：Host/Web/Runner typecheck 通过；ESLint 0 error（210 个既有 warning）；Web 9 个文件、
+  26 项测试及 production build 通过；Host 完整测试与 Reference Gateway 通过；Runner 40 个文件、
+  438 项、1183 个断言通过；迁移顺序/幂等/schema drift 4 个文件、8 项通过。
+- 第二轮供应链结果与第一次一致：Host high-level 审计 exit 0（1 个已记录 ignored high）；Runner
+  仅 1 个已记录且不在 Gateway memory 路径使用的 moderate advisory。
+
+运行态重建、健康探针与人工端到端验收结果在后续步骤追加。
+
+## 运行态重建与当前阻塞
+
+- Docker Desktop 已恢复，Agent Runner 镜像重建为 `agentdesk-agent-v2-69585351:latest`
+  （image id `sha256:d4c232a1766f...`）。第一次构建因 npm registry TLS/ECONNRESET
+  中断，利用缓存层重试后成功；没有更改固定依赖版本。
+- `pnpm services:install` 已安装三个带 `KeepAlive` 的用户 LaunchAgent 并启动监控 Compose。
+  Bitable、Archive、Host、Voice Bridge、Web、signing proxy、Grafana、Prometheus、Alertmanager
+  和 Phoenix 的端口/HTTP 探针均通过；三个 Node job 均为 `running` 且 `runs=1`。
+- 局域网 `http://192.168.66.113:50020/healthz` 返回 `ok=true`、0 failures/queued；
+  Windows GUI Worker `http://192.168.66.98:8000/health` 返回 `status=ok`。真实浏览器中的 Web
+  登录页成功渲染，未代替用户执行飞书账号登录。
+- 运行态发现图片/JSON 与 Archive 共用的 `/Volumes/video_database` 没有挂载。旧 SMB 地址
+  `192.168.66.149:445` 超时；同网段 `192.168.66.150:445` 可达但拒绝 guest，Finder 未能在
+  无用户交互的情况下自动挂载。需要用户通过系统凭据窗口完成认证后才能继续现场图片/JSON/
+  Archive 验收。
+- 为避免端口存活掩盖数据卷故障，统一服务脚本新增 Photo/JSON root 与 Archive root 可读性探针；
+  `services:status` 现在准确返回非零并显示这两项 `[FAIL]`，脚本语法、plist 渲染仍通过。
+- 当前启动后没有新 502。启动检查发现 6 条 2026-07-30 的 inbound dead-letter，以及 9 条
+  2026-07-30～31 的历史 JSON `submitted` 状态；为避免重复写表，未在没有业务核对的情况下
+  自动重投或删除。因此任务 9.2～9.5 保持未完成，等待 SMB 挂载与人工验收。

@@ -41,7 +41,9 @@ pnpm services:install
 This replaces transient jobs with persistent plists under
 `~/Library/LaunchAgents`, starts Docker Desktop when necessary, starts every
 service, and waits for the Host, Voice Bridge, Web, Gateway, and observability
-health checks.
+health checks. It also fails closed when the configured photo/JSON or Vision
+Archive directory is not mounted and readable; an open Gateway port alone is
+not treated as a healthy data path.
 
 ## Daily commands
 
