@@ -76,7 +76,7 @@
 ## 9. 服务恢复、人工验收与交付
 
 - [x] 9.1 在所有自动化门通过后重新构建 agent 容器镜像，并使用统一服务进程启动 Host、Web、语音 Bridge、图片/JSON Adapter、Bitable/Archive Worker 和监控栈
-- [ ] 9.2 验证 Web、Host `/readyz`、语音入口、签名代理、Bitable、Archive、Prometheus、Grafana 和 Phoenix 的端口与健康探针
+- [x] 9.2 验证 Web、Host `/readyz`、语音入口、签名代理、Bitable、Archive、Prometheus、Grafana 和 Phoenix 的端口与健康探针
 - [ ] 9.3 人工完成飞书/Web 普通对话、语音唤醒、拍照/JSON、确认卡、Bitable 查询/写入和归档查询的端到端演示
 - [ ] 9.4 检查日志、`gateway_audit`、企业审计、指标和 trace，确认没有身份漂移、跨用户混线、重复投递、502 或未消费任务
 - [ ] 9.5 记录最终远端基点、rebase 后 HEAD、ADR/迁移映射、数据库验证结果、测试结果和服务健康结果

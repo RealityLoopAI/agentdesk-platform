@@ -148,3 +148,27 @@ WIP 恢复、第二次全量质量门和运行态验收结果在后续步骤追�
 - 当前启动后没有新 502。启动检查发现 6 条 2026-07-30 的 inbound dead-letter，以及 9 条
   2026-07-30～31 的历史 JSON `submitted` 状态；为避免重复写表，未在没有业务核对的情况下
   自动重投或删除。因此任务 9.2～9.5 保持未完成，等待 SMB 挂载与人工验收。
+
+## SMB 恢复后的运行态验收与停止条件
+
+- 2026-08-21 用户通过 Finder 将 `//fzxl@192.168.66.150/video_database` 挂载到
+  `/Volumes/video_database`；`voice_photos` 与 `VisionCortexExperimentArchive` 均可读。
+- 统一服务第一次重启暴露两项管理脚本缺陷并已修复：本机探针继承失效的
+  `http_proxy/https_proxy`，现强制使用 `curl --noproxy '*'`；Host 的正常关闭预算为 20 秒、
+  launchd `ExitTimeOut` 为 30 秒，但脚本只等 10 秒，现将卸载等待窗口延长到 45 秒。
+- 修正后 `pnpm services:restart` 与 `pnpm services:status` 通过。三个 LaunchAgent 均为
+  `running/runs=1`；Bitable、Archive、Host `/readyz`、Voice Bridge、Web、signing proxy、
+  Photo/JSON root、Archive root、Grafana、Prometheus、Alertmanager 和 Phoenix 全部为 `[OK]`。
+  3100/3200/50020/8799 同属组合 Host，8088/8090 属于独立 Gateway；没有 UDP 50020 争用，
+  也没有 `Created` 残余 Agent 容器。任务 9.2 完成。
+- 进入业务验收前发现历史积压回放，触发 `MANUAL-ACCEPTANCE.md` 的立即停止条件。图片状态库
+  在本轮产生 1 条新 `delivered`，并积压 1258 条 `ready`；JSON 状态库有 55 条 `submitted`。
+  这些来源时间跨越 2026-07-28～2026-08-21，并非本轮基线完成后专门生成的单个测试样本。
+- 2026-08-21 07:36:20Z 之后的 `gateway_audit` 显示 8 次最终阶段
+  `feishu.bitable.record.create` 成功、2 次最终阶段 422，以及 1 次最终阶段 `record.get` 成功；
+  所有最终审计的 `identity_mismatch=0`。由于 Worker 结果尚未回写状态库，这些创建对应的 JSON
+  仍显示 `submitted`，继续重启存在重复处理风险。
+- 已立即执行 `pnpm services:stop`；三个 Node 服务、监控 Compose 和 Agent 容器均停止，SMB
+  挂载与所有 SQLite/审计证据保留。没有自动删除外部记录、清理 NAS、重排 inbound 或伪造
+  verified 状态。任务 9.3、9.4 保持未完成，等待业务方选择“隔离历史积压并核对已创建记录”
+  或“允许历史积压继续处理”；在选择前不得恢复组合 Host。

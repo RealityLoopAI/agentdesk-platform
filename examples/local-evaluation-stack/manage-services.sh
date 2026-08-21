@@ -201,13 +201,16 @@ bootout_job() {
   if job_loaded "${label}"; then
     /bin/launchctl bootout "${LAUNCH_DOMAIN}/${label}" >/dev/null 2>&1 || true
     local attempt
-    for attempt in $(seq 1 100); do
+    # The Host allows up to 20 seconds for graceful shutdown and launchd's
+    # ExitTimeOut is 30 seconds. Keep this wait longer than both contracts so
+    # a normal drain is not reported as an unload failure.
+    for attempt in $(seq 1 450); do
       if ! job_loaded "${label}"; then
         return
       fi
       sleep 0.1
     done
-    die "launchd did not finish unloading ${label} within 10 seconds."
+    die "launchd did not finish unloading ${label} within 45 seconds."
   fi
 }
 
@@ -233,7 +236,7 @@ wait_for_http_ok() {
   local url="$2"
   local attempt
   for attempt in $(seq 1 90); do
-    if /usr/bin/curl --max-time 3 -fsS -o /dev/null "${url}" 2>/dev/null; then
+    if /usr/bin/curl --noproxy '*' --max-time 3 -fsS -o /dev/null "${url}" 2>/dev/null; then
       info "Ready: ${name} (${url})"
       return
     fi
@@ -247,7 +250,7 @@ wait_for_http_listener() {
   local url="$2"
   local attempt code
   for attempt in $(seq 1 60); do
-    code="$(/usr/bin/curl --max-time 3 -sS -o /dev/null -w '%{http_code}' -X POST \
+    code="$(/usr/bin/curl --noproxy '*' --max-time 3 -sS -o /dev/null -w '%{http_code}' -X POST \
       -H 'content-type: application/json' -d '{}' "${url}" 2>/dev/null || true)"
     if [[ -n "${code}" && "${code}" != '000' ]]; then
       info "Listening: ${name} (${url}, HTTP ${code})"
@@ -377,7 +380,7 @@ job_status() {
 probe_status() {
   local name="$1"
   local url="$2"
-  if /usr/bin/curl --max-time 10 -fsS -o /dev/null "${url}"; then
+  if /usr/bin/curl --noproxy '*' --max-time 10 -fsS -o /dev/null "${url}"; then
     printf '  [OK]   %-18s %s\n' "${name}" "${url}"
     return 0
   fi
@@ -389,7 +392,7 @@ probe_listener_status() {
   local name="$1"
   local url="$2"
   local code
-  code="$(/usr/bin/curl --max-time 3 -sS -o /dev/null -w '%{http_code}' -X POST \
+  code="$(/usr/bin/curl --noproxy '*' --max-time 3 -sS -o /dev/null -w '%{http_code}' -X POST \
     -H 'content-type: application/json' -d '{}' "${url}" 2>/dev/null || true)"
   if [[ -n "${code}" && "${code}" != '000' ]]; then
     printf '  [OK]   %-18s %s (HTTP %s)\n' "${name}" "${url}" "${code}"
