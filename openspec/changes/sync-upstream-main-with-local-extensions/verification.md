@@ -172,3 +172,21 @@ WIP 恢复、第二次全量质量门和运行态验收结果在后续步骤追�
   挂载与所有 SQLite/审计证据保留。没有自动删除外部记录、清理 NAS、重排 inbound 或伪造
   verified 状态。任务 9.3、9.4 保持未完成，等待业务方选择“隔离历史积压并核对已创建记录”
   或“允许历史积压继续处理”；在选择前不得恢复组合 Host。
+
+## 测试积压隔离
+
+- 2026-08-24 用户确认当前图片、JSON 和 Worker 积压均为测试信息，并授权全部丢弃。操作前
+  再次确认 Host、两个 Gateway、监控 Compose 和 Agent 容器均已停止。
+- 中央库、图片状态库和 JSON 状态库先通过 `PRAGMA integrity_check`，再备份到
+  `data/runtime-backups/20260824-discard-voice-photo-test-backlog-be42d97/`。备份包含 SQLite
+  在线副本及被轮换的原状态库/WAL/SHM，可用于恢复本次操作。
+- 精确选择 `Voice Photo JSON Bitable Worker`（`ag-1785422930854-osgw2d`）的 76 个活动测试
+  Session；实际 Docker 容器为零，因此将 7 条残留 `container_status=running` 纠正为 stopped，
+  随后通过正式 session lifecycle 路径逐项归档。结果为 76/76 archived、0 active，session
+  目录转为 `data/v2-sessions-archive/<agent-group>/<session>.tar.gz`，中央审计记录保留。
+- 将包含 1258 条图片 `ready` 和 55 条 JSON `submitted` 的两个活动状态库移出 `.state/`。
+  未删除 NAS 文件，也未删除此前已写入 Bitable 的 8 条记录；后者已经完成外部副作用，不属于
+  未处理积压，保留其 `gateway_audit` 作为核对依据。
+- 清理后 SMB 445 端口可达，但 Finder 未自动恢复 `/Volumes/video_database` 挂载。服务继续
+  保持停止，且活动状态库尚未重建。待用户完成系统凭据挂载后，首次启动扫描会把共享盘现有
+  图片和 JSON 全部写入新 baseline，不投递、不写表；只有 baseline 完成后新增的文件才进入验收。
