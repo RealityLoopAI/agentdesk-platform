@@ -228,9 +228,9 @@ GRAFANA_HOST_PORT=3001
   - **改了 WEBHOOK_PORT**？直接编辑 `prometheus/prometheus.yml` 里的 target——Prometheus **不**展开配置文件里的 `${ENV}`，所以不能靠环境变量覆盖端口。
   - **`/metrics` 加了 bearer token**？（host 侧若引入鉴权）在 `prometheus.yml` 的 scrape job 里启用 `authorization: { type: Bearer, credentials_file: /etc/prometheus/host_metrics_token }`，把 token 文件挂进 Prometheus 容器（compose volume）。token **不要**写进仓内文件，用 secrets 挂载或模板渲染注入。
 - **指标前缀随品牌变**：默认 `agentdesk_*`（`METRIC_PREFIX`，`src/branding.ts`）。rebrand 后 host 发 `<新 namespace>_*`，`prometheus/alerts.yml` 与 Grafana dashboard 里的 `agentdesk_` 都要相应替换，否则告警永不触发、面板永远空。
-- **告警规则**：`prometheus/alerts.yml`（10 条），是 RUNBOOK §2 的承载体。`pnpm obs:rules:check` 用 promtool 校验语法。
+- **告警规则**：`prometheus/alerts.yml`（29 条），是 RUNBOOK §2 的承载体。`pnpm obs:rules:check` 用 promtool 校验语法。
 - **寻呼**：`alertmanager/alertmanager.yml` 默认 `null` receiver（不寻呼）。接 Slack / 飞书 / PagerDuty 见文件内注释；Alertmanager 同样不展开 `${ENV}`，URL/token 走模板渲染或 secrets 挂载。
-- **Grafana datasource**：`Prometheus`（uid `prometheus`）指向 `http://prometheus:9090`（可查询），`isDefault`；`Phoenix Postgres` 保留用于 trace 关联。`Platform Health` dashboard 用 PromQL 画 inbound rate / route+wake p95 / container crash rate / delivery permanent failures / a2a origin rejected。
+- **Grafana datasource**：`Prometheus`（uid `prometheus`）指向 `http://prometheus:9090`（可查询），`isDefault`；`Phoenix Postgres` 保留用于 trace 关联。`Platform Health` dashboard 用 PromQL 覆盖入站、路由/唤醒、容器、DLQ、A2A 身份拒绝，以及 Web SSO/API/SSE、Conversation Binding、跨渠道回环抑制和飞书多维表格 Gateway 调用。
 
 ## Instrumentation 接入（Instrumentation）
 
@@ -246,7 +246,7 @@ GRAFANA_HOST_PORT=3001
 - [`docker-compose.sim.yml`](docker-compose.sim.yml) — Phoenix + Prometheus + Alertmanager 的最小 sim 栈
 - [`docker-compose.prod.yml`](docker-compose.prod.yml) — 完整 Phoenix + Postgres + Prometheus + Alertmanager + Grafana 栈
 - [`prometheus/prometheus.yml`](prometheus/prometheus.yml) — scrape host `/metrics` + 加载 rules + 指向 Alertmanager
-- [`prometheus/alerts.yml`](prometheus/alerts.yml) — 10 条告警规则（RUNBOOK §2 承载体）
+- [`prometheus/alerts.yml`](prometheus/alerts.yml) — 29 条告警规则（RUNBOOK §2 承载体）
 - [`alertmanager/alertmanager.yml`](alertmanager/alertmanager.yml) — Alertmanager 路由 + 占位 `null` receiver
 - [`init/grafana_readonly.sql`](init/grafana_readonly.sql) — Postgres 首启动时创建 Grafana 只读角色
 - [`grafana/provisioning/datasources/phoenix-postgres.yml`](grafana/provisioning/datasources/phoenix-postgres.yml) — Phoenix Postgres（trace）+ Prometheus（metrics）两个 datasource

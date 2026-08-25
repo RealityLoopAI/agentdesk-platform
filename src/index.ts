@@ -14,6 +14,7 @@ import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
+import { resetIssuingGatewayConfirmationsAfterRestart } from './db/gateway-confirmations.js';
 import { checkBaseImage, cleanupProxyRuntimeOnBoot, stopAllContainers } from './container-runner.js';
 import { validateStartupConfig } from './config-validate.js';
 import { checkGatewaySigningCoverage } from './gateway-signing-check.js';
@@ -32,6 +33,7 @@ import { routeInbound } from './router.js';
 import { log } from './log.js';
 import { unhandledRejectionsTotal } from './metrics.js';
 import { ensureMetricsServer, stopWebhookServer } from './webhook-server.js';
+import { startWebServer, stopWebServer } from './web/server.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
@@ -92,6 +94,10 @@ async function main(): Promise<void> {
   const dbPath = path.join(DATA_DIR, 'v2.db');
   const db = initDb(dbPath);
   runMigrations(db);
+  const recoveredConfirmations = resetIssuingGatewayConfirmationsAfterRestart();
+  if (recoveredConfirmations > 0) {
+    log.warn('Recovered interrupted Gateway confirmations', { count: recoveredConfirmations });
+  }
   log.info('Central DB ready', { path: dbPath });
 
   // Record which approval-handler actions are installed (roadmap 5.10).
@@ -152,17 +158,19 @@ async function main(): Promise<void> {
             isMention: message.isMention,
             isGroup: message.isGroup,
           },
+          senderIdentity: message.senderIdentity,
         }).catch((err) => {
           log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
         });
       },
       onInboundEvent(event) {
-        routeInbound(event).catch((err) => {
+        return routeInbound(event).catch((err) => {
           log.error('Failed to route inbound event', {
             sourceAdapter: adapter.channelType,
             targetChannelType: event.channelType,
             err,
           });
+          throw err;
         });
       },
       onMetadata(platformId, name, isGroup) {
@@ -200,13 +208,14 @@ async function main(): Promise<void> {
       kind: string,
       content: string,
       files?: import('./channels/adapter.js').OutboundFile[],
+      source?: { messageId: string; sessionId: string; originId?: string },
     ): Promise<string | undefined> {
       const adapter = getChannelAdapter(channelType);
       if (!adapter) {
         log.warn('No adapter for channel type', { channelType });
         return;
       }
-      return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files });
+      return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files, source });
     },
     async setTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
       const adapter = getChannelAdapter(channelType);
@@ -235,6 +244,11 @@ async function main(): Promise<void> {
   //    (e.g. Feishu long-connection mode, CLI-only setups).
   ensureMetricsServer();
 
+  // 8. Optional browser surface. This is a dedicated listener with its own
+  // cookie/Origin/CSRF threat boundary; it never shares the webhook or metrics
+  // listener. WEB_ENABLED defaults off.
+  await startWebServer();
+
   log.info(`${PLATFORM_NAME} running`);
 }
 
@@ -247,10 +261,15 @@ async function runShutdownSteps(): Promise<void> {
       log.error('Shutdown callback threw', { err });
     }
   }
-  // Order matters: stop accepting first (close the listener), THEN stop the
+  // Order matters: stop accepting first (close the listeners), THEN stop the
   // poll loops, THEN drain. If we drained before closing the listener, a fresh
   // webhook could enqueue outbound work mid-drain and the wait would never
   // settle cleanly. Stopping ingress first bounds the in-flight set.
+  try {
+    await stopWebServer();
+  } catch (err) {
+    log.error('Web server stop threw', { err });
+  }
   try {
     await stopWebhookServer();
   } catch (err) {

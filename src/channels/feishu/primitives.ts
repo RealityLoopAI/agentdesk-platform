@@ -501,22 +501,25 @@ export function buildFeishuAskQuestionCardWithPayloads(params: {
     body: {
       elements: [
         { tag: 'markdown', content: normalizeCardText(params.question) },
-        {
-          tag: 'action',
-          actions: params.options.map((option, index) => ({
-            tag: 'button',
-            text: { tag: 'plain_text', content: option.label },
-            type: index === 0 ? 'primary' : 'default',
-            value: {
-              kind: 'card.ask_question',
-              questionId: params.questionId,
-              selectedOption: option.value,
-              selectedLabel: option.selectedLabel,
-              ...(params.expectedUserId ? { expectedUserId: params.expectedUserId } : {}),
-              ...(params.expiresAt ? { expiresAt: params.expiresAt } : {}),
+        ...params.options.map((option, index) => ({
+          tag: 'button',
+          text: { tag: 'plain_text', content: option.label },
+          type: index === 0 ? 'primary' : 'default',
+          width: 'fill',
+          behaviors: [
+            {
+              type: 'callback',
+              value: {
+                kind: 'card.ask_question',
+                questionId: params.questionId,
+                selectedOption: option.value,
+                selectedLabel: option.selectedLabel,
+                ...(params.expectedUserId ? { expectedUserId: params.expectedUserId } : {}),
+                ...(params.expiresAt ? { expiresAt: params.expiresAt } : {}),
+              },
             },
-          })),
-        },
+          ],
+        })),
       ],
     },
   };
@@ -556,12 +559,13 @@ export function buildFeishuRosterOptInCard(params: {
       elements: [
         { tag: 'markdown', content: normalizeCardText(body) },
         {
-          tag: 'action',
-          actions: [
+          tag: 'button',
+          text: { tag: 'plain_text', content: 'Opt in' },
+          type: 'primary',
+          width: 'fill',
+          behaviors: [
             {
-              tag: 'button',
-              text: { tag: 'plain_text', content: 'Opt in' },
-              type: 'primary',
+              type: 'callback',
               value: params.optIn,
             },
           ],

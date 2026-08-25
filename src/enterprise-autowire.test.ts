@@ -18,8 +18,14 @@ import {
   initTestDb,
   runMigrations,
 } from './db/index.js';
-import { getAgentGroupByFolder } from './db/agent-groups.js';
+import { getAgentGroupByFolder, setAgentGroupRole } from './db/agent-groups.js';
 import { getMessagingGroupAgentByPair } from './db/messaging-groups.js';
+import {
+  createDestination,
+  getDestinationByName,
+  getDestinations,
+  hasDestination,
+} from './modules/agent-to-agent/db/agent-destinations.js';
 import {
   maybeAutowireEnterpriseFrontdesk,
   perGroupAgentFolder,
@@ -78,7 +84,10 @@ beforeEach(() => {
   process.env.ENTERPRISE_AUTO_WIRE_GROUPS = 'true';
   delete process.env.ENTERPRISE_AUTO_WIRE_P2P;
   delete process.env.ENTERPRISE_AUTO_WIRE_GROUP_ISOLATED;
-  delete process.env.ENTERPRISE_AUTO_WIRE_GROUP_STRATEGY;
+  // Keep the test independent from an operator's local .env. An empty
+  // process-level value deliberately shadows any persisted strategy while
+  // still allowing the legacy GROUP_ISOLATED alias to select per-group.
+  process.env.ENTERPRISE_AUTO_WIRE_GROUP_STRATEGY = '';
 });
 
 afterEach(() => {
@@ -166,6 +175,123 @@ describe('enterprise autowire — per-group isolation (ADR-0053)', () => {
     expect(maybeAutowireEnterpriseFrontdesk(mg, event)).toBe(true);
     expect(getMessagingGroupAgentByPair(mg.id, 'ag-fd')).toBeDefined(); // shared frontdesk, not isolated
     expect(getAgentGroupByFolder(perGroupAgentFolder('fd', 'p2p_alice'))).toBeUndefined();
+  });
+
+  it('a DM (p2p) wires per-user so the owner gets their own state scope (ADR-0055)', () => {
+    // Regression: p2p wired session_mode='shared' (owner_user_id NULL), so
+    // every DM user's session mounted the GROUP scope — all DM users of one
+    // frontdesk shared workspace/memory.
+    process.env.ENTERPRISE_AUTO_WIRE_P2P = 'true';
+    seedFrontdesk();
+    const { mg, event } = seedChannel('p2p_alice', false);
+    expect(maybeAutowireEnterpriseFrontdesk(mg, event)).toBe(true);
+    expect(getMessagingGroupAgentByPair(mg.id, 'ag-fd')!.session_mode).toBe('per-user');
+  });
+
+  it('clones prompts/ so an ADR-0054 routing-enabled clone can actually boot', () => {
+    // Regression (ADR-0053 × ADR-0054): the clone copied container.json but not
+    // the prompts/ dir its llm.routing.promptFile points at — provisioning and
+    // wiring succeeded, then every spawn threw in resolveRoutingPromptMount.
+    process.env.ENTERPRISE_AUTO_WIRE_GROUP_ISOLATED = 'true';
+    seedFrontdesk();
+    fs.mkdirSync(`${TEST_DIR}/groups/fd/prompts`, { recursive: true });
+    fs.writeFileSync(`${TEST_DIR}/groups/fd/prompts/frontdesk-routing.md`, 'routing prompt');
+    fs.writeFileSync(
+      `${TEST_DIR}/groups/fd/container.json`,
+      JSON.stringify({
+        skills: ['lookup'],
+        llm: {
+          routing: { enabled: true, provider: 'openai', model: 'm', promptFile: 'prompts/frontdesk-routing.md' },
+        },
+      }),
+    );
+    const { mg, event } = seedChannel('oc_sales', true);
+    expect(maybeAutowireEnterpriseFrontdesk(mg, event)).toBe(true);
+
+    const folder = perGroupAgentFolder('fd', 'oc_sales');
+    expect(fs.existsSync(`${TEST_DIR}/groups/${folder}/container.json`)).toBe(true);
+    expect(fs.readFileSync(`${TEST_DIR}/groups/${folder}/prompts/frontdesk-routing.md`, 'utf8')).toBe('routing prompt');
+  });
+
+  it('mirrors delegation edges onto the clone and grants workers a reply edge', () => {
+    // Regression (ADR-0053): config travels on the filesystem but delegability
+    // travels in agent_destinations (keyed by agent_group_id). The clone has a
+    // new id, so it inherited routing yet had zero authorized workers — and the
+    // a2a ACL has no reply exemption, so workers also need an edge BACK.
+    process.env.ENTERPRISE_AUTO_WIRE_GROUP_ISOLATED = 'true';
+    seedFrontdesk();
+    createAgentGroup({
+      id: 'ag-worker',
+      name: 'Finance',
+      folder: 'worker-finance',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createDestination({
+      agent_group_id: 'ag-fd',
+      local_name: 'finance',
+      target_type: 'agent',
+      target_id: 'ag-worker',
+      created_at: now(),
+    });
+    const { mg, event } = seedChannel('oc_sales', true);
+    expect(maybeAutowireEnterpriseFrontdesk(mg, event)).toBe(true);
+
+    const clone = getAgentGroupByFolder(perGroupAgentFolder('fd', 'oc_sales'))!;
+    // clone can delegate under the same local name the frontdesk used
+    expect(getDestinationByName(clone.id, 'finance')?.target_id).toBe('ag-worker');
+    // worker can answer: reply edge back to the clone
+    expect(hasDestination('ag-worker', 'agent', clone.id)).toBe(true);
+    // exactly one reply edge per worker — no duplicate spray
+    expect(getDestinations('ag-worker').filter((d) => d.target_id === clone.id)).toHaveLength(1);
+    // the frontdesk's own edges are untouched
+    expect(getDestinationByName('ag-fd', 'finance')?.target_id).toBe('ag-worker');
+  });
+
+  it('the clone inherits the frontdesk topology role (ADR-0056)', () => {
+    process.env.ENTERPRISE_AUTO_WIRE_GROUP_ISOLATED = 'true';
+    seedFrontdesk();
+    setAgentGroupRole('ag-fd', 'frontdesk');
+    const { mg, event } = seedChannel('oc_sales', true);
+    expect(maybeAutowireEnterpriseFrontdesk(mg, event)).toBe(true);
+    expect(getAgentGroupByFolder(perGroupAgentFolder('fd', 'oc_sales'))!.role).toBe('frontdesk');
+  });
+
+  it('a pre-role (NULL) clone is healed to the frontdesk role on re-resolve (ADR-0056)', () => {
+    // Clones created before the role column exist with NULL; the topology
+    // script never reaches auto-provisioned folders, so re-resolve fills it.
+    process.env.ENTERPRISE_AUTO_WIRE_GROUP_ISOLATED = 'true';
+    seedFrontdesk();
+    setAgentGroupRole('ag-fd', 'frontdesk');
+    const folder = perGroupAgentFolder('fd', 'oc_sales');
+    createAgentGroup({
+      id: `ag-${folder}`,
+      name: 'Pre-role clone',
+      folder,
+      agent_provider: null,
+      created_at: now(),
+      // no role — simulates a row created before migration 036
+    });
+    const { mg, event } = seedChannel('oc_sales', true);
+    expect(maybeAutowireEnterpriseFrontdesk(mg, event)).toBe(true);
+    expect(getAgentGroupByFolder(folder)!.role).toBe('frontdesk');
+  });
+
+  it('warns (but proceeds) when the configured frontdesk has role=worker (ADR-0056)', async () => {
+    const { log } = await import('./log.js');
+    const warns: string[] = [];
+    const spy = vi.spyOn(log, 'warn').mockImplementation((msg: unknown) => {
+      warns.push(String(msg));
+    });
+    try {
+      seedFrontdesk();
+      setAgentGroupRole('ag-fd', 'worker');
+      const { mg, event } = seedChannel('oc_sales', true);
+      expect(maybeAutowireEnterpriseFrontdesk(mg, event)).toBe(true); // proceeds
+      expect(warns.some((w) => w.includes('role=worker'))).toBe(true); // but complains
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

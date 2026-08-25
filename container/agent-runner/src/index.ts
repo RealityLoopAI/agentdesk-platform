@@ -38,7 +38,9 @@ import { buildSystemPromptAddendum } from './destinations.js';
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
+import { resolveProviderRoles } from './provider-roles.js';
 import { runPollLoop } from './poll-loop.js';
+import { buildEffectiveSystemInstructions } from './workspace-instructions.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
@@ -48,9 +50,13 @@ const CWD = '/workspace/agent';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const providerName = config.provider.toLowerCase() as ProviderName;
+  const roles = resolveProviderRoles(config, process.env.AGENTDESK_EXECUTION_PROVIDER);
+  const providerName = roles.execution.providerName.toLowerCase() as ProviderName;
 
-  log(`Starting v2 agent-runner (provider: ${providerName})`);
+  log(
+    `Starting v2 agent-runner (execution provider: ${providerName}` +
+      `${roles.routing ? `, routing provider: ${roles.routing.providerName}` : ''})`,
+  );
 
   // Runtime-generated system-prompt addendum: agent identity, memory
   // policy, and the live destinations map. Everything else (capabilities,
@@ -59,7 +65,11 @@ async function main(): Promise<void> {
   // shared base (/app/CLAUDE.md) and each enabled module's fragment.
   // Per-group memory lives in /workspace/agent/CLAUDE.local.md
   // (auto-loaded) when the selected provider supports it.
-  const instructions = buildSystemPromptAddendum(config.assistantName || undefined, config.memoryMode);
+  const runtimeInstructions = buildSystemPromptAddendum(
+    config.assistantName || undefined,
+    config.memoryMode,
+    config.agentGroupId || undefined,
+  );
 
   // Discover additional directories mounted at /workspace/extra/*
   const additionalDirectories: string[] = [];
@@ -95,11 +105,31 @@ async function main(): Promise<void> {
   }
 
   const provider = createProvider(providerName, {
+    role: 'execution',
     assistantName: config.assistantName || undefined,
     mcpServers,
-    env: { ...process.env },
+    env: { ...process.env, ...roles.execution.envOverrides },
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
+    model: roles.execution.model,
+    toolMode: roles.execution.toolMode,
   });
+  const instructions = buildEffectiveSystemInstructions({
+    cwd: CWD,
+    runtimeInstructions,
+    loadsWorkspaceInstructionsNatively: provider.loadsWorkspaceInstructionsNatively === true,
+  });
+
+  const routingProvider = roles.routing
+    ? createProvider(roles.routing.providerName as ProviderName, {
+        role: 'routing',
+        assistantName: config.assistantName || undefined,
+        // Routing is deliberately tool-free: no built-in or external MCP servers.
+        mcpServers: {},
+        env: { ...process.env, ...roles.routing.envOverrides },
+        model: roles.routing.model,
+        toolMode: roles.routing.toolMode,
+      })
+    : undefined;
 
   await runPollLoop({
     provider,
@@ -107,6 +137,10 @@ async function main(): Promise<void> {
     cwd: CWD,
     systemContext: { instructions },
     idleExitMs: config.idleExitMs,
+    routing:
+      routingProvider && config.llm?.routing
+        ? { provider: routingProvider, config: config.llm.routing, agentRoot: CWD }
+        : undefined,
   });
 }
 

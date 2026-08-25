@@ -11,7 +11,9 @@
  * modularizing it adds more registry surface than it saves.
  */
 import { getDb, hasTable } from '../../db/connection.js';
+import { getConversationLane } from '../../db/conversation-lanes.js';
 import { deletePendingQuestion, getPendingQuestion, getSession } from '../../db/sessions.js';
+import { appendWebEvent } from '../../db/web-events.js';
 import { wakeContainer } from '../../container-runner.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
@@ -36,8 +38,9 @@ export async function resolvePendingQuestion(
   userId: string | null,
   opts: { cancelled?: boolean } = {},
 ): Promise<void> {
+  const responseMessageId = `qr-${pq.question_id}-${Date.now()}`;
   writeSessionMessage(session.agent_group_id, session.id, {
-    id: `qr-${pq.question_id}-${Date.now()}`,
+    id: responseMessageId,
     kind: 'system',
     timestamp: new Date().toISOString(),
     platformId: pq.platform_id,
@@ -53,6 +56,32 @@ export async function resolvePendingQuestion(
   });
 
   deletePendingQuestion(pq.question_id);
+  const lane = session.conversation_lane_id ? getConversationLane(session.conversation_lane_id) : undefined;
+  if (
+    lane &&
+    lane.status === 'active' &&
+    lane.root_session_id === session.id &&
+    lane.owner_user_id === session.owner_user_id &&
+    lane.agent_group_id === session.agent_group_id
+  ) {
+    try {
+      appendWebEvent({
+        userId: lane.owner_user_id,
+        laneId: lane.id,
+        eventType: 'conversation.message.available',
+        resourceId: responseMessageId,
+      });
+    } catch (error) {
+      // The response is already authoritative in inbound.db. A Web refresh
+      // notification must not roll back or block the Feishu response path.
+      log.warn('Question response Web refresh event failed', {
+        questionId: pq.question_id,
+        sessionId: session.id,
+        laneId: lane.id,
+        error,
+      });
+    }
+  }
   await wakeContainer(session);
 }
 

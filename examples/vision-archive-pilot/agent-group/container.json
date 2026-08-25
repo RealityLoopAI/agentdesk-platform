@@ -1,0 +1,25 @@
+{
+  "mcpServers": {},
+  "backendGateway": {
+    "baseUrl": "http://host.docker.internal:8090",
+    "timeoutMs": 30000
+  },
+  "packages": {
+    "apt": [],
+    "npm": []
+  },
+  "additionalMounts": [],
+  "skills": ["vision-archive-query"],
+  "provider": "openai",
+  "providerModel": "glm-5.2",
+  "memoryMode": "gateway",
+  "a2aSessionMode": "root-session",
+  "groupName": "AgentDesk Vision Archive Worker",
+  "assistantName": "AgentDesk Vision Archive Worker",
+  "resources": {
+    "memoryMb": 1024,
+    "cpus": 1,
+    "pidsLimit": 512
+  },
+  "progressiveDisclosure": false
+}

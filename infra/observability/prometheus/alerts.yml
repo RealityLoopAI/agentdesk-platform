@@ -393,3 +393,77 @@ groups:
             is non-zero. The central DB is rejecting audit writes — pre-forward
             intents fail closed (signed call refused), finalize failures leave a
             'pending' row. Check DB pressure / disk. See RUNBOOK §3.8.
+
+      # Web SSO failures: a sustained majority of completed login attempts are
+      # rejected or hit an identity conflict. `started` is deliberately
+      # excluded from the denominator because users may abandon the provider UI.
+      - alert: AgentDeskWebLoginFailuresElevated
+        expr: >-
+          (
+            sum(rate(agentdesk_web_login_total{outcome=~"rejected|identity_conflict"}[15m]))
+            /
+            clamp_min(sum(rate(agentdesk_web_login_total{outcome=~"succeeded|rejected|identity_conflict"}[15m])), 0.001)
+          ) > 0.5
+          and
+          sum(rate(agentdesk_web_login_total{outcome=~"succeeded|rejected|identity_conflict"}[15m])) > 0.01
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than half of completed Web SSO attempts are failing
+          description: >-
+            Web SSO rejected/identity-conflict outcomes exceeded 50% while
+            completed login traffic remained non-trivial. Check Feishu SSO
+            redirect configuration, provider availability, and identity
+            conflicts. See RUNBOOK §3.13.
+
+      # Web API denials: occasional 401/403/429 responses are expected, but a
+      # sustained aggregate rate usually means expired sessions, an Origin/CSRF
+      # deployment mismatch, probing, or an undersized rate limit.
+      - alert: AgentDeskWebApiDenialsElevated
+        expr: >-
+          sum(rate(agentdesk_web_api_rejected_total{
+            reason=~"authentication_required|forbidden|rate_limited"
+          }[10m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Authenticated Web API denials are elevated
+          description: >-
+            Web API authentication, authorization, or rate-limit denials are
+            sustained above 0.5/s. Split by reason before changing policy; do
+            not weaken Origin, CSRF, or Host access gates. See RUNBOOK §3.13.
+
+      # A Binding failure is fail-closed by design. A sustained rate indicates
+      # identity ownership drift or competing active delivery addresses.
+      - alert: AgentDeskConversationBindingFailures
+        expr: sum(rate(agentdesk_conversation_binding_failures_total[15m])) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Conversation Binding creation is failing persistently
+          description: >-
+            Conversation Binding failures are sustained above 0.05/s. Inspect
+            the bounded reason label and identity/Lane audit rows; never merge
+            users or shared sessions to make the alert disappear. See RUNBOOK
+            §3.14.
+
+      # Feishu returns 429 when tenant/app quotas are exhausted. The adapter
+      # preserves that outcome separately from generic errors so operators can
+      # reduce concurrency or request quota without touching Agent authz.
+      - alert: AgentDeskFeishuBitableRateLimited
+        expr: >-
+          sum by (operation) (
+            rate(agentdesk_feishu_bitable_operations_total{outcome="rate_limited"}[10m])
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Feishu Bitable Gateway operations are being rate-limited
+          description: >-
+            A Bitable operation is receiving sustained Feishu 429 responses.
+            Reduce concurrency, honor retry guidance, and verify tenant quota;
+            do not bypass the Backend Gateway. See RUNBOOK §3.14.

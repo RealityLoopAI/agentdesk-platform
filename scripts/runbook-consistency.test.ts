@@ -64,11 +64,34 @@ const RUNBOOK_COLUMN_REFERENCES: Record<string, string[]> = {
     'occurred_at',
     'user_id',
     'operation',
+    'logical_resource',
     'requester_source',
     'status',
     'http_status',
     'duration_ms',
     'input_hash',
+    'idempotency_key',
+  ],
+  // §3.13 — Web auth session inspection (hashes only, never browser tokens)
+  web_auth_sessions: [
+    'id_hash',
+    'user_id',
+    'created_at',
+    'last_seen_at',
+    'idle_expires_at',
+    'absolute_expires_at',
+    'revoked_at',
+  ],
+  // §3.14 — active cross-channel Binding inspection
+  conversation_bindings: [
+    'id',
+    'lane_id',
+    'channel_type',
+    'platform_id',
+    'delivery_mode',
+    'verified_at',
+    'external_identity_id',
+    'revoked_at',
   ],
 };
 

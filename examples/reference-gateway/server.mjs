@@ -18,6 +18,7 @@
  *   POST /memory/upsert   -> { ok, value, source, validAt, op }  (ADR-0050)
  *   POST /memory/search   -> { ok, results: [{ value, source, score, validAt, invalidAt? }] }
  *   POST /memory/feedback -> { ok, accepted, feedbackId }       (ADR-0043)
+ *   POST /confirmation/issue -> { ok, confirmation, expiresAt, bindingHash, auditId } (ADR-0073)
  *
  * Design goals (deliberately NOT production):
  *   - Zero dependencies. Node built-ins only (node:http, node:crypto).
@@ -50,6 +51,9 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
 
+import { createFeishuBitableAdapter, loadFeishuBitableConfigFromEnv } from './feishu-bitable-adapter.mjs';
+import { createVisionArchiveAdapter, loadVisionArchiveConfigFromEnv } from './vision-archive-adapter.mjs';
+
 const PORT = Number.parseInt(process.env.PORT || '8088', 10);
 
 /**
@@ -57,11 +61,12 @@ const PORT = Number.parseInt(process.env.PORT || '8088', 10);
  * `agentdesk`; if an operator overrides BRAND_NAMESPACE on the platform side,
  * set the same value here so the header names line up.
  */
-const NS = (process.env.BRAND_NAMESPACE || 'agentdesk')
-  .trim()
-  .toLowerCase()
-  .replace(/[^a-z0-9-]/g, '-')
-  .replace(/^-+|-+$/g, '') || 'agentdesk';
+const NS =
+  (process.env.BRAND_NAMESPACE || 'agentdesk')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/^-+|-+$/g, '') || 'agentdesk';
 const HDR_TIMESTAMP = `x-${NS}-timestamp`;
 const HDR_NONCE = `x-${NS}-nonce`;
 const HDR_SIGNATURE = `x-${NS}-signature`;
@@ -71,6 +76,32 @@ const SIGNING_KEY = process.env.GATEWAY_SIGNING_KEY?.trim() || null;
 
 /** Wire-contract version the platform stamps; we echo it back. */
 const CONTRACT_VERSION = 1;
+
+/**
+ * Optional Feishu Bitable business adapter (ADR-0063). No Bitable operation is
+ * advertised unless the full Gateway-only credential/resource configuration is
+ * present. Secrets and tenant tokens stay inside the adapter closure.
+ */
+const BITABLE_CONFIG = loadFeishuBitableConfigFromEnv(process.env);
+const bitableAdapter = BITABLE_CONFIG
+  ? createFeishuBitableAdapter({
+      ...BITABLE_CONFIG,
+      audit: (event) => console.error(`[bitable-audit] ${JSON.stringify(event)}`),
+    })
+  : null;
+
+/**
+ * Optional request-driven archive adapter (ADR-0070). Loading configuration
+ * and constructing the adapter perform no filesystem access; the mounted
+ * archive root is touched only by an authorized /execute request.
+ */
+const VISION_ARCHIVE_CONFIG = loadVisionArchiveConfigFromEnv(process.env);
+const visionArchiveAdapter = VISION_ARCHIVE_CONFIG
+  ? createVisionArchiveAdapter({
+      ...VISION_ARCHIVE_CONFIG,
+      audit: (event) => console.error(`[vision-archive-audit] ${JSON.stringify(event)}`),
+    })
+  : null;
 
 /**
  * In-memory durable store. Real backends use a database.
@@ -152,7 +183,7 @@ function runOperation(op, req) {
  * failure — instead of an HTTP status, since a batch aggregates many outcomes.
  * Honors per-op idempotency replay exactly like single /execute.
  */
-function runSingleForBulk(entry, req, dryRun) {
+async function runSingleForBulk(entry, req, dryRun) {
   const op = String(entry?.operation || '');
   if (!OPERATION_NAMES.has(op)) {
     return { ok: false, error: { code: 'OPERATION_NOT_FOUND', message: `unknown operation: ${op}` } };
@@ -162,6 +193,32 @@ function runSingleForBulk(entry, req, dryRun) {
     return { ok: false, error: { code: 'BACKEND_UNAUTHORIZED', message: 'untrusted requester may not mutate' } };
   }
   const key = entry?.idempotencyKey;
+  if (bitableAdapter?.isOperation(op)) {
+    const outcome = await bitableAdapter.execute({
+      ...req,
+      operation: op,
+      input: entry?.input ?? {},
+      dryRun,
+      idempotencyKey: key,
+    });
+    if (outcome?.status && outcome?.body) return { ok: false, error: outcome.body };
+    return {
+      ok: true,
+      ...(dryRun ? { preview: outcome.preview } : { result: outcome.result }),
+      auditId: outcome.auditId,
+      ...(outcome.replayed ? { replayed: true } : {}),
+    };
+  }
+  if (visionArchiveAdapter?.isOperation(op)) {
+    const outcome = await visionArchiveAdapter.execute({
+      ...req,
+      operation: op,
+      input: entry?.input ?? {},
+      dryRun,
+    });
+    if (outcome?.status && outcome?.body) return { ok: false, error: outcome.body };
+    return { ok: true, result: outcome.result, auditId: outcome.auditId };
+  }
   if (def.mutating && !dryRun && key && idempotency.has(key)) {
     return { ...idempotency.get(key), replayed: true };
   }
@@ -180,7 +237,7 @@ function runSingleForBulk(entry, req, dryRun) {
  * would reflect what the fronted system can actually do, with required fields
  * and approval hints per operation.
  */
-const OPERATIONS = [
+const BASE_OPERATIONS = [
   {
     // The conformance runner probes /authorize and /execute with this exact
     // operation name. Exposing it as a safe, non-mutating no-op lets a
@@ -234,6 +291,11 @@ const OPERATIONS = [
       },
     },
   },
+];
+const OPERATIONS = [
+  ...BASE_OPERATIONS,
+  ...(bitableAdapter?.describeOperations() ?? []),
+  ...(visionArchiveAdapter?.describeOperations() ?? []),
 ];
 const OPERATION_NAMES = new Set(OPERATIONS.map((o) => o.name));
 
@@ -316,8 +378,10 @@ const handlers = {
     ],
   }),
 
-  '/authorize': (req) => {
+  '/authorize': async (req) => {
     const op = String(req.operation || '');
+    if (bitableAdapter?.isOperation(op)) return bitableAdapter.authorize(req);
+    if (visionArchiveAdapter?.isOperation(op)) return visionArchiveAdapter.authorize(req);
     if (!OPERATION_NAMES.has(op)) {
       return { allowed: false, reason: `unknown operation: ${op}` };
     }
@@ -333,8 +397,10 @@ const handlers = {
     };
   },
 
-  '/execute': (req) => {
+  '/execute': async (req) => {
     const op = String(req.operation || '');
+    if (bitableAdapter?.isOperation(op)) return bitableAdapter.execute(req);
+    if (visionArchiveAdapter?.isOperation(op)) return visionArchiveAdapter.execute(req);
     if (!OPERATION_NAMES.has(op)) {
       // Surface a structured, classifiable error (maps to OPERATION_NOT_FOUND).
       return { status: 404, body: { code: 'OPERATION_NOT_FOUND', message: `unknown operation: ${op}` } };
@@ -379,8 +445,21 @@ const handlers = {
     return response;
   },
 
+  '/confirmation/issue': async (req) => {
+    if (!bitableAdapter) {
+      return {
+        status: 404,
+        body: {
+          code: 'OPERATION_NOT_FOUND',
+          message: 'confirmation issuance is not configured',
+        },
+      };
+    }
+    return bitableAdapter.issueConfirmationRequest(req);
+  },
+
   // Optional batch endpoint (ADR-0036). Runs N operations in one round-trip.
-  '/bulk_execute': (req) => {
+  '/bulk_execute': async (req) => {
     const ops = Array.isArray(req.operations) ? req.operations : null;
     if (!ops || ops.length === 0) {
       return { status: 400, body: { code: 'VALIDATION_FAILED', message: 'operations must be a non-empty array' } };
@@ -388,6 +467,16 @@ const handlers = {
     const dryRun = req.dryRun === true;
 
     if (req.atomic === true) {
+      if (ops.some((entry) => bitableAdapter?.isOperation(String(entry?.operation || '')))) {
+        return {
+          status: 422,
+          body: {
+            code: 'VALIDATION_FAILED',
+            message:
+              'generic atomic bulk_execute cannot span Feishu calls; use one feishu.bitable.record.batch_* operation',
+          },
+        };
+      }
       // All-or-nothing. A real backend wraps the commits in ONE transaction; this
       // reference approximates by pre-validating every op (existence + trust) and
       // committing only if all pass — otherwise nothing commits.
@@ -407,15 +496,20 @@ const handlers = {
           ok: false,
           partial: false,
           results: problems.map((p, i) =>
-            p ? { ok: false, error: p } : { ok: false, error: { code: 'UNKNOWN', message: 'aborted: atomic batch had a failing operation' } },
+            p
+              ? { ok: false, error: p }
+              : { ok: false, error: { code: 'UNKNOWN', message: 'aborted: atomic batch had a failing operation' } },
           ),
         };
       }
-      return { ok: true, partial: false, results: ops.map((o) => runSingleForBulk(o, req, dryRun)) };
+      const results = [];
+      for (const operation of ops) results.push(await runSingleForBulk(operation, req, dryRun));
+      return { ok: true, partial: false, results };
     }
 
     // Best-effort: each op runs independently; partial=true if any failed.
-    const results = ops.map((o) => runSingleForBulk(o, req, dryRun));
+    const results = [];
+    for (const operation of ops) results.push(await runSingleForBulk(operation, req, dryRun));
     const anyFailed = results.some((r) => r.ok === false);
     return { ok: !anyFailed, partial: anyFailed, results };
   },
@@ -449,9 +543,8 @@ const handlers = {
     const live = liveVersion(versions);
 
     // Merge against the live value when the caller asked for a partial update.
-    const value = req.merge && live && isObject(live.value) && isObject(req.value)
-      ? { ...live.value, ...req.value }
-      : req.value;
+    const value =
+      req.merge && live && isObject(live.value) && isObject(req.value) ? { ...live.value, ...req.value } : req.value;
 
     // A.U.D.N. reconciliation (ADR-0050). This demo is DETERMINISTIC: it
     // compares the canonical JSON of the live value to decide add/update/no-op.
@@ -586,7 +679,7 @@ const server = http.createServer((req, res) => {
 
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
-  req.on('end', () => {
+  req.on('end', async () => {
     const rawBody = Buffer.concat(chunks).toString('utf8');
 
     const sigError = verifySignature(req.headers, rawBody);
@@ -601,7 +694,7 @@ const server = http.createServer((req, res) => {
 
     let result;
     try {
-      result = handler(parsed);
+      result = await handler(parsed);
     } catch (err) {
       return sendError(res, 500, {
         code: 'BACKEND_UNAVAILABLE',
@@ -619,8 +712,12 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.error(`reference-gateway listening on http://localhost:${PORT}`);
-  console.error(`  signing: ${SIGNING_KEY ? `required (headers x-${NS}-*)` : 'disabled (set GATEWAY_SIGNING_KEY to require)'}`);
+  console.error(
+    `  signing: ${SIGNING_KEY ? `required (headers x-${NS}-*)` : 'disabled (set GATEWAY_SIGNING_KEY to require)'}`,
+  );
   console.error(
     `  endpoints: /describe /authorize /execute /bulk_execute /task/status /memory/get /memory/upsert /memory/search /memory/feedback`,
   );
+  console.error(`  Feishu Bitable: ${bitableAdapter ? 'enabled through Gateway operations' : 'disabled'}`);
+  console.error(`  Vision Archive: ${visionArchiveAdapter ? 'enabled for on-demand reads' : 'disabled'}`);
 });

@@ -6,8 +6,8 @@ import { getDb, hasTable } from './connection.js';
 export function createSession(session: Session): void {
   getDb()
     .prepare(
-      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, owner_user_id, root_session_id, agent_provider, status, container_status, last_active, archived_at, spawn_depth, conversation_thread_id, created_at)
-       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @owner_user_id, @root_session_id, @agent_provider, @status, @container_status, @last_active, @archived_at, @spawn_depth, @conversation_thread_id, @created_at)`,
+      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, owner_user_id, root_session_id, conversation_lane_id, agent_provider, status, container_status, last_active, archived_at, spawn_depth, conversation_thread_id, created_at)
+       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @owner_user_id, @root_session_id, @conversation_lane_id, @agent_provider, @status, @container_status, @last_active, @archived_at, @spawn_depth, @conversation_thread_id, @created_at)`,
     )
     .run({
       ...session,
@@ -15,6 +15,7 @@ export function createSession(session: Session): void {
       archived_at: session.archived_at ?? null,
       spawn_depth: session.spawn_depth ?? 0,
       conversation_thread_id: session.conversation_thread_id ?? null,
+      conversation_lane_id: session.conversation_lane_id ?? null,
     });
 }
 
@@ -105,12 +106,49 @@ export function findSessionByAgentGroup(agentGroupId: string): Session | undefin
     .get(agentGroupId) as Session | undefined;
 }
 
+/**
+ * Newest active session of the group OWNED by this user (any messaging
+ * group / thread). The owner-aware a2a fall-through (agent-route) uses this
+ * so an owned source's reply lands in the same user's lane — never in the
+ * newest-any-owner session findSessionByAgentGroup would pick.
+ */
+export function findNewestOwnedSessionForAgent(agentGroupId: string, ownerUserId: string): Session | undefined {
+  return getDb()
+    .prepare(
+      "SELECT * FROM sessions WHERE agent_group_id = ? AND owner_user_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(agentGroupId, ownerUserId) as Session | undefined;
+}
+
+/**
+ * Newest active OWNERLESS session of the group — a shared lane, which serves
+ * multiple users by design (identity travels per message via origin_user_id),
+ * as opposed to another user's private (owned, ADR-0055 user-scoped) lane.
+ */
+export function findNewestOwnerlessSessionForAgent(agentGroupId: string): Session | undefined {
+  return getDb()
+    .prepare(
+      "SELECT * FROM sessions WHERE agent_group_id = ? AND owner_user_id IS NULL AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(agentGroupId) as Session | undefined;
+}
+
 export function findSessionForAgentRoot(agentGroupId: string, rootSessionId: string): Session | undefined {
   return getDb()
     .prepare(
       "SELECT * FROM sessions WHERE agent_group_id = ? AND root_session_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
     )
     .get(agentGroupId, rootSessionId) as Session | undefined;
+}
+
+export function findActiveSessionForConversationLane(laneId: string): Session | undefined {
+  return getDb()
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE conversation_lane_id = ? AND id = root_session_id AND status = 'active'
+       LIMIT 1`,
+    )
+    .get(laneId) as Session | undefined;
 }
 
 export function getSessionsByAgentGroup(agentGroupId: string): Session[] {
@@ -213,8 +251,21 @@ export function updateSession(
     .run(values);
 }
 
+/**
+ * Hard-delete a session row. `pending_questions.session_id` REFERENCES
+ * sessions(id) with no ON DELETE clause and `foreign_keys = ON`, so any
+ * still-pending question card would make a bare DELETE throw — and the archive
+ * sweep deletes the tarball BEFORE this call, so a throwing row became a
+ * poison row: data destroyed, row undeletable, retried every sweep forever.
+ * Purge the delivery bookkeeping in the same transaction instead; a session
+ * being hard-deleted is past retention, its question cards are long moot.
+ */
 export function deleteSession(id: string): void {
-  getDb().prepare('DELETE FROM sessions WHERE id = ?').run(id);
+  const db = getDb();
+  db.transaction(() => {
+    db.prepare('DELETE FROM pending_questions WHERE session_id = ?').run(id);
+    db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+  })();
 }
 
 // ── Pending Questions ──
@@ -386,6 +437,15 @@ export function getAskQuestionRender(
   const a = getDb().prepare('SELECT title, options_json FROM pending_approvals WHERE approval_id = ?').get(id) as
     { title: string; options_json: string } | undefined;
   if (a?.title) return { title: a.title, options: JSON.parse(a.options_json) };
+
+  if (hasTable(getDb(), 'pending_gateway_confirmations')) {
+    const confirmation = getDb()
+      .prepare('SELECT title, options_json FROM pending_gateway_confirmations WHERE confirmation_id = ?')
+      .get(id) as { title: string; options_json: string } | undefined;
+    if (confirmation?.title) {
+      return { title: confirmation.title, options: JSON.parse(confirmation.options_json) };
+    }
+  }
 
   // Channel-registration + unknown-sender approvals persist title/options_json
   // the same way pending_approvals does — just SELECT and return.

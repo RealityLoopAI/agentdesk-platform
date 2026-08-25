@@ -41,7 +41,7 @@ configured bot name.
 Behavior:
 
 - `webhook`: current default, HTTP callback only
-- `long-connection`: receive `im.message.receive_v1` over Feishu's long connection
+- `long-connection`: receive subscribed message, card-action, and roster events over Feishu's long connection
 - `hybrid`: start the long connection client and also keep webhook callbacks
 
 Use `long-connection` or `hybrid` when your Feishu app is configured to use
@@ -68,8 +68,12 @@ Webhook mode requires `FEISHU_ENCRYPT_KEY`. The adapter verifies
 `x-lark-signature` before it parses the JSON body, and it accepts encrypted
 webhook payloads.
 
-Long-connection mode does not require a public callback URL for message
-events, but webhook callbacks are still useful for interactive card actions.
+Long-connection mode does not require a public callback URL for subscribed
+events, including interactive-card actions. The Feishu developer console must
+still subscribe the app to `card.action.trigger`; the Host registers that event
+on the WebSocket dispatcher and acknowledges each click within Feishu's
+three-second callback window. Webhook callbacks are only needed when the app is
+configured for `webhook` or `hybrid` transport.
 
 ## Event support
 
@@ -81,6 +85,10 @@ Current scope:
 - `im.chat.member.user.deleted_v1` (roster-DM leave revoke, best-effort; ADR-0023 item 11b)
 - `im.chat.disbanded_v1` (roster-DM disband revoke, best-effort; ADR-0023 item 11b)
 
+Subscribe the app to `card.action.trigger` in the Feishu developer console
+whenever interactive confirmation or roster cards are enabled. Sending a card
+does not implicitly subscribe its callback event.
+
 Subscribe the bot to the two `im.chat.*` events in the Feishu developer console
 if you enable roster DMs and want the best-effort leave/disband revoke (the
 hard guarantee is the opt-out command + the optional send-time membership
@@ -90,6 +98,46 @@ re-check below — the events only tighten the window).
 
 - group chat inbound -> `platform_id = feishu:<chat_id>`
 - p2p inbound -> `platform_id = feishu:p2p:<open_id>`
+
+发送者身份与聊天地址是两件事。原生飞书适配器从已验证事件的
+`sender.sender_id` 选择 `open_id`、`user_id` 或 `union_id`，并在 Host Envelope 上写入
+`senderIdentity`。其中 `provider_scope = FEISHU_APP_ID`，因为同一字符串形式的 `open_id`
+不能跨飞书应用直接比较。权限模块随后通过中央表 `user_identities` 得到规范 `users.id`，
+再执行既有成员、角色和 Organization 门控。此元数据不会进入 Agent Prompt，数据库也不保存
+飞书 Token。
+
+如果部署同时启用 Web，只有在 `CROSS_CHANNEL_LANES_ENABLED=true` 且外部身份、Channel 地址、
+规范用户、Agent Group 和用户级 Session 模式全部匹配时，飞书消息才会自动命中 Web
+Conversation Lane。详细启用与回滚步骤见
+[Web 与飞书统一消息运维手册](web-feishu-unified-messaging-operations.md)。
+
+飞书是统一消息的主入口。上述条件满足时，第一条合格飞书入站会在 Host 访问门之后自动创建或复用
+Lane 和飞书 Binding；它不会创建 Role、Agent Group Membership 或 Organization Membership。
+相同飞书地址和根 Session 的重复 Callback 会收敛到原 Lane。同一用户在同一 Agent Group 下仍可
+拥有多条 Lane，不同飞书根 Session 不会因为助手相同而被合并。
+
+升级前已经存在的 `per-user` / `per-user-per-thread` Session 由用户完成 SSO 时做有界协调，也可由
+已登录前端或运营 CLI 分页续跑。协调只读取 Owner、Agent Group、Messaging Group、Session Mode
+和 Session ID 等结构字段，不扫描消息正文；`shared`、`per-thread`、`agent-shared` 会被明确跳过。
+`CROSS_CHANNEL_LANES_ENABLED=false` 只关闭新的飞书入站自动关联，不删除已经关联的 Lane，也不
+代替显式 SSO/运营协调的灰度控制。
+
+旧部署的 `users.id = feishu:ou_*` 保持不变；安全回填只增加 `(App Scope, open_id) ->
+users.id` 的关联，不重写 Role、Membership、Session 或 Audit 外键。身份冲突会拒绝处理，
+不会自动合并两个用户的权限。
+
+### Web 回复镜像与回环防护
+
+用户可在 Web 会话中显式开启“飞书提醒”。收件地址不是浏览器参数，而是 Host 从当前规范用户在
+同一 `FEISHU_APP_ID` Scope 下已经验证的 `open_id` 推导出的 `feishu:p2p:ou_*`。默认关闭，
+且只镜像 Web Turn 对应的 Agent 纯文字回复，不镜像用户消息、群聊或卡片/附件操作。
+
+镜像记录使用稳定 Delivery ID。飞书 Adapter 对每个文本分片从该 ID 生成不含正文和身份的
+`uuid` 查询参数，并保证不超过飞书接口的 50 字符限制；相同 Host 重试会复用相同 `uuid`。
+
+入站事件还会在通用 Router 之前过滤 `sender.sender_type = app`，并兼容
+`FEISHU_BOT_OPEN_ID` 精确匹配。被过滤事件写入 `cross_channel_loop_suppressed` Enterprise
+Audit；即使审计存储临时失败，消息仍会被拦截，避免机器人回复再次触发 Agent 形成回环。
 
 That synthetic p2p mapping is intentional. It keeps host-initiated DM delivery
 and user-initiated DM replies on the same AgentDesk messaging-group/session key.
@@ -114,8 +162,8 @@ single unguessable per-scope key can't be shared across conversations.
 
 1. **p2p-ingress** — the participant sends the bot a **direct (p2p) message**
    carrying a roster opt-in payload (`{"kind":"roster.optin","scopeId":...,
-   "slotLabel":...,"agentGroupId":...}`). The participant's `open_id` is taken
-   from `sender.sender_id.open_id` of *that* inbound event.
+"slotLabel":...,"agentGroupId":...}`). The participant's `open_id` is taken
+   from `sender.sender_id.open_id` of _that_ inbound event.
 
 2. **directed-card** — the participant clicks a card whose action value is a
    roster opt-in AND whose `expectedUserId` is set to their **own member
@@ -146,14 +194,14 @@ are an opaque scope binding, meaningless to a human. **Whoever builds the card
 framing**, and a bare "Allow" button with no context produces bad outcomes both
 ways: people click consent without understanding what they signed up for (then
 complain about DM volume), or decline defensively (and the agent can't reach
-them). So build the card to answer "what am I subscribing to?" *before* the
+them). So build the card to answer "what am I subscribing to?" _before_ the
 button:
 
 - **Render the subscription terms in the card body**, above the opt-in button —
   what will be sent, how often, and who is sending it. Add a one-line
   **rationale** ("so I can ping you when your review is ready").
 - **Make the button text specific** — "Subscribe to daily product updates", not
-  "Allow". The button's *action value* still carries the `roster.optin` payload;
+  "Allow". The button's _action value_ still carries the `roster.optin` payload;
   only the label changes.
 - **Offer a way out** — mention that they can opt out anytime by sending
   `{"kind":"roster.optout","scopeId":...}` (or a directed opt-out card), so
@@ -169,9 +217,16 @@ own `open_id`):
     "title": "Subscribe to QA review pings?",
     "body": "Sender: QA Frontdesk bot. You'll get a direct message when a review you own is ready — about 1–3 per day, only for your reviews. Opt out anytime.",
     "actions": [
-      { "label": "Subscribe to QA review pings",
-        "value": { "kind": "roster.optin", "scopeId": "scope-...", "slotLabel": "reviewer",
-                   "agentGroupId": "ag-...", "expectedUserId": "ou_<this member>" } }
+      {
+        "label": "Subscribe to QA review pings",
+        "value": {
+          "kind": "roster.optin",
+          "scopeId": "scope-...",
+          "slotLabel": "reviewer",
+          "agentGroupId": "ag-...",
+          "expectedUserId": "ou_<this member>"
+        }
+      }
     ]
   }
 }
@@ -212,7 +267,7 @@ triple on top of it, all host-mediated — the container is a thin emitter and
 every security-critical field is host-stamped.
 
 - **Discover.** On every container wake (only when `ALLOW_ROSTER_DM` is on) the
-  host projects the scope's *live* grants into the session's `inbound.db`
+  host projects the scope's _live_ grants into the session's `inbound.db`
   `roster_slots` table — **only** `{slot_label, sends_remaining, expires_at}`,
   with **zero identity fields** (no `open_id`, no `dm_platform_id`, no
   `scope_id`). The container reads it into a "Roster slots you can DM"
@@ -236,11 +291,11 @@ every security-critical field is host-stamped.
   2. `scopeId` + `agentGroupId` are re-derived from the session — never read from
      the container's row.
   3. `member` must be a p2p `open_id` (`ou_*`); anything else is rejected.
-  4. **One-shot per `(scope, member)`:** if *any* grant row already exists (live
+  4. **One-shot per `(scope, member)`:** if _any_ grant row already exists (live
      **or** revoked/opted-out) the re-invite is suppressed — a harassment guard,
      not just a rate limit. Someone who already chose (in or out) is never
      re-asked.
-  5. **Membership is mandatory:** the target must be a *current* member of the
+  5. **Membership is mandatory:** the target must be a _current_ member of the
      wired origin group (`isMember === true`). **Unknown also rejects** — for a
      new-contact vector the bar is absolute (unlike the send path, which may fall
      back on unknown). An ambiguous origin (the session is not wired to exactly
@@ -302,7 +357,7 @@ group's `container.json` `backendGateway`. The host then asks the gateway
 container's gateway calls) **before** honoring the local grant:
 
 - Request body: `{ operation:"roster.dm.authorize", scopeId, slotLabel,
-  participantOpenId, dmPlatformId, agentGroupId, channelType }`.
+participantOpenId, dmPlatformId, agentGroupId, channelType }`.
 - The gateway must reply `{"decision":"allow"}` (optionally with an authoritative
   `target:{channelType,dmPlatformId}` override, re-validated to a `feishu:p2p:ou_*`
   p2p destination) to permit the send; anything else denies.
@@ -315,15 +370,15 @@ container's gateway calls) **before** honoring the local grant:
 
 Quantified ceilings for a single deployment with roster DMs enabled:
 
-| Bound | Mechanism | Default | Env knob |
-|-------|-----------|---------|----------|
-| Addressable people per scope | `UNIQUE(scope_id, participant_open_id)` — one slot per participant; only consented participants are addressable | bounded by number of consents in the scope | — (consent-gated) |
-| Sends per grant (lifetime) | per-grant `max_sends` (auto-revoke) | 0 = uncapped | set `maxSends` on the opt-in payload |
-| Sends per grant / window | rate ledger `grant` key | 3 / 60s | (code default) |
-| Sends per participant / window | rate ledger `participant` key | 5 / 60s | (code default) |
-| Sends per scope / window | rate ledger `scope` key | 20 / 60s | (code default) |
-| Sends per deployment / short window | rate ledger `deploy` key | 100 / 60s | `ROSTER_DEPLOY_WINDOW_CAP`, `ROSTER_DEPLOY_WINDOW_SEC` |
-| Sends per deployment / day (tumbling, UTC boundary) | deploy daily cap | 0 = off | `ROSTER_DEPLOY_DAILY_CAP` |
+| Bound                                               | Mechanism                                                                                                       | Default                                    | Env knob                                               |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------ |
+| Addressable people per scope                        | `UNIQUE(scope_id, participant_open_id)` — one slot per participant; only consented participants are addressable | bounded by number of consents in the scope | — (consent-gated)                                      |
+| Sends per grant (lifetime)                          | per-grant `max_sends` (auto-revoke)                                                                             | 0 = uncapped                               | set `maxSends` on the opt-in payload                   |
+| Sends per grant / window                            | rate ledger `grant` key                                                                                         | 3 / 60s                                    | (code default)                                         |
+| Sends per participant / window                      | rate ledger `participant` key                                                                                   | 5 / 60s                                    | (code default)                                         |
+| Sends per scope / window                            | rate ledger `scope` key                                                                                         | 20 / 60s                                   | (code default)                                         |
+| Sends per deployment / short window                 | rate ledger `deploy` key                                                                                        | 100 / 60s                                  | `ROSTER_DEPLOY_WINDOW_CAP`, `ROSTER_DEPLOY_WINDOW_SEC` |
+| Sends per deployment / day (tumbling, UTC boundary) | deploy daily cap                                                                                                | 0 = off                                    | `ROSTER_DEPLOY_DAILY_CAP`                              |
 
 All windows are AND-combined (a send must be under every key) and the ledger is
 host-single-writer, so the limits survive a process restart. The deploy daily

@@ -18,6 +18,7 @@
 import { recordDroppedMessage } from '../../db/dropped-messages.js';
 import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, setMessagingGroupDeniedAt } from '../../db/messaging-groups.js';
+import { resolveOrCreateCanonicalUser } from '../../db/user-identities.js';
 import {
   routeInbound,
   setAccessGate,
@@ -65,7 +66,7 @@ interface PendingNameInput {
 }
 const awaitingNameInput = new Map<string, PendingNameInput>();
 
-function extractAndUpsertUser(event: InboundEvent): string | null {
+export function extractAndUpsertUser(event: InboundEvent): string | null {
   let content: Record<string, unknown>;
   try {
     content = JSON.parse(event.message.content) as Record<string, unknown>;
@@ -89,6 +90,23 @@ function extractAndUpsertUser(event: InboundEvent): string | null {
     (typeof author?.userName === 'string' ? (author.userName as string) : undefined);
 
   const rawHandle = senderIdField ?? senderField ?? authorUserId;
+
+  // Native adapters can attach a provider-confirmed identity to the Host
+  // envelope. Resolve this before consulting message content: the content is
+  // Agent-visible payload, while senderIdentity is adapter-established trust
+  // metadata (ADR-0061). The legacy id preserves existing role/session FKs.
+  if (event.senderIdentity) {
+    return resolveOrCreateCanonicalUser({
+      provider: event.senderIdentity.provider,
+      providerScope: event.senderIdentity.providerScope,
+      identifierType: event.senderIdentity.identifierType,
+      externalSubject: event.senderIdentity.externalSubject,
+      legacyUserId: `${event.senderIdentity.provider}:${event.senderIdentity.externalSubject}`,
+      userKind: event.senderIdentity.provider,
+      displayName: senderName ?? null,
+    });
+  }
+
   if (!rawHandle) return null;
 
   const userId = rawHandle.includes(':') ? rawHandle : `${event.channelType}:${rawHandle}`;

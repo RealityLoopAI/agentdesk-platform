@@ -70,7 +70,9 @@ CREATE TABLE messaging_group_agents (
 
 ### 1.4 `users`
 
-Platform user identities. ID is namespaced: `tg:123456`, `discord:abc`, `phone:+1555...`, `email:a@x.com`. One human may own several rows — no cross-channel linking yet.
+规范用户，也就是角色、成员关系、Session Owner 和审计共同引用的授权主体。旧部署的 ID
+通常仍是带渠道前缀的形式，例如 `feishu:ou_xxx`；迁移不会重写这些主键。新代码必须把
+`users.id` 当作不透明值，通过 `user_identities` 连接外部身份（ADR-0061）。
 
 ```sql
 CREATE TABLE users (
@@ -81,7 +83,33 @@ CREATE TABLE users (
 );
 ```
 
-- **Writers/readers:** `src/modules/permissions/db/users.ts`; channel auth flows
+- **Writers/readers:** `src/modules/permissions/db/users.ts`、`src/db/user-identities.ts`、认证流程
+
+### 1.4a `user_identities`（ADR-0061）
+
+把一个经过 Provider 协议验证的外部 Subject 连接到规范用户。该表不保存 OAuth Token、
+飞书 App Secret 或任何可用于调用 Provider 的凭证。
+
+```sql
+CREATE TABLE user_identities (
+  id               TEXT PRIMARY KEY,
+  user_id          TEXT NOT NULL REFERENCES users(id),
+  provider         TEXT NOT NULL,
+  provider_scope   TEXT NOT NULL,
+  identifier_type  TEXT NOT NULL,
+  external_subject TEXT NOT NULL,
+  verified_at      TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  last_seen_at     TEXT NOT NULL,
+  UNIQUE(provider, provider_scope, identifier_type, external_subject)
+);
+CREATE INDEX idx_user_identities_user ON user_identities(user_id);
+```
+
+- `provider_scope` 是身份命名空间的一部分。飞书 `open_id` 按应用隔离，不能跨 App 直接比较。
+- 同一个外部身份只能属于一个规范用户；冲突时 Fail Closed，不自动合并授权状态。
+- 重新关联只能走受审计的 `relinkUserIdentity()`。
+- 旧 `feishu:ou_*` 回填只增加映射，不修改任何既有外键。
 
 ### 1.5 `user_roles`
 
@@ -106,6 +134,7 @@ CREATE UNIQUE INDEX idx_user_roles_org_grant
 ```
 
 Invariants:
+
 - **Exactly one scope axis per row** (enforced in `grantRole()`): global (both NULL) |
   group (`agent_group_id` set) | org (`organization_id` set).
 - `role = 'owner'` → global only. `org-admin` → org-scoped. `admin` → global or group.
@@ -173,7 +202,10 @@ Populated lazily by `ensureUserDm()` in `src/modules/permissions/user-dm.ts`.
 
 ### 1.8 `sessions`
 
-Session registry. One row per `(agent group, messaging group, thread, owner_user_id)` tuple subject to `session_mode`. `owner_user_id` is null for legacy/shared sessions and populated only for user-scoped modes. Stores lifecycle metadata only — no messages.
+Session registry. 未关联跨渠道 Lane 时，一行通常对应受 `session_mode` 约束的
+`(agent group, messaging group, thread, owner_user_id)`。关联 Lane 后，来自不同渠道的同一用户
+可以通过 `conversation_lane_id` 解析到同一个根 Session。`owner_user_id` 在旧版/共享 Session
+中为空，只在用户级模式中保存。该表只保存生命周期和结构元数据，不保存消息正文。
 
 ```sql
 CREATE TABLE sessions (
@@ -182,19 +214,167 @@ CREATE TABLE sessions (
   messaging_group_id TEXT REFERENCES messaging_groups(id),
   thread_id          TEXT,
   owner_user_id      TEXT,
+  root_session_id    TEXT,
+  conversation_thread_id TEXT,
+  conversation_lane_id TEXT REFERENCES conversation_lanes(id),
   agent_provider     TEXT,
   status             TEXT DEFAULT 'active',
   container_status   TEXT DEFAULT 'stopped',
   last_active        TEXT,
+  archived_at        TEXT,
+  spawn_depth        INTEGER NOT NULL DEFAULT 0,
   created_at         TEXT NOT NULL
 );
 CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup     ON sessions(messaging_group_id, thread_id);
 CREATE INDEX idx_sessions_lookup_owner ON sessions(agent_group_id, messaging_group_id, owner_user_id, thread_id);
+CREATE INDEX idx_sessions_conversation_lane ON sessions(conversation_lane_id);
 ```
 
 - **Resolved by:** `resolveSession()` in `src/session-manager.ts`.
+- `conversation_lane_id` 是跨渠道结构查询键；`conversation_thread_id` 只用于观测关联，严禁用于
+  Lane 路由或授权（ADR-0039、ADR-0062）。
 - Creating a session also provisions the session folder and both session DBs via `initSessionFolder()` — see [db-session.md](db-session.md).
+
+### 1.8a `conversation_lanes` 与 `conversation_bindings`（ADR-0062）
+
+`conversation_lanes` 表示“一个规范用户在一个 Agent Group 中的一条逻辑会话”，并指向该会话的
+根 Session。`conversation_bindings` 把经过验证的飞书/Web 地址映射到 Lane。Organization 不在
+这两张表重复保存，而是始终从不可变的 `agent_group_id` 推导并由 Host 访问门检查。
+
+```sql
+CREATE TABLE conversation_lanes (
+  id              TEXT PRIMARY KEY,
+  agent_group_id  TEXT NOT NULL REFERENCES agent_groups(id),
+  owner_user_id   TEXT NOT NULL REFERENCES users(id),
+  root_session_id TEXT REFERENCES sessions(id),
+  status          TEXT NOT NULL CHECK(status IN ('active', 'archived')),
+  created_at      TEXT NOT NULL,
+  archived_at     TEXT
+);
+
+CREATE TABLE conversation_bindings (
+  id                   TEXT PRIMARY KEY,
+  lane_id              TEXT NOT NULL REFERENCES conversation_lanes(id),
+  channel_type         TEXT NOT NULL,
+  messaging_group_id   TEXT REFERENCES messaging_groups(id),
+  platform_id          TEXT NOT NULL,
+  thread_id            TEXT,
+  external_identity_id TEXT REFERENCES user_identities(id),
+  delivery_mode        TEXT NOT NULL
+                        CHECK(delivery_mode IN ('history-only', 'source-reply', 'mirror-dm')),
+  verified_at          TEXT NOT NULL,
+  revoked_at           TEXT
+);
+```
+
+- 活跃 Binding 的唯一性由四个 Partial Unique Index 分别覆盖 Thread/Identity 的 NULL 与非 NULL
+  组合；这是为了避免 SQLite 把多个 NULL 当作互不相等而放过重复地址。
+- Binding 被撤销时设置 `revoked_at`，保留审计历史；同一地址随后可以重新绑定。
+- 只有 `per-user` / `per-user-per-thread` Session 能关联 Lane。`shared`、`per-thread` 和
+  `agent-shared` 会被拒绝，避免把多人的历史静默合并。
+- 旧飞书 Session 只能通过“精确 Session ID + 已验证外部身份”的确定性操作关联，不扫描或合并
+  其他用户的历史。
+- **访问层：** `src/db/conversation-lanes.ts`；**结构迁移：**
+  `src/db/migrations/039-conversation-lanes.ts`。
+
+### 1.8b `web_message_receipts`
+
+浏览器发送重试的持久化幂等回执。唯一键是规范用户、Lane 和浏览器生成的稳定
+`client_message_id`；`server_message_id` 是 Host 生成并进入通用 Router 的消息标识。
+
+```sql
+CREATE TABLE web_message_receipts (
+  id                TEXT PRIMARY KEY,
+  user_id           TEXT NOT NULL REFERENCES users(id),
+  lane_id           TEXT NOT NULL REFERENCES conversation_lanes(id),
+  client_message_id TEXT NOT NULL,
+  server_message_id TEXT NOT NULL,
+  status            TEXT NOT NULL CHECK(status IN ('routing', 'accepted', 'failed')),
+  created_at        TEXT NOT NULL,
+  completed_at      TEXT,
+  failure_code      TEXT,
+  UNIQUE(user_id, lane_id, client_message_id),
+  UNIQUE(server_message_id)
+);
+```
+
+这张表不保存消息正文、附件路径、Cookie 或 Token。消息真相源仍是 Lane 根 Session 的
+`inbound.db` / `outbound.db`。**访问层：** `src/db/web-message-receipts.ts`；
+**结构迁移：** `src/db/migrations/040-web-message-receipts.ts`。
+
+### 1.8c `web_events`
+
+Web SSE 的持久化通知日志。`sequence` 是中央数据库内的单调排序键，只通过不透明 Cursor 暴露；
+`resource_id` 指向已经写入 Session DB 的服务端消息。唯一约束让同一出站消息的 Delivery 重试
+收敛到同一事件。
+
+```sql
+CREATE TABLE web_events (
+  sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id    TEXT NOT NULL UNIQUE,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  lane_id     TEXT NOT NULL REFERENCES conversation_lanes(id),
+  event_type  TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  UNIQUE(user_id, lane_id, event_type, resource_id)
+);
+```
+
+该表不包含消息正文、Token、Cookie、Organization 或授权快照。SSE 重放时仍需按当前 Lane
+Owner 和 Host 访问门重新授权。**访问层：** `src/db/web-events.ts`；**结构迁移：**
+`src/db/migrations/041-web-events.ts`。
+
+### 1.8d `delivery_subscriptions` 与 `cross_channel_deliveries`
+
+`delivery_subscriptions` 保存用户对“把 Web 端触发的 Agent 文字回复额外发送到本人飞书私聊”的
+显式授权。它和 `conversation_bindings` 分开：Binding 负责把可信入口映射到 Lane；Subscription
+只负责额外投递同意。关闭飞书提醒不会破坏飞书入站路由或 Web/飞书共享历史。
+
+```sql
+CREATE TABLE delivery_subscriptions (
+  id                   TEXT PRIMARY KEY,
+  lane_id              TEXT NOT NULL REFERENCES conversation_lanes(id),
+  channel_type         TEXT NOT NULL CHECK(channel_type = 'feishu'),
+  delivery_kind        TEXT NOT NULL CHECK(delivery_kind = 'agent-reply-mirror'),
+  platform_id          TEXT NOT NULL CHECK(platform_id GLOB 'feishu:p2p:ou_*'),
+  external_identity_id TEXT NOT NULL REFERENCES user_identities(id),
+  provider_scope       TEXT NOT NULL,
+  enabled_at           TEXT NOT NULL,
+  revoked_at           TEXT
+);
+
+CREATE TABLE cross_channel_deliveries (
+  id                  TEXT PRIMARY KEY,
+  origin_id           TEXT NOT NULL,
+  subscription_id     TEXT NOT NULL REFERENCES delivery_subscriptions(id),
+  lane_id             TEXT NOT NULL REFERENCES conversation_lanes(id),
+  session_id          TEXT NOT NULL REFERENCES sessions(id),
+  message_out_id      TEXT NOT NULL,
+  channel_type        TEXT NOT NULL CHECK(channel_type = 'feishu'),
+  platform_id         TEXT NOT NULL CHECK(platform_id GLOB 'feishu:p2p:ou_*'),
+  status              TEXT NOT NULL
+                      CHECK(status IN ('pending', 'delivered', 'failed', 'suppressed')),
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  next_retry_at       TEXT,
+  platform_message_id TEXT,
+  failure_code        TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  delivered_at        TEXT,
+  UNIQUE(subscription_id, session_id, message_out_id)
+);
+```
+
+目标飞书私聊地址只从同一 `provider_scope` 下已经验证的 `user_identities.open_id` 推导，API 不接收
+浏览器指定的 OpenID 或 `platform_id`。每次重试前都会重新核对 Lane Owner、活跃 Subscription 和
+身份映射；撤销或身份变化会把待投递项标记为 `suppressed`。
+
+投递账本只保存出站行引用、稳定 Origin/Delivery ID、状态和失败码，不复制消息正文。飞书 Adapter
+把稳定 Delivery ID 转为最长 50 字符的请求 `uuid`，使 Host 重试和飞书请求幂等协同工作。
+**访问层：** `src/db/delivery-subscriptions.ts`；**结构迁移：**
+`src/db/migrations/042-cross-channel-delivery.ts`。
 
 ### 1.9 `pending_questions`
 
@@ -216,7 +396,7 @@ CREATE TABLE pending_questions (
 
 ### 1.10 `agent_destinations`
 
-Permission ACL *and* name-resolution map for outbound sending. An agent asking to `send_message(to="dev-channel")` must have a row here with `local_name = 'dev-channel'`, or the send is rejected as `unknown destination`.
+Permission ACL _and_ name-resolution map for outbound sending. An agent asking to `send_message(to="dev-channel")` must have a row here with `local_name = 'dev-channel'`, or the send is rejected as `unknown destination`.
 
 ```sql
 CREATE TABLE agent_destinations (
@@ -404,18 +584,32 @@ CREATE TABLE schema_version (
 Migrations live in `src/db/migrations/`, one file per migration. Runner: `runMigrations()` in `src/db/migrations/index.ts`. It:
 
 1. Creates `schema_version` if absent.
-2. Reads `MAX(version)` — call it `current`.
-3. For each migration with `version > current`, executes `up(db)` inside a transaction and appends a `schema_version` row.
+2. Reads the applied migration `name` values. Persistent names, rather than
+   source-file numbers, are the compatibility key so independently installed
+   modules and rebased migrations cannot accidentally re-run old DDL.
+3. For each unapplied name, executes `up(db)` inside a transaction and appends
+   a monotonically ordered `schema_version` row. Re-running the plan is a no-op.
 
-| # | File | Introduces |
-|---|------|------------|
-| 001 | `001-initial.ts` | Core tables: `agent_groups`, `messaging_groups`, `messaging_group_agents`, `users`, `user_roles`, `agent_group_members`, `user_dms`, `sessions`, `pending_questions` |
-| 002 | `002-chat-sdk-state.ts` | `chat_sdk_kv`, `chat_sdk_subscriptions`, `chat_sdk_locks`, `chat_sdk_lists` |
-| 003 | `003-pending-approvals.ts` | `pending_approvals` (session-bound + OneCLI fields) |
-| 004 | `004-agent-destinations.ts` | `agent_destinations` + backfill from existing `messaging_group_agents` wirings |
-| 007 | `007-pending-approvals-title-options.ts` | `ALTER TABLE pending_approvals` add `title`, `options_json` (retrofits DBs created between 003 and 007) |
-| 008 | `008-dropped-messages.ts` | `unregistered_senders` |
-| 009 | `009-drop-pending-credentials.ts` | Drop the defunct `pending_credentials` table |
+| #   | File                                     | Introduces                                                                                                                                                           |
+| --- | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 001 | `001-initial.ts`                         | Core tables: `agent_groups`, `messaging_groups`, `messaging_group_agents`, `users`, `user_roles`, `agent_group_members`, `user_dms`, `sessions`, `pending_questions` |
+| 002 | `002-chat-sdk-state.ts`                  | `chat_sdk_kv`, `chat_sdk_subscriptions`, `chat_sdk_locks`, `chat_sdk_lists`                                                                                          |
+| 003 | `003-pending-approvals.ts`               | `pending_approvals` (session-bound + OneCLI fields)                                                                                                                  |
+| 004 | `004-agent-destinations.ts`              | `agent_destinations` + backfill from existing `messaging_group_agents` wirings                                                                                       |
+| 007 | `007-pending-approvals-title-options.ts` | `ALTER TABLE pending_approvals` add `title`, `options_json` (retrofits DBs created between 003 and 007)                                                              |
+| 008 | `008-dropped-messages.ts`                | `unregistered_senders`                                                                                                                                               |
+| 009 | `009-drop-pending-credentials.ts`        | Drop the defunct `pending_credentials` table                                                                                                                         |
+| 035 | `035-multi-tenant-organizations.ts`      | Organization 隔离轴及其 Host 侧访问元数据                                                                                                                            |
+| 036 | `036-agent-group-role.ts`                | Agent Group 的 `frontdesk` / `worker` 拓扑角色                                                                                                                       |
+| 037 | `037-user-identities.ts`                 | 规范用户与 Provider Scope 感知的外部身份映射；持久化名称仍为 `federated-user-identities`                                                                             |
+| 038 | `038-web-auth.ts`                        | Hash 化 Web Session 与一次性 SSO 登录事务                                                                                                                            |
+| 039 | `039-conversation-lanes.ts`              | 跨渠道 Lane、Binding 和 `sessions.conversation_lane_id`                                                                                                              |
+| 040 | `040-web-message-receipts.ts`            | 不含正文的 Web 客户端消息幂等回执                                                                                                                                    |
+| 041 | `041-web-events.ts`                      | 不含消息正文的 Web SSE 事件游标与重放索引                                                                                                                            |
+| 042 | `042-cross-channel-delivery.ts`          | 飞书/Web 跨渠道订阅与幂等投递账本                                                                                                                                    |
+| 043 | `043-gateway-audit-logical-resource.ts`  | Gateway 审计逻辑资源标识                                                                                                                                              |
+| 044 | `044-gateway-confirmations.ts`           | Host 持有的 Gateway 写操作确认状态                                                                                                                                    |
+| 045 | `045-gateway-confirmation-delete-kind.ts`| 确认类型增加可恢复删除操作                                                                                                                                            |
 
 Numbers 005 and 006 are intentionally absent — migrations were renumbered during early development.
 
@@ -425,11 +619,11 @@ Session DB schemas (`INBOUND_SCHEMA`, `OUTBOUND_SCHEMA`) are **not** versioned h
 
 `initDb()` (`src/db/connection.ts`) opens the central `v2.db` with:
 
-| pragma | value | why |
-|---|---|---|
-| `journal_mode` | `WAL` | concurrent readers don't block the single writer; the central DB is host-only and never cross-mounted (unlike the session DBs, which must use `DELETE` for Docker bind-mount visibility). |
-| `foreign_keys` | `ON` | enforce referential integrity. |
-| `busy_timeout` | `5000` ms | give a writer a retry window instead of an immediate `SQLITE_BUSY` when a concurrent writer holds the lock (online backup `.backup`, a maintenance script, a WAL checkpoint). Matches the per-session convention. |
-| `synchronous` | `NORMAL` (default) | **durability boundary:** durable across an app/process crash, but the last committed transactions can be lost on host **power loss**. This is an accepted trade for the single-host target. Operators who need stronger audit durability can set `AGENTDESK_DB_SYNCHRONOUS=FULL` (fsync on every commit — slower writes). |
+| pragma         | value              | why                                                                                                                                                                                                                                                                                                                       |
+| -------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `journal_mode` | `WAL`              | concurrent readers don't block the single writer; the central DB is host-only and never cross-mounted (unlike the session DBs, which must use `DELETE` for Docker bind-mount visibility).                                                                                                                                 |
+| `foreign_keys` | `ON`               | enforce referential integrity.                                                                                                                                                                                                                                                                                            |
+| `busy_timeout` | `5000` ms          | give a writer a retry window instead of an immediate `SQLITE_BUSY` when a concurrent writer holds the lock (online backup `.backup`, a maintenance script, a WAL checkpoint). Matches the per-session convention.                                                                                                         |
+| `synchronous`  | `NORMAL` (default) | **durability boundary:** durable across an app/process crash, but the last committed transactions can be lost on host **power loss**. This is an accepted trade for the single-host target. Operators who need stronger audit durability can set `AGENTDESK_DB_SYNCHRONOUS=FULL` (fsync on every commit — slower writes). |
 
 The session DBs set their own `busy_timeout=5000` + `journal_mode=DELETE` per open (`src/db/session-db.ts`); see [db-session.md](db-session.md).

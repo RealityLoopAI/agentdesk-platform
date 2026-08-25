@@ -3,6 +3,10 @@ import { describe, expect, it } from 'bun:test';
 import {
   bulkExecuteRequestSchema,
   bulkExecuteResponseSchema,
+  classifyHttpError,
+  confirmationIssueRequestSchema,
+  confirmationIssueResponseSchema,
+  defaultRetryable,
   executeRequestSchema,
   memorySearchResponseSchema,
   memorySearchResultSchema,
@@ -11,6 +15,82 @@ import {
   taskStatusRequestSchema,
   taskStatusResponseSchema,
 } from './gateway-contract.js';
+
+describe('Host-mediated confirmation issuance contract (ADR-0073)', () => {
+  const trustedEnvelope = {
+    contractVersion: 1,
+    agent: { agentGroupId: 'ag-bitable', groupName: 'Bitable', assistantName: 'Worker' },
+    requester: { userId: 'feishu:ou_alice' },
+    requesterSource: 'session' as const,
+    context: {},
+  };
+
+  it('requires a trusted canonical user, concrete Agent Group and opaque request', () => {
+    const parsed = confirmationIssueRequestSchema.parse({
+      ...trustedEnvelope,
+      confirmationRequest: 'opaque-preview-request',
+      display: { recordId: 'rec-1', diff: [] },
+    });
+    expect(parsed.requester.userId).toBe('feishu:ou_alice');
+    expect(parsed.agent.agentGroupId).toBe('ag-bitable');
+
+    expect(() =>
+      confirmationIssueRequestSchema.parse({
+        ...trustedEnvelope,
+        requesterSource: 'agent-asserted',
+        confirmationRequest: 'opaque-preview-request',
+        display: {},
+      }),
+    ).toThrow();
+    expect(() =>
+      confirmationIssueRequestSchema.parse({
+        ...trustedEnvelope,
+        requester: {},
+        confirmationRequest: 'opaque-preview-request',
+        display: {},
+      }),
+    ).toThrow();
+  });
+
+  it('requires the security-bearing response fields', () => {
+    const parsed = confirmationIssueResponseSchema.parse({
+      ok: true,
+      confirmation: 'opaque-execution-token',
+      expiresAt: 1_800_000_000_000,
+      bindingHash: `sha256:${'a'.repeat(64)}`,
+      auditId: 'audit-confirmation-1',
+    });
+    expect(parsed.confirmation).toBe('opaque-execution-token');
+    expect(() => confirmationIssueResponseSchema.parse({ ok: true })).toThrow();
+  });
+
+  it('registers the optional path and keeps legacy 404 classified closed', () => {
+    expect('/confirmation/issue' in REQUEST_SCHEMAS).toBe(true);
+    expect('/confirmation/issue' in RESPONSE_SCHEMAS).toBe(true);
+    expect(classifyHttpError(404, '')).toBe('OPERATION_NOT_FOUND');
+  });
+});
+
+describe('extended closed Gateway errors', () => {
+  it('classifies conflict and rate limiting and marks them retryable', () => {
+    expect(classifyHttpError(409, '')).toBe('CONFLICT');
+    expect(classifyHttpError(429, '')).toBe('RATE_LIMITED');
+    expect(defaultRetryable('CONFLICT')).toBe(true);
+    expect(defaultRetryable('RATE_LIMITED')).toBe(true);
+  });
+
+  it('prefers a structured resource or confirmation failure over HTTP fallback', () => {
+    expect(
+      classifyHttpError(
+        403,
+        JSON.stringify({ code: 'RESOURCE_NOT_ALLOWED', message: 'logical resource is not configured' }),
+      ),
+    ).toBe('RESOURCE_NOT_ALLOWED');
+    expect(
+      classifyHttpError(400, JSON.stringify({ code: 'CONFIRMATION_REQUIRED', message: 'confirmation is required' })),
+    ).toBe('CONFIRMATION_REQUIRED');
+  });
+});
 
 // /bulk_execute contract (ADR-0036, roadmap 3.1).
 describe('bulkExecuteRequestSchema', () => {

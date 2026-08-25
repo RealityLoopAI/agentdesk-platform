@@ -11,14 +11,16 @@
  * importing from `./feishu` as before.
  */
 import { EventDispatcher, LoggerLevel, WSClient } from '@larksuiteoapi/node-sdk';
+import { createHash } from 'node:crypto';
 
 import { PLATFORM_PROTOCOL_NAMESPACE } from '../branding.js';
+import { recordEnterpriseAudit } from '../db/enterprise-audit.js';
 import { markInboundSeen } from '../db/inbound-dedup.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { chainAttrs, runInDetachedRoot } from '../observability/openinference.js';
 import { withSpan } from '../observability/with-span.js';
-import { inboundTotal, policyCheckFailedTotal } from '../metrics.js';
+import { crossChannelLoopSuppressedTotal, inboundTotal, policyCheckFailedTotal } from '../metrics.js';
 import { registerWebhookHandler } from '../webhook-server.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -77,6 +79,8 @@ import { optOutParticipant, parseRosterOptOut } from '../roster-dm.js';
 import { revokeGrantsForLeaver } from '../db/dm-grants.js';
 import { hasTable } from '../db/connection.js';
 import { getDb } from '../db/connection.js';
+import { createFeishuOutboundImageTransport } from './feishu/outbound-image.js';
+import { shouldRenderAsMarkdownCard } from './feishu/markdown.js';
 
 // Re-export the subset of primitives that existing callers (including
 // tests) reach for via `./feishu`. Keeping the public surface stable means
@@ -131,6 +135,17 @@ export function resolveAskQuestionExpectedUserId(
   const explicit = typeof explicitExpectedUserId === 'string' ? explicitExpectedUserId.trim() : '';
   if (explicit.startsWith('ou_')) return explicit;
   return target.receiveIdType === 'open_id' ? target.receiveId : undefined;
+}
+
+/**
+ * Build Feishu's request-level idempotency key for a mirrored text chunk.
+ *
+ * The Host supplies a stable, persisted cross-channel delivery id. Hashing it
+ * with the chunk index makes retries reuse the same key without exposing any
+ * user or message content, while staying below Feishu's 50-character limit.
+ */
+function feishuMirrorRequestUuid(deliveryId: string, chunkIndex: number): string {
+  return `m-${createHash('sha256').update(`${deliveryId}\0${chunkIndex}`).digest('base64url')}`;
 }
 
 function readEnvConfig(): FeishuConfig | null {
@@ -256,6 +271,10 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
     return tokenInflight;
   }
 
+  const outboundImageTransport = createFeishuOutboundImageTransport(config, {
+    getAccessToken: fetchTenantAccessToken,
+  });
+
   async function callApi<T extends FeishuApiResponse>(
     path: string,
     init: {
@@ -299,36 +318,6 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
     }
   }
 
-  /**
-   * Upload an image to Feishu's image API, returning the `image_key` used to
-   * send the actual `msg_type: "image"` message. Multipart because the Feishu
-   * API expects the raw bytes as a form field — `callApi` only knows
-   * application/json, so this routes around it with raw fetch + FormData.
-   *
-   * Bytes come from `OutboundFile.data` (already in-memory at delivery time,
-   * sourced from the agent's outbox).
-   */
-  async function uploadImage(filename: string, data: Buffer): Promise<string> {
-    const form = new FormData();
-    form.append('image_type', 'message');
-    // Construct a Blob from the buffer; the SDK side accepts either.
-    form.append('image', new Blob([new Uint8Array(data)]), filename);
-
-    const url = `${config.baseUrl}/open-apis/im/v1/images`;
-    const token = await fetchTenantAccessToken();
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
-    });
-    const text = await response.text();
-    const parsed = text ? (JSON.parse(text) as FeishuApiResponse & { data?: { image_key?: string } }) : null;
-    if (!parsed || parsed.code !== 0 || !parsed.data?.image_key) {
-      throw new Error(`Feishu image upload failed: ${parsed?.msg || `code ${parsed?.code ?? response.status}`}`);
-    }
-    return parsed.data.image_key;
-  }
-
   function isImageFile(filename: string): boolean {
     return /\.(jpg|jpeg|png|gif|webp|bmp)$/i.test(filename);
   }
@@ -338,6 +327,7 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
     msgType: 'text' | 'interactive' | 'image' | 'file',
     content: string,
     threadId: string | null,
+    idempotencyKey?: string,
   ): Promise<string | undefined> {
     if (threadId) {
       const reply = await callApi<FeishuApiResponse & { data?: { message_id?: string } }>(
@@ -357,17 +347,18 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
       }
     }
 
-    const created = await callApi<FeishuApiResponse & { data?: { message_id?: string } }>(
-      `/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(target.receiveIdType)}`,
-      {
-        method: 'POST',
-        body: {
-          receive_id: target.receiveId,
-          msg_type: msgType,
-          content,
-        },
+    const created = await callApi<FeishuApiResponse & { data?: { message_id?: string } }>('/open-apis/im/v1/messages', {
+      method: 'POST',
+      query: {
+        receive_id_type: target.receiveIdType,
+        uuid: idempotencyKey,
       },
-    );
+      body: {
+        receive_id: target.receiveId,
+        msg_type: msgType,
+        content,
+      },
+    });
     if (created.code !== 0) {
       throw new Error(`Feishu send failed: ${created.msg || `code ${created.code}`}`);
     }
@@ -467,10 +458,22 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
   async function handleMessageReceive(event: FeishuMessageEvent): Promise<void> {
     if (!setupConfig) return;
 
-    const senderId =
-      readString(event.sender.sender_id.open_id) ||
-      readString(event.sender.sender_id.user_id) ||
-      readString(event.sender.sender_id.union_id);
+    const senderIdentity =
+      (
+        [
+          ['open_id', readString(event.sender.sender_id.open_id)],
+          ['user_id', readString(event.sender.sender_id.user_id)],
+          ['union_id', readString(event.sender.sender_id.union_id)],
+        ] as const
+      )
+        .filter((entry): entry is readonly ['open_id' | 'user_id' | 'union_id', string] => Boolean(entry[1]))
+        .map(([identifierType, externalSubject]) => ({
+          provider: 'feishu',
+          providerScope: config.appId,
+          identifierType,
+          externalSubject,
+        }))[0] ?? undefined;
+    const senderId = senderIdentity?.externalSubject;
 
     // Build span attributes (only include non-undefined values)
     const spanAttributes: Record<string, unknown> = {
@@ -488,7 +491,44 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
 
     return runInDetachedRoot(() =>
       withSpan('channel.feishu.receive', chainAttrs(spanAttributes), async () => {
-        if (config.botOpenId && senderId === config.botOpenId) return;
+        const loopSuppressionReason =
+          event.sender.sender_type === 'app'
+            ? 'sender_type_app'
+            : config.botOpenId && senderId === config.botOpenId
+              ? 'configured_bot_open_id'
+              : null;
+        if (loopSuppressionReason) {
+          if (!markInboundSeen('feishu', `msg:${event.message.message_id}`)) {
+            inboundTotal.labels('feishu', 'deduped').inc();
+            return;
+          }
+          // Defense in depth: Feishu normally avoids echoing a bot's own
+          // messages, but a provider event must never turn a mirrored reply
+          // back into fresh user input.
+          try {
+            crossChannelLoopSuppressedTotal.labels(loopSuppressionReason).inc();
+          } catch {
+            // Metrics are best-effort; the loop guard decision already stands.
+          }
+          try {
+            recordEnterpriseAudit({
+              eventType: 'cross_channel_loop_suppressed',
+              actor: senderId ?? null,
+              details: {
+                channelType: 'feishu',
+                providerScope: config.appId,
+                reason: loopSuppressionReason,
+              },
+            });
+          } catch (err) {
+            // The safety decision must not depend on audit storage health.
+            log.error('Feishu self-message suppressed but audit write failed', {
+              reason: loopSuppressionReason,
+              err,
+            });
+          }
+          return;
+        }
 
         const platformId = normalizeFeishuPlatformId({
           chatId: event.message.chat_id,
@@ -572,6 +612,7 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
           },
           isMention,
           isGroup,
+          senderIdentity,
         });
       }),
     );
@@ -590,6 +631,20 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
           return;
         }
         await handleMessageReceive(data);
+      },
+      'card.action.trigger': async (data: unknown) => {
+        log.info('Feishu long-connection payload accepted', {
+          eventType: 'card.action.trigger',
+        });
+        if (!isFeishuCardActionEvent(data)) {
+          log.warn('Feishu long-connection card action ignored: unsupported payload shape');
+          return {};
+        }
+        await handleCardAction(data);
+        // The WebSocket client wraps this in a successful callback response.
+        // Returning an explicit empty body mirrors the webhook transport and
+        // satisfies Feishu's three-second acknowledgement requirement.
+        return {};
       },
       // Roster-DM leave/disband revoke (ADR-0023 item 11b, best-effort).
       'im.chat.member.user.deleted_v1': async (data: unknown) => {
@@ -1039,15 +1094,19 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
       const nonImages: typeof files = files.filter((f) => !isImageFile(f.filename));
 
       let firstId: string | undefined;
-      for (const img of images) {
+      for (let imageIndex = 0; imageIndex < images.length; imageIndex += 1) {
+        const img = images[imageIndex];
         try {
-          const imageKey = await uploadImage(img.filename, img.data);
-          const imgMsgId = await createMessage(
+          const imageDelivery = await outboundImageTransport.sendImage({
             target,
-            'image',
-            JSON.stringify({ image_key: imageKey }),
-            firstId ? null : threadId,
-          );
+            filename: img.filename,
+            data: img.data,
+            threadId: firstId ? null : threadId,
+            idempotencyKey: message.source?.originId
+              ? `${message.source.messageId}-image-${imageIndex}`
+              : undefined,
+          });
+          const imgMsgId = imageDelivery.messageId;
           if (!firstId) firstId = imgMsgId;
         } catch (err) {
           // Upload failed — degrade to filename suffix in the text branch.
@@ -1067,13 +1126,48 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
       if (!text.trim()) return firstId;
 
       const chunks = splitForLimit(text, DEFAULT_FEISHU_TEXT_LIMIT);
+      const renderAsMarkdownCard = shouldRenderAsMarkdownCard(content, text);
+      const mirrorDeliveryId = message.source?.originId ? message.source.messageId : undefined;
       for (let index = 0; index < chunks.length; index += 1) {
-        const messageId = await createMessage(
-          target,
-          'text',
-          JSON.stringify({ text: chunks[index] }),
-          firstId ? null : index === 0 ? threadId : null,
-        );
+        const replyThreadId = firstId ? null : index === 0 ? threadId : null;
+        const idempotencyKey = mirrorDeliveryId
+          ? feishuMirrorRequestUuid(mirrorDeliveryId, index)
+          : undefined;
+        let messageId: string | undefined;
+        if (renderAsMarkdownCard) {
+          try {
+            messageId = await createMessage(
+              target,
+              'interactive',
+              JSON.stringify(buildMarkdownCard(chunks[index])),
+              replyThreadId,
+              idempotencyKey,
+            );
+          } catch (err) {
+            log.warn('Feishu markdown card send failed; falling back to plain text', {
+              chunkIndex: index,
+              err,
+            });
+            const fallbackIdempotencyKey = mirrorDeliveryId
+              ? feishuMirrorRequestUuid(`${mirrorDeliveryId}\0markdown-fallback`, index)
+              : undefined;
+            messageId = await createMessage(
+              target,
+              'text',
+              JSON.stringify({ text: chunks[index] }),
+              replyThreadId,
+              fallbackIdempotencyKey,
+            );
+          }
+        } else {
+          messageId = await createMessage(
+            target,
+            'text',
+            JSON.stringify({ text: chunks[index] }),
+            replyThreadId,
+            idempotencyKey,
+          );
+        }
         if (!firstId) firstId = messageId;
       }
       return firstId;

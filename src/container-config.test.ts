@@ -125,6 +125,16 @@ describe('container.json read-modify-write safety', () => {
     expect(() => readContainerConfig('arr')).toThrow(/failed to parse/);
   });
 
+  it('ociRuntime round-trips; an invalid value degrades to unset (ADR-0058)', () => {
+    writeRaw('sandboxed', JSON.stringify({ ociRuntime: 'runsc' }));
+    expect(readContainerConfig('sandboxed').ociRuntime).toBe('runsc');
+
+    // Fail-safe: a typo must fall back to the engine default, never produce
+    // a config that blocks the spawn.
+    writeRaw('sandboxed-bad', JSON.stringify({ ociRuntime: 'runsc; rm -rf /' }));
+    expect(readContainerConfig('sandboxed-bad').ociRuntime).toBeUndefined();
+  });
+
   it('preserves operator keys this interface does not model (round-trip is lossless)', () => {
     // Regression: the reader mapped only its known keys into a fresh object, so
     // documented runner-read fields (idleExitMs, confidenceThreshold) vanished
@@ -156,5 +166,167 @@ describe('container.json read-modify-write safety', () => {
 
     writeRaw('skl3', JSON.stringify({ skills: 'all' }));
     expect(readContainerConfig('skl3').skills).toBe('all');
+  });
+});
+
+describe('dual LLM configuration', () => {
+  it('round-trips centralized routing and execution configuration', () => {
+    writeContainerConfig('frontdesk', {
+      mcpServers: {},
+      packages: { apt: [], npm: [] },
+      additionalMounts: [],
+      skills: 'all',
+      llm: {
+        routing: {
+          enabled: true,
+          provider: 'opencode-go',
+          model: 'mimo-v2.5',
+          transport: 'chat-completions',
+          promptFile: 'prompts/frontdesk-routing.md',
+          timeoutMs: 10_000,
+          retryTimes: 1,
+          context: { maxMessages: 4, maxChars: 12_000 },
+          confidence: { threshold: 0.7, belowThresholdAction: 'clarify' },
+          fallback: { action: 'clarify' },
+        },
+        execution: {
+          provider: 'opencode-go',
+          model: 'deepseek-v4-flash',
+          transport: 'chat-completions',
+        },
+      },
+    });
+
+    expect(readContainerConfig('frontdesk').llm).toEqual({
+      routing: {
+        enabled: true,
+        provider: 'opencode-go',
+        model: 'mimo-v2.5',
+        transport: 'chat-completions',
+        promptFile: 'prompts/frontdesk-routing.md',
+        timeoutMs: 10_000,
+        retryTimes: 1,
+        context: { maxMessages: 4, maxChars: 12_000 },
+        confidence: { threshold: 0.7, belowThresholdAction: 'clarify' },
+        fallback: { action: 'clarify' },
+      },
+      execution: {
+        provider: 'opencode-go',
+        model: 'deepseek-v4-flash',
+        transport: 'chat-completions',
+      },
+    });
+  });
+
+  it('fails closed when an enabled routing config is explicitly invalid', () => {
+    const groupDir = path.join(tmpState.root, 'groups', 'invalid-frontdesk');
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(groupDir, 'container.json'),
+      JSON.stringify({
+        llm: {
+          routing: {
+            enabled: true,
+            provider: 'opencode-go',
+            model: 'mimo-v2.5',
+            promptFile: '../escape.md',
+            transport: 'bogus',
+          },
+        },
+      }),
+    );
+
+    expect(() => readContainerConfig('invalid-frontdesk')).toThrow(/llm\.routing/i);
+  });
+
+  it('rejects an explicit invalid routing transport even when the prompt path is valid', () => {
+    const groupDir = path.join(tmpState.root, 'groups', 'invalid-transport');
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(groupDir, 'container.json'),
+      JSON.stringify({
+        llm: {
+          routing: {
+            enabled: true,
+            provider: 'opencode-go',
+            model: 'mimo-v2.5',
+            promptFile: 'prompts/frontdesk-routing.md',
+            transport: 'bogus',
+          },
+        },
+      }),
+    );
+
+    expect(() => readContainerConfig('invalid-transport')).toThrow(/routing\.transport/i);
+  });
+
+  it('preserves a DISABLED routing block across the read-modify-write round trip', () => {
+    // Regression: normalizeDualLlmConfig returns undefined for enabled!==true, and
+    // that undefined used to clobber the config, so the next write-back deleted a
+    // dormant-but-configured routing block. It must survive instead.
+    const dir = path.join(tmpState.root, 'groups', 'dormant');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'container.json'),
+      JSON.stringify({
+        llm: { routing: { enabled: false, provider: 'opencode-go', model: 'mimo-v2.5' } },
+      }),
+    );
+
+    const cfg = readContainerConfig('dormant');
+    expect(cfg.llm?.routing).toEqual({ enabled: false, provider: 'opencode-go', model: 'mimo-v2.5' });
+
+    writeContainerConfig('dormant', cfg);
+    expect(readContainerConfig('dormant').llm?.routing).toEqual({
+      enabled: false,
+      provider: 'opencode-go',
+      model: 'mimo-v2.5',
+    });
+  });
+});
+
+describe('container runner idle-exit normalization', () => {
+  it('preserves a non-negative idleExitMs for the mounted runner config', () => {
+    writeContainerConfig('idle', {
+      mcpServers: {},
+      packages: { apt: [], npm: [] },
+      additionalMounts: [],
+      skills: [],
+      idleExitMs: 1500.9,
+    });
+
+    expect(readContainerConfig('idle').idleExitMs).toBe(1500);
+  });
+
+  it('drops invalid idleExitMs values', () => {
+    const groupDir = path.join(tmpState.root, 'groups', 'idle-invalid');
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(path.join(groupDir, 'container.json'), JSON.stringify({ idleExitMs: -1 }));
+
+    expect(readContainerConfig('idle-invalid').idleExitMs).toBeUndefined();
+  });
+});
+
+describe('provider model normalization', () => {
+  function writeRaw(folder: string, providerModel: unknown): void {
+    const groupDir = path.join(tmpState.root, 'groups', folder);
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.writeFileSync(path.join(groupDir, 'container.json'), JSON.stringify({ providerModel }));
+  }
+
+  it('accepts a trimmed bounded model identifier', () => {
+    writeRaw('model-valid', '  glm-5.2  ');
+    expect(readContainerConfig('model-valid').providerModel).toBe('glm-5.2');
+  });
+
+  it.each([
+    ['empty', '   '],
+    ['overlong', 'm'.repeat(129)],
+    ['newline', 'glm-5.2\nOPENAI_API_KEY=attacker'],
+    ['control', `glm-5.2${String.fromCharCode(0)}`],
+    ['non-string', 52],
+  ])('drops an invalid %s provider model', (_label, value) => {
+    writeRaw(`model-${_label}`, value);
+    expect(readContainerConfig(`model-${_label}`).providerModel).toBeUndefined();
   });
 });

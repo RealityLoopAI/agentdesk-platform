@@ -9,24 +9,31 @@
  * The requester identity (userId / channelType / platformId / threadId)
  * attached to each gateway call MUST NOT come from the agent's own tool
  * arguments — a prompt-injected agent can otherwise forge any identity it
- * likes. Instead, `resolveTrustedRequester()` reads the most recent chat
- * message from inbound.db (host-written, container-read) and uses that as
- * the ground truth. When that read succeeds, we send `requesterSource:
- * 'session'`. Only when no usable inbound row exists (scheduled tasks,
- * agent-to-agent sessions without an originating user) do we fall back to
- * agent-asserted values, tagged `requesterSource: 'agent-asserted'` so the
- * backend can apply a stricter policy to unauthenticated requests.
+ * likes. The runner parent pins a batch-level RequestIdentity; the independent
+ * MCP child re-derives that same identity by joining the current processing
+ * marker to host-written inbound.db rows. When either trusted path succeeds,
+ * we send `requesterSource: 'session'`. Only when no usable inbound row exists
+ * (scheduled/detached tasks, or agent-to-agent rows without an originating
+ * user) do we fall back to agent-asserted values, tagged
+ * `requesterSource: 'agent-asserted'` so the backend can apply a stricter
+ * policy to unauthenticated requests.
  */
 import crypto from 'node:crypto';
 
 import { SIGNING_NONCE_HEADER, SIGNING_SIGNATURE_HEADER, SIGNING_TIMESTAMP_HEADER } from '../branding.js';
-import { getOutboundDb } from '../db/connection.js';
+import { getOutboundDb, openInboundDb } from '../db/connection.js';
+import type { MessageInRow } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getConfig, type BackendGatewayConfig, type RunnerConfig } from '../config.js';
 import { getRequestIdentity, type RequestIdentity } from '../request-context.js';
+import { resolveBatchIdentity, splitBatchByTurn } from '../request-identity.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
+import {
+  rememberGatewayConfirmationPreview,
+  type BitableConfirmationKind,
+} from './gateway-confirmation-preview-cache.js';
 import {
   CONTRACT_VERSION,
   classifyHttpError,
@@ -197,6 +204,54 @@ function readAgentAssertedRequester(args: Record<string, unknown>): RequesterCon
 }
 
 /**
+ * Rebuild the current turn's identity across the MCP child-process boundary.
+ *
+ * The poll loop's RequestIdentity singleton lives in the runner parent and is
+ * therefore absent in the built-in MCP child. processing_ack supplies only the
+ * current message IDs; the identity itself is re-derived from the exact
+ * host-written inbound.db rows. The outbound marker cannot manufacture a user
+ * or origin_user_id, and any missing/mixed batch fails closed.
+ */
+function resolveProcessingBatchIdentity(): RequestIdentity | null {
+  let messageIds: string[];
+  try {
+    messageIds = (
+      getOutboundDb()
+        .prepare("SELECT message_id FROM processing_ack WHERE status = 'processing' ORDER BY message_id")
+        .all() as Array<{ message_id: string }>
+    ).map((row) => row.message_id);
+  } catch {
+    return null;
+  }
+  if (messageIds.length === 0) return null;
+
+  const inbound = openInboundDb();
+  try {
+    const placeholders = messageIds.map(() => '?').join(',');
+    const rows = inbound
+      .prepare(
+        `SELECT * FROM messages_in
+         WHERE id IN (${placeholders})
+         ORDER BY seq ASC, timestamp ASC, id ASC`,
+      )
+      .all(...messageIds) as MessageInRow[];
+
+    // Every marker must resolve to a host-written row. Partial resolution
+    // could otherwise let a malformed marker set hide a conflicting row.
+    if (rows.length !== messageIds.length) return null;
+    const split = splitBatchByTurn(rows);
+    if (split.defer.length > 0 || split.keep.length !== rows.length) return null;
+
+    const identity = resolveBatchIdentity(rows);
+    return identity.source === 'session' && identity.userId ? identity : null;
+  } catch {
+    return null;
+  } finally {
+    inbound.close();
+  }
+}
+
+/**
  * Resolve the requester identity to attach to a gateway call.
  *
  * Preferred path: the poll loop publishes a `RequestIdentity` at batch
@@ -206,14 +261,17 @@ function readAgentAssertedRequester(args: Record<string, unknown>): RequesterCon
  * later messages landing in group/shared sessions, and picks up
  * host-written `origin_user_id` on a2a hops.
  *
- * Fallback: when no identity is published (callers outside the poll loop —
- * in practice scheduled tasks or unit tests), we fall back to whatever
- * the agent asserted via tool arguments, tagged `agent-asserted` so the
- * backend can apply a stricter policy.
+ * Cross-process path: the built-in MCP server has no access to the parent's
+ * module singleton, so it re-derives identity from the current processing
+ * marker plus the host-written inbound rows.
+ *
+ * Fallback: when neither trusted source exists (scheduled/detached calls or
+ * malformed markers), use the agent's arguments but tag them
+ * `agent-asserted` so the backend can apply a stricter policy.
  */
 function resolveRequester(args: Record<string, unknown>): ResolvedRequester {
   const asserted = readAgentAssertedRequester(args);
-  const identity = getRequestIdentity();
+  const identity = getRequestIdentity() ?? resolveProcessingBatchIdentity();
   if (!identity) {
     return { context: asserted, source: 'agent-asserted' };
   }
@@ -519,6 +577,7 @@ function emitAuditMessage(params: {
       action: 'gateway_audit',
       path: params.path,
       operation: typeof body.operation === 'string' ? body.operation : null,
+      logicalResource: extractLogicalResource(body),
       userId: requester?.userId ?? null,
       requesterSource: typeof body.requesterSource === 'string' ? body.requesterSource : 'agent-asserted',
       status: params.status,
@@ -537,6 +596,26 @@ function emitAuditMessage(params: {
   } catch (err) {
     console.error(`[mcp-tools] warn: gateway_audit emit failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+const LOGICAL_RESOURCE_ALIAS = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+function extractLogicalResourceFromOperation(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const operation = value as { operation?: unknown; input?: unknown };
+  if (typeof operation.operation !== 'string' || !operation.operation.startsWith('feishu.bitable.')) return null;
+  if (typeof operation.input !== 'object' || operation.input === null || Array.isArray(operation.input)) return null;
+  const resource = (operation.input as { resource?: unknown }).resource;
+  return typeof resource === 'string' && LOGICAL_RESOURCE_ALIAS.test(resource) ? resource : null;
+}
+
+function extractLogicalResource(body: Record<string, unknown>): string | null {
+  const direct = extractLogicalResourceFromOperation(body);
+  if (direct) return direct;
+  if (!Array.isArray(body.operations) || body.operations.length === 0) return null;
+  const resources = body.operations.map(extractLogicalResourceFromOperation);
+  if (resources.some((resource) => resource === null)) return null;
+  return new Set(resources).size === 1 ? resources[0]! : null;
 }
 
 interface GatewayCallError {
@@ -599,7 +678,9 @@ function checkResponse(
       });
       return { ok: false, message: msg, code: 'VALIDATION_FAILED', retryable: false };
     }
-    log(`warn: ${pathname} response does not match contract (allowed; set GATEWAY_STRICT_RESPONSES=true to reject): ${detail}`);
+    log(
+      `warn: ${pathname} response does not match contract (allowed; set GATEWAY_STRICT_RESPONSES=true to reject): ${detail}`,
+    );
     emitAuditMessage({
       path: pathname,
       body,
@@ -751,6 +832,40 @@ function normalizeResponseText(text: string): string {
   }
 }
 
+function formatGatewayDescribeForAgent(text: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return text;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray((parsed as Record<string, unknown>).operations)) {
+    return text;
+  }
+
+  const operationNames = (parsed as { operations: unknown[] }).operations
+    .map((operation) => {
+      if (!operation || typeof operation !== 'object') return null;
+      const name = (operation as Record<string, unknown>).name;
+      return typeof name === 'string' && name.length > 0 ? name : null;
+    })
+    .filter((name): name is string => name !== null);
+
+  if (operationNames.length === 0) return text;
+
+  const exactNameIndex = [
+    `EXACT_OPERATION_NAMES (${operationNames.length}; copy one of these names verbatim into gateway_authorize and gateway_execute):`,
+    ...operationNames.map((name) => `- ${name}`),
+    'Do not invent singular/plural, schema/describe, query/filter, or other operation-name variants.',
+  ].join('\n');
+
+  // Repeat the compact index after the descriptor as well. This keeps the
+  // authoritative names visible even when a long catalog is summarized from
+  // either end by a model or intermediary.
+  return `${exactNameIndex}\n\n${text}\n\n${exactNameIndex}`;
+}
+
 function truncate(text: string): string {
   return text.length > 600 ? `${text.slice(0, 600)}...` : text;
 }
@@ -775,7 +890,7 @@ export async function handleGatewayDescribe(
   });
   if (!result.ok) return gatewayErr(result);
   log(`gateway_describe: ${requester.userId ?? 'anonymous'} (${requesterSource})`);
-  return ok(result.text);
+  return ok(formatGatewayDescribeForAgent(result.text));
 }
 
 export async function handleGatewayAuthorize(
@@ -822,7 +937,8 @@ export async function handleGatewayExecute(
     getString(args, 'idempotencyKey') ??
     (dryRun
       ? null
-      : (deriveStableIdempotencyKey({ callsite: 'exec', operation, input, context, submitAsync }) ?? crypto.randomUUID()));
+      : (deriveStableIdempotencyKey({ callsite: 'exec', operation, input, context, submitAsync }) ??
+        crypto.randomUUID()));
   const body: Record<string, unknown> = {
     agent: agentBlock(runtime),
     requester,
@@ -837,6 +953,24 @@ export async function handleGatewayExecute(
   const result = await callGateway(runtime, '/execute', body);
   if (!result.ok) return gatewayErr(result);
   log(`gateway_execute: ${operation} for ${requester.userId ?? 'anonymous'} (${requesterSource})`);
+  if (dryRun && (operation === 'feishu.bitable.record.update' || operation === 'feishu.bitable.record.delete')) {
+    let response: Record<string, unknown>;
+    try {
+      const parsedResponse = JSON.parse(result.text) as unknown;
+      if (!parsedResponse || typeof parsedResponse !== 'object' || Array.isArray(parsedResponse)) {
+        return err('Gateway returned a malformed Bitable confirmation preview');
+      }
+      response = parsedResponse as Record<string, unknown>;
+    } catch {
+      return err('Gateway returned a malformed Bitable confirmation preview');
+    }
+    const kind: BitableConfirmationKind = operation === 'feishu.bitable.record.update' ? 'update' : 'delete';
+    const displayPreview = rememberGatewayConfirmationPreview(kind, response.preview);
+    if (!displayPreview) {
+      return err('Gateway returned an invalid or expired Bitable confirmation preview');
+    }
+    return ok(JSON.stringify({ ...response, preview: displayPreview }));
+  }
   return ok(result.text);
 }
 
@@ -892,8 +1026,13 @@ export async function handleGatewayBulkExecute(
         ? op.idempotencyKey
         : dryRun
           ? null
-          : (deriveStableIdempotencyKey({ callsite: `bulk[${i}]`, operation, input, context: bulkContext, submitAsync: false }) ??
-            crypto.randomUUID());
+          : (deriveStableIdempotencyKey({
+              callsite: `bulk[${i}]`,
+              operation,
+              input,
+              context: bulkContext,
+              submitAsync: false,
+            }) ?? crypto.randomUUID());
     return { operation, input, idempotencyKey };
   });
   if (operations.some((o) => !o.operation)) {
@@ -1054,21 +1193,28 @@ export async function flushCompactionSummary(
   const requesterSource: RequesterSource = identity?.source ?? 'agent-asserted';
 
   const runtime = toolRuntimeConfigFromRunner(config);
+  // Namespace carries the AGENT GROUP dimension (ADR-0057). A bare
+  // 'conversation.summary' keyed only by user collapsed every agent the user
+  // talks to into one record: whichever compacted last silently superseded
+  // the others, and the Finance agent could recall the HR agent's compacted
+  // conversation as its own. Per-user-per-agent matches the ADR-0055 scope
+  // key — memory follows the person, per agent.
+  const namespace = runtime.agentGroupId ? `conversation.summary.${runtime.agentGroupId}` : 'conversation.summary';
   const result = await callGateway(runtime, '/memory/upsert', {
     agent: agentBlock(runtime),
     requester,
     requesterSource,
-    namespace: 'conversation.summary',
+    namespace,
     subject: { type: 'user', id: userId },
     value: { autoSummary: trimmed },
     merge: true,
     context: { source: 'compaction' },
   });
   if (!result.ok) {
-    log(`conversation.summary flush skipped (${result.code}): ${result.message}`);
+    log(`${namespace} flush skipped (${result.code}): ${result.message}`);
     return;
   }
-  log(`conversation.summary flushed for user:${userId}`);
+  log(`${namespace} flushed for user:${userId}`);
 }
 
 export async function handleGatewayMemoryFeedback(
@@ -1328,7 +1474,11 @@ export const erpMemorySearch: McpToolDefinition = {
     inputSchema: {
       type: 'object' as const,
       properties: {
-        namespace: { type: 'string', description: 'Stable memory namespace to search within, e.g. "user.profile", "conversation.summary".' },
+          namespace: {
+            type: 'string',
+            description:
+              'Stable memory namespace to search within, e.g. "user.profile", "persona", or this agent\'s compaction-summary namespace ("conversation.summary.<agentGroupId>" — the exact name appears in your Memory policy section).',
+        },
         query: { type: 'string', description: 'Free-text search/recall query. Required.' },
         subjectType: { type: 'string', description: 'Memory subject type. Default: "user".' },
         subjectId: {

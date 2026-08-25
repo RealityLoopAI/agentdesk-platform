@@ -45,6 +45,7 @@ const RAW_KNOWN_WEAK_SECRETS: string[] = [
   'replace-me-feishu-encrypt-key', // FEISHU_ENCRYPT_KEY
   'replace-me-feishu-verification-token', // FEISHU_VERIFICATION_TOKEN
   'your-feishu-app-secret', // FEISHU_APP_SECRET
+  'replace-me-web-session-secret', // WEB_SESSION_SECRET
   'sk-your-openai-api-key', // OPENAI_API_KEY
 
   // --- universally weak / lazy values ---

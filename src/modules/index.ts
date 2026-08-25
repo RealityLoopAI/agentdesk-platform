@@ -20,6 +20,9 @@ import './approvals/index.js';
 import './interactive/index.js';
 import './scheduling/index.js';
 import './permissions/index.js';
+// Host-mediated business confirmation must run before the generic cancel
+// interceptor so exact "确认/拒绝" replies can resolve the actor-bound row.
+import './gateway-confirmation/index.js';
 // Cancel interceptor (ADR-0042) loads AFTER permissions so the permissions
 // free-text name-capture interceptor keeps priority; cancel only claims exact
 // whole-message cancel tokens for a sender who has a pending question.
@@ -28,4 +31,5 @@ import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './gateway-audit/index.js';
 import './provider-errors/index.js';
+import './agent-turn/index.js';
 import './classification-log/index.js';

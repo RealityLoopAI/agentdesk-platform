@@ -2,6 +2,9 @@
 
 面向运维和 oncall。线上出问题时该看哪里、怎么诊断、怎么处置都在这里。
 
+Web/飞书统一消息的首次部署、Feature Flag 灰度和完整回滚演练见
+[Web 与飞书统一消息运维手册](web-feishu-unified-messaging-operations.md)。
+
 读者预设：已经读过 [PLATFORM.md](PLATFORM.md) 顶层概览，知道三 DB 模型 + 容器拓扑。
 
 > 本文用默认品牌命名空间 `agentdesk` 书写。指标前缀、服务名、日志文件名随 `BRAND_NAMESPACE` 派生；下文示例按默认值。
@@ -15,6 +18,9 @@
 host 是裸 Node 进程，由操作员的进程管理器拉起。`deploy/` 提供 systemd / launchd
 **单元模板**（填 `<PLACEHOLDERS>` 后安装，见 `deploy/README.md`）；若你用的是自己的
 单元名，"进程活着"按你的服务名查，否则一律按 host 健康探针 `/healthz` 查。
+仓库内 macOS 小环全量评测组合可以直接用 `pnpm services:install` 安装三个
+LaunchAgent，用 `pnpm services:status` 检查，详见
+`examples/local-evaluation-stack/README.md`。
 
 | 检查 | 命令 / Panel | 期望 |
 |---|---|---|
@@ -39,12 +45,19 @@ host 是裸 Node 进程，由操作员的进程管理器拉起。`deploy/` 提�
 | engage 正则失效 | `rate(agentdesk_engage_pattern_invalid_total[10m])` | 必须 0（→ §3.9） |
 | 审批卡身份拒绝 | `rate(agentdesk_policy_check_failed_total{policy="approval_operator_identity"}[15m])` | 0（安全;→ §3.11） |
 | worker 持续 nack | `sum by (reported_by) (rate(agentdesk_routing_feedback_total{kind="nack"}[30m]))` | 偶发正常;持续 = 配线坏/注入(→ §3.12) |
+| Web SSO 结果 | `sum by (outcome) (rate(agentdesk_web_login_total[15m]))` | `succeeded` 为主；持续拒绝见 §3.13 |
+| 活跃 Web Session / SSE | `agentdesk_web_active_sessions`、`agentdesk_web_sse_connections` | 随在线人数变化；连接数不应长期高于 Session 数 |
+| Web API 拒绝 | `sum by (reason) (rate(agentdesk_web_api_rejected_total[10m]))` | 偶发 401/403 正常；持续升高见 §3.13 |
+| SSE 重放 | `sum by (delivery) (rate(agentdesk_web_sse_events_total[10m]))` | `replay` 可偶发；持续接近/超过 `live` 说明连接不稳 |
+| Conversation Binding 失败 | `sum by (reason) (rate(agentdesk_conversation_binding_failures_total[15m]))` | ≈ 0；失败时必须保持 fail-closed（→ §3.14） |
+| 多维表格调用结果 | `sum by (operation,outcome) (rate(agentdesk_feishu_bitable_operations_total[10m]))` | `ok` 为主；`rate_limited` 持续为 0（→ §3.14） |
+| 跨渠道回环抑制 | `sum by (reason) (rate(agentdesk_cross_channel_loop_suppressed_total[15m]))` | 偶发可接受；突刺需查 Bot 自回调/重复镜像（→ §3.14） |
 
 ---
 
 ## 2. 告警阈值建议
 
-> 这些规则的**承载体**是 `infra/observability/prometheus/alerts.yml`，由本仓内的 Prometheus 容器加载、Alertmanager 寻呼（见 [ADR-0021](decisions/ADR-0021-metrics-alerting-loop.md)）。下面的 YAML 是同一份规则的人类可读副本 + 阈值理由；改阈值要两边一起改，`scripts/runbook-consistency.test.ts` 不校验告警 YAML，但 `pnpm obs:rules:check`（promtool）会校验 `alerts.yml` 语法。
+> 这些规则的**承载体**是 `infra/observability/prometheus/alerts.yml`，由本仓内的 Prometheus 容器加载、Alertmanager 寻呼（见 [ADR-0021](decisions/ADR-0021-metrics-alerting-loop.md)）。下面是最常用规则的人类可读节选 + 阈值理由；改阈值要以 `alerts.yml` 为准并同步更新对应说明。`scripts/runbook-consistency.test.ts` 不校验告警 YAML，但 `pnpm obs:rules:check`（promtool）会校验 `alerts.yml` 语法。
 >
 > ⚠️ 指标前缀 `agentdesk_` 是默认品牌（`METRIC_PREFIX`，由 `BRAND_NAMESPACE` 派生）。rebrand 后 host 发的是 `<新 namespace>_*`，下面所有规则与 `alerts.yml` 里的 `agentdesk_` 都要相应替换，否则规则永远不触发。
 
@@ -96,6 +109,30 @@ host 是裸 Node 进程，由操作员的进程管理器拉起。`deploy/` 提�
   expr: rate(agentdesk_container_exits_total{outcome="crash"}[10m]) > 0.2
   for: 10m
   severity: critical
+
+# Web SSO 已完成尝试中，拒绝/身份冲突占比持续过半
+- alert: AgentDeskWebLoginFailuresElevated
+  expr: (失败结果速率 / 已完成结果速率) > 0.5，且已完成速率 > 0.01/s
+  for: 15m
+  severity: warning
+
+# Web 认证、权限或限流拒绝持续升高
+- alert: AgentDeskWebApiDenialsElevated
+  expr: sum(rate(agentdesk_web_api_rejected_total{reason=~"authentication_required|forbidden|rate_limited"}[10m])) > 0.5
+  for: 10m
+  severity: warning
+
+# Lane/Binding 的身份或唯一性冲突持续出现
+- alert: AgentDeskConversationBindingFailures
+  expr: sum(rate(agentdesk_conversation_binding_failures_total[15m])) > 0.05
+  for: 15m
+  severity: warning
+
+# 飞书多维表格接口持续返回 429
+- alert: AgentDeskFeishuBitableRateLimited
+  expr: sum by (operation) (rate(agentdesk_feishu_bitable_operations_total{outcome="rate_limited"}[10m])) > 0.05
+  for: 10m
+  severity: warning
 ```
 
 ---
@@ -242,14 +279,14 @@ docker logs fl-debug
 ```bash
 # 最近的失败 audit 行
 sqlite3 data/v2.db \
-  "select occurred_at, user_id, operation, requester_source, status, http_status, duration_ms
+  "select occurred_at, user_id, operation, logical_resource, requester_source, status, http_status, duration_ms
    from gateway_audit
    where http_status >= 400
    order by occurred_at desc limit 30"
 
 # 单个用户的近期操作
 sqlite3 data/v2.db \
-  "select occurred_at, operation, status, http_status, duration_ms
+  "select occurred_at, operation, logical_resource, status, http_status, duration_ms
    from gateway_audit where user_id='feishu:ou_xxx'
    order by occurred_at desc limit 50"
 
@@ -414,6 +451,93 @@ SELECT occurred_at, feedback_kind, recommended_worker AS suggested_target,
 平台绝不解析/路由。真正的重投归后端网关:让网关 watch `agent_routing_feedback` 审计行或
 `action='routing_feedback'` 的 classification_log 行,自行重派。误投混淆矩阵的 join 见
 `docs/enterprise-multi-user.md`「Routing feedback」段。
+
+### 3.13 Web SSO / API / SSE 异常
+
+先把三个概念分开：
+
+- **Web SSO** 是“浏览器通过飞书确认自己是谁”。它最终只生成随机 Cookie；数据库只保存
+  Cookie 的带密钥哈希，不保存飞书 access token、authorization code 或明文 Cookie。
+- **Web Session** 是 Host 认可的登录状态，具有空闲过期、绝对过期和撤销时间。它不是
+  Agent Session，也不能替浏览器指定用户、Organization 或 Agent Group。
+- **SSE** 是服务器向浏览器单向推送“有新消息”的长连接。断线后用持久化 Cursor 重放，
+  所以短暂的 `delivery="replay"` 正常；持续大量重放通常表示代理超时或网络频繁断开。
+
+```promql
+# 登录结果：started 只表示跳到飞书，用户可能主动放弃，不算失败分母
+sum by (outcome) (rate(agentdesk_web_login_total[15m]))
+
+# API 拒绝原因：先拆原因，不能为了降指标而放松 CSRF/Origin/Host 权限门
+sum by (reason) (rate(agentdesk_web_api_rejected_total[10m]))
+
+# 在线状态与 SSE 实时/重放
+agentdesk_web_active_sessions
+agentdesk_web_sse_connections
+sum by (delivery) (rate(agentdesk_web_sse_events_total[10m]))
+```
+
+常见判断：
+
+| 指标/现象 | 可能原因 | 处置 |
+|---|---|---|
+| `rejected` 突增 | Redirect URI 不一致、State/PKCE 过期、飞书 Provider 故障 | 核对飞书应用回调地址和 Host `publicOrigin`；不要打印 code/token |
+| `identity_conflict` 非 0 | 同一飞书外部身份已属于另一规范用户 | 查 `user_identities` 与 Enterprise Audit，人工核实后走受审计重新关联；禁止自动合并 |
+| `authentication_required` 持续升高 | Cookie 过期/撤销、代理未转发 HTTPS 语义 | 核对 Session TTL、Cookie Secure 和反向代理配置 |
+| `forbidden` 持续升高 | CSRF/Origin 不匹配，或 Host Agent Group/Organization 门拒绝 | 核对同源配置和权限；Organization 仍只在 Host 门控 |
+| `rate_limited` 持续升高 | 登录/API 限流太紧或存在探测 | 先按来源日志调查，再按真实容量调整；不要关闭限流 |
+| `replay` 长期接近/超过 `live` | SSE 被代理缓冲、超时或网络抖动 | 关闭反向代理响应缓冲，延长流式读取超时，检查客户端重连 |
+
+查看服务端 Session 时只查哈希和时间，不复制浏览器 Cookie：
+
+```sql
+SELECT substr(id_hash, 1, 12) AS session_hash_prefix, user_id,
+       created_at, last_seen_at, idle_expires_at, absolute_expires_at, revoked_at
+  FROM web_auth_sessions
+ ORDER BY created_at DESC
+ LIMIT 50;
+```
+
+### 3.14 Conversation Binding、回环抑制与飞书多维表格
+
+`conversation_binding_failures_total` 表示 Host 拒绝建立跨端映射。它是身份隔离守卫，不是
+普通可用性错误。按 `reason` 查清冲突，**不得**通过合并 Alice/Bob、关联 shared/per-thread
+Session，或放宽群聊写权限来消除告警。
+
+```promql
+sum by (reason) (rate(agentdesk_conversation_binding_failures_total[15m]))
+sum by (reason) (rate(agentdesk_cross_channel_loop_suppressed_total[15m]))
+sum by (operation, outcome) (rate(agentdesk_feishu_bitable_operations_total[10m]))
+```
+
+```sql
+-- 当前有效 Binding：外部标识只用于定位，不应复制到公开工单
+SELECT id, lane_id, channel_type, platform_id, delivery_mode,
+       verified_at, external_identity_id
+  FROM conversation_bindings
+ WHERE revoked_at IS NULL
+ ORDER BY verified_at DESC
+ LIMIT 50;
+
+-- 多维表格审计只记录规范用户、封闭 operation 与运营者配置的逻辑资源别名；
+-- 不记录 app_token/table_id、tenant token 或真实投递目标。
+SELECT occurred_at, user_id, operation, logical_resource, status,
+       http_status, duration_ms, input_hash, idempotency_key
+  FROM gateway_audit
+ WHERE operation LIKE 'feishu.bitable.%'
+ ORDER BY occurred_at DESC
+ LIMIT 50;
+```
+
+处置原则：
+
+- `active_address_conflict` 或身份 owner 不匹配：查 `conversation_bindings`、`user_identities`
+  和 Enterprise Audit，确认哪条旧 Binding 应撤销；不直接改 owner。
+- `cross_channel_loop_suppressed_total` 偶发增长通常是 Bot 自回调或重复镜像被正确挡住；
+  持续突刺要核对飞书 Bot Open ID、自消息过滤和 Delivery Origin 去重，不能关闭抑制。
+- 多维表格 `outcome="rate_limited"`：降低 Gateway 并发并遵循飞书重试提示；不要把凭证下放
+  到 Channel/Agent 绕过 Gateway。
+- 多维表格 `outcome="error"`：按 Operation + `gateway_audit.http_status` 区分认证、业务授权、
+  Schema 漂移和 Not Found。写操作仍必须接受规范用户授权、幂等和高影响确认约束。
 
 ---
 
@@ -640,7 +764,7 @@ for db in data/v2-sessions/*/*/inbound.db; do
   sqlite3 "$db" "update messages_in set status='pending' where status='processing'"
 done
 
-# 重启 host（用你的进程管理器；本平台不带 launchd/systemd 单元）
+# 重启 host（macOS 全量评测组合可用 pnpm services:restart；其他部署用自己的进程管理器）
 ```
 
 ### 8.3 临时屏蔽某个用户

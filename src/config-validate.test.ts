@@ -43,10 +43,32 @@ const INSPECTED_KEYS = [
   'OPENAI_MODEL',
   'OPENAI_REASONING_EFFORT',
   'OPENAI_TIMEOUT_MS',
+  'OPENAI_FORCE_TRANSPORT',
   'OPENAI_COMPACT_MODEL',
   'OTEL_CAPTURE_CONTENT',
   'AGENTDESK_OPENAI_VIA_ONECLI',
   'ONECLI_URL',
+  'CROSS_CHANNEL_LANES_ENABLED',
+  'WEB_ENABLED',
+  'WEB_PORT',
+  'WEB_PUBLIC_ORIGIN',
+  'WEB_SESSION_SECRET',
+  'WEB_SESSION_IDLE_TTL_MINUTES',
+  'WEB_SESSION_ABSOLUTE_TTL_HOURS',
+  'WEB_AUTH_TRANSACTION_TTL_MINUTES',
+  'WEB_MAX_BODY_BYTES',
+  'WEB_REQUEST_TIMEOUT_MS',
+  'WEB_COOKIE_NAME',
+  'WEB_ALLOW_INSECURE_HTTP',
+  'WEB_LOGIN_RATE_LIMIT',
+  'WEB_API_RATE_LIMIT',
+  'WEB_RATE_WINDOW_MS',
+  'WEB_SSE_MAX_CONNECTIONS_PER_USER',
+  'FEISHU_SSO_AUTHORIZE_URL',
+  'FEISHU_SSO_TOKEN_URL',
+  'FEISHU_SSO_USERINFO_URL',
+  'FEISHU_SSO_SCOPE',
+  'FEISHU_SSO_PKCE',
 ];
 
 const savedProcessEnv: Record<string, string | undefined> = {};
@@ -176,6 +198,70 @@ describe('validateStartupConfig — Feishu app credential pairing', () => {
   });
 });
 
+describe('validateStartupConfig — Web/Feishu SSO', () => {
+  const valid = {
+    WEB_ENABLED: 'true',
+    WEB_PUBLIC_ORIGIN: 'https://agent.example.com',
+    WEB_SESSION_SECRET: 'bcbf5f7f0ffb42c797ce231e92dba6a09db98ba46154720b9e54725002421db1',
+    FEISHU_APP_ID: 'cli_real-app-id',
+    FEISHU_APP_SECRET: 'a-real-feishu-secret-value-9f3c',
+  };
+
+  it('passes a complete HTTPS Web SSO configuration', () => {
+    setEnv(valid);
+    expect(() => validateStartupConfig()).not.toThrow();
+  });
+
+  it('fails Web mode without an exact public origin', () => {
+    setEnv({ ...valid, WEB_PUBLIC_ORIGIN: '' });
+    expect(() => validateStartupConfig()).toThrow(/WEB_PUBLIC_ORIGIN/);
+  });
+
+  it('rejects a short or placeholder Web session secret', () => {
+    setEnv({ ...valid, WEB_SESSION_SECRET: 'replace-me-web-session-secret' });
+    expect(() => validateStartupConfig()).toThrow(/WEB_SESSION_SECRET/);
+  });
+
+  it('rejects non-loopback HTTP unless explicit local development is enabled', () => {
+    setEnv({ ...valid, WEB_PUBLIC_ORIGIN: 'http://agent.example.com' });
+    expect(() => validateStartupConfig()).toThrow(/HTTPS/);
+  });
+
+  it('allows explicit loopback HTTP for local development and disables Secure-cookie assumptions there', () => {
+    setEnv({
+      ...valid,
+      WEB_PUBLIC_ORIGIN: 'http://127.0.0.1:3100',
+      WEB_ALLOW_INSECURE_HTTP: 'true',
+    });
+    expect(() => validateStartupConfig()).not.toThrow();
+  });
+
+  it('rejects idle expiry longer than absolute expiry', () => {
+    setEnv({
+      ...valid,
+      WEB_SESSION_IDLE_TTL_MINUTES: '180',
+      WEB_SESSION_ABSOLUTE_TTL_HOURS: '2',
+    });
+    expect(() => validateStartupConfig()).toThrow(/cannot exceed/);
+  });
+});
+
+describe('validateStartupConfig — unified messaging release gates', () => {
+  it('keeps an unset cross-channel Lane gate compatible with existing deployments', () => {
+    expect(() => validateStartupConfig()).not.toThrow();
+  });
+
+  it('accepts an explicit cross-channel Lane enablement', () => {
+    setEnv({ CROSS_CHANNEL_LANES_ENABLED: 'true' });
+    expect(() => validateStartupConfig()).not.toThrow();
+  });
+
+  it('rejects an ambiguous cross-channel Lane value', () => {
+    setEnv({ CROSS_CHANNEL_LANES_ENABLED: 'enabled' });
+    expect(() => validateStartupConfig()).toThrow(/CROSS_CHANNEL_LANES_ENABLED/);
+  });
+});
+
 describe('validateStartupConfig — OpenAI provider', () => {
   it('fails when OPENAI_BASE_URL is set but OPENAI_API_KEY is missing', () => {
     setEnv({ OPENAI_BASE_URL: 'https://gw.example.com/v1' });
@@ -184,6 +270,11 @@ describe('validateStartupConfig — OpenAI provider', () => {
 
   it('fails when OPENAI_MODEL is set but OPENAI_API_KEY is missing', () => {
     setEnv({ OPENAI_MODEL: 'gpt-5.4' });
+    expect(() => validateStartupConfig()).toThrow(/OPENAI_API_KEY/);
+  });
+
+  it('fails when OPENAI_FORCE_TRANSPORT is set but OPENAI_API_KEY is missing', () => {
+    setEnv({ OPENAI_FORCE_TRANSPORT: 'chat-completions' });
     expect(() => validateStartupConfig()).toThrow(/OPENAI_API_KEY/);
   });
 

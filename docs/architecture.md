@@ -58,15 +58,17 @@ agent group's filesystem but different session DBs.
 
 ```
 Platform event
-  → Channel adapter (trigger check, ID extraction)
-  → Returns: InboundEvent { channelType, platformId, threadId, message }
+  → Channel adapter / authenticated Web server (trigger check, ID extraction)
+  → Returns: InboundEvent { channelType, platformId, threadId, message, trusted identity/lane metadata }
   → Router maps channelType + platformId → messaging group → agent groups
-  → For each engaged agent: host resolves session, writes to inbound.db,
+  → For each engaged agent: host resolves an optional user-owned Conversation Lane,
+    then resolves the session, writes to inbound.db,
     calls wakeContainer(session)
   → Container spins up (or is already running)
   → Agent-runner polls inbound.db, finds new messages, publishes a
     batch RequestIdentity for trust-sensitive tools (see below)
-  → Agent-runner processes with the configured provider
+  → Agent-runner optionally runs enforced frontdesk Routing, then processes
+    with the configured Execution provider (workers keep the single-provider path)
   → Agent-runner writes response to outbound.db
   → Host delivery loop polls outbound.db for undelivered rows
   → Host reads the response, delivers through the originating channel
@@ -98,8 +100,10 @@ Two concrete mechanisms enforce this:
    "most recent message" under the tool call.
 
 2. **origin_user_id traversal (host side).** `messages_in` has an
-   `origin_user_id` column. Channel-side inbound leaves it NULL (senderId
-   in the content payload is authoritative). The agent-to-agent module
+   `origin_user_id` column. For new channel-side inbound, the Host writes the
+   canonical user resolved by the Sender Resolver; legacy rows may leave it
+   NULL and fall back to the namespaced `senderId` in content. The
+   agent-to-agent module
    (`src/modules/agent-to-agent/agent-route.ts`) copies it from the source
    session when writing the target row, so worker sessions see the real
    employee id even N hops down the delegation chain.
@@ -122,6 +126,32 @@ writes when the source is agent-asserted).
    to `platform_id` / `source_session_id` / `root_session_id`; identity stays the
    host-validated `origin_user_id`. NULL on pre-migration / channel-only rows.
 
+Before `origin_user_id` is stamped, provider identities are normalized through
+`user_identities` (ADR-0061). A native adapter may attach
+`InboundEvent.senderIdentity` as Host-envelope metadata containing
+`provider/providerScope/identifierType/externalSubject`. It is intentionally
+outside `message.content`: the Agent sees content, but only trusted adapter or
+authentication code may establish identity metadata. The unique mapping lets
+Feishu chat and Feishu SSO resolve to the same opaque `users.id`.
+
+4. **Conversation Lane（ADR-0062）。** `conversation_lanes` 是跨渠道结构键，将一个规范用户和
+   一个 Agent Group 连接到同一个根 Session；`conversation_bindings` 保存经过验证的飞书/Web
+   入口。Router 可用 Web Server 已授权的 Lane，或用可信外部身份精确查找 Binding。解析过程
+   同时校验 Owner、Agent Group 和用户级 Session Mode。`conversation_thread_id` 仍只用于
+   Trace，不能参与 Lane 查询。来自 Lane 的消息写入 Host 拥有的 `origin_user_id`，因此后续
+   A2A 多跳继续使用既有交叉验证信任链。
+
+5. **Authenticated Web principal。** Web Server 从 Hash 化 Cookie Session 得到规范用户，并在
+   逐请求重跑 Agent Group/Organization 访问门后，把 `authenticatedUserId` 与 Lane 作为
+   Host Envelope 元数据交给 Web Adapter。它们不能从浏览器 JSON 或 Agent 可见正文复制。Web
+   消息随后复用通用 Router 的 Persist-before-route 路径；详见 [web-channel.md](web-channel.md)。
+
+6. **Lane 的逐轮回复地址。** 一个 Lane 的根 Session 可以交替接收飞书和 Web 消息，因此创建
+   Session 时保存的 Messaging Group 不是永久回复地址。对于用户可见出站消息，Host 根据
+   `in_reply_to` 读取自己写入的 `messages_in` 行，并以该行的 Channel、Platform 和 Thread
+   覆盖 Container 提供的地址。飞书来源的回复另外发布 Web History 可用事件；Web 来源默认只
+   回复 Web。来源用户与 Lane Owner 不一致时拒绝投递。
+
 ## Channel Adapters
 
 Channel adapters are responsible for:
@@ -132,7 +162,13 @@ Channel adapters are responsible for:
    - **Platform thread ID** — optional sub-context (Slack thread, GitHub PR comment thread)
 4. Outbound delivery — sending responses back to the platform
 
-The channel adapter does NOT know about agent group IDs or session IDs. It returns platform-level identifiers. The host maps those to the entity model.
+Channel adapters do not receive Agent Group IDs as routing or authorization
+inputs. Most adapters only handle platform-level identifiers. Outbound delivery
+may additionally carry an optional Host-attested `source` reference
+(`messageId`/`sessionId`) for durable delivery deduplication or notification;
+adapters must not reinterpret it as user identity or business authorization.
+The Web adapter uses it only to verify that a persisted outbound row belongs to
+the active Lane root before publishing an SSE event.
 
 The two-level ID scheme (channel ID + thread ID) gives flexibility:
 - Want every Slack thread to be a separate session? Return unique thread IDs.
@@ -615,6 +651,13 @@ The architecture is **flexible for code changes, not configurable for everything
 
 AgentDesk is customized via skills — branches that get merged into the user's installation. Different skills add different capabilities (channels, integrations, behaviors). The code must be structured so that:
 
+Group-specific business Skills may live under
+`groups/<folder>/skills/<name>/`. Explicit `container.json#skills` entries
+resolve those private Skills before the shared `container/skills` catalog.
+Providers that do not natively load the composed `CLAUDE.md` receive a bounded
+expanded copy plus `CLAUDE.local.md` through their system context; native
+workspace-loading providers retain their native path without duplication.
+
 1. **Different customizations don't conflict.** Adding Slack and adding Telegram should not produce merge conflicts. Adding a new MCP tool should not conflict with adding a channel. Each type of customization should touch its own file(s).
 
 2. **Core blocks of functionality are in separate files.** Channel registration, message formatting, MCP tools, routing logic, container management — each in its own file. A skill that changes how messages are formatted doesn't touch the file that handles container spawning.
@@ -793,12 +836,26 @@ CREATE TABLE messaging_groups (
   UNIQUE(channel_type, platform_id)
 );
 
--- Users (messaging platform identities, namespaced "<channel_type>:<handle>")
+-- Canonical users. Legacy ids may remain namespaced channel handles.
 CREATE TABLE users (
   id           TEXT PRIMARY KEY,   -- e.g. 'telegram:123456', 'discord:1470...'
   kind         TEXT NOT NULL,      -- mirrors the channel_type prefix
   display_name TEXT,
   created_at   TEXT NOT NULL
+);
+
+-- Provider-verified external identities (ADR-0061); no tokens/credentials.
+CREATE TABLE user_identities (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  provider TEXT NOT NULL,
+  provider_scope TEXT NOT NULL,
+  identifier_type TEXT NOT NULL,
+  external_subject TEXT NOT NULL,
+  verified_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  UNIQUE(provider, provider_scope, identifier_type, external_subject)
 );
 
 -- Roles (ADR-0051 added operator/viewer; ADR-0052 added org-admin + the org scope).
@@ -938,11 +995,19 @@ All IO goes through the session DB. No stdin, no stdout markers, no IPC files.
 
 1. Query `messages_in WHERE status = 'pending' AND (process_after IS NULL OR process_after <= now())`
 2. If rows found: set `status = 'processing'`, `status_changed = now()` on each
-3. Batch messages into a single prompt (strip routing fields, format by kind)
-4. Push into Claude SDK's MessageStream
-5. Process agent output → write `messages_out` rows
-6. Set processed messages to `status = 'completed'`
-7. Back to step 1. If no messages found, sleep briefly and re-poll (container stays warm for idle timeout)
+3. Split the batch by trusted turn identity. If this is a routing-enabled
+   frontdesk channel-entry chat turn, build the bounded Routing view and call
+   the stateless/tool-free Routing provider.
+4. Validate the closed Routing decision. `delegate` writes one direct A2A
+   outbound; `answer_self` / `clarify` / `reject` install the shared outbound DB
+   gate and continue to frontdesk Execution. The gate permits only the exact
+   origin channel/platform/thread and is cleared before the next claimed turn.
+5. Format the unchanged execution batch into a prompt (strip routing fields,
+   format by kind) and query the configured Execution provider.
+6. Process provider output → write `messages_out` rows. Parent XML dispatch and
+   MCP child sends consult the same routing gate.
+7. Set processed messages to `status = 'completed'`, clear per-turn identity and
+   routing state, then return to step 1.
 
 ### Message Formatting by Kind
 
@@ -1025,8 +1090,18 @@ Pre-scripts: if a task message has a `script` field, run it first. If `wakeAgent
 
 ### Agent-Runner Properties
 
-- AgentProvider interface wraps SDK-specific query logic (trunk ships the `claude` provider; additional providers like OpenCode install via `/add-<provider>` skills)
-- Session resume via provider-specific mechanisms
+- AgentProvider wraps SDK-specific query logic. Built-in aliases include
+  `claude`, `openai`, `codex`, `opencode-go`, and `mock`.
+- A frontdesk may configure independent Routing and Execution provider/model
+  roles in `container.json.llm`; either role can use Claude or an
+  OpenAI-compatible provider. Routing has no tools/MCP/continuation; Execution
+  preserves provider-specific tool and resume behavior.
+- The host resolves session/group Execution provider overrides before spawn
+  and passes that effective provider into the runner. If it differs from
+  `llm.execution.provider`, configured model/transport values are discarded so
+  an OpenAI model name cannot leak into a Claude override (or vice versa).
+- Execution session resume uses role-aware provider keys; legacy continuation
+  keys migrate into the Execution role. Routing never persists continuation.
 - System prompt loading from CLAUDE.md files
 - PreCompact hook for transcript archiving (Claude provider)
 - Script execution for task-kind messages
@@ -1035,7 +1110,6 @@ Pre-scripts: if a task message has a `script` field, run it first. If `wakeAgent
 
 - **Approval routing** — how does the host find the admin's DM conversation? What if no DM channel exists? Is the approval list configurable per agent group or global?
 - **MCP server lifecycle** — does the MCP server process persist across multiple queries in the same container, or restart each time?
-- **Container startup config** — what config (if any) is passed to the container at launch beyond env vars? The session DB is at a fixed mount path. System prompt comes from CLAUDE.md. Provider name comes from env. What else?
 - **Idle detection with pending questions** — when `ask_user_question` is waiting for a response, the container should not be considered idle. Also need to detect when the agent is still working (active tool calls, subagents) and avoid killing the container even if no messages_out have been written recently.
 
 ## Related Documents

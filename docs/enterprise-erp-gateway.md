@@ -149,14 +149,18 @@ this key to dedupe retried writes on your side.
 
 ### `requesterSource` is how the gateway decides how much to trust the `requester` block
 
-| value | meaning | recommended gateway policy |
-|-------|---------|----------------------------|
-| `session` | Identity was derived from the session's inbound messages — host-written, container cannot forge. Authoritative. | Normal permission flow. Attribute the action to `requester.userId`. |
+| value            | meaning                                                                                                                                                                                            | recommended gateway policy                                                                                                       |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `session`        | Identity was derived from the session's inbound messages — host-written, container cannot forge. Authoritative.                                                                                    | Normal permission flow. Attribute the action to `requester.userId`.                                                              |
 | `agent-asserted` | No trusted identity was available at batch start (scheduled task, a2a hop with no attribution source, orphan session). The `requester` block reflects whatever the agent passed as tool arguments. | Be strict. Default to rejecting writes. Allow only read / aggregate / non-destructive operations, and clearly log the ambiguity. |
 
 The agent cannot set this field — it's set by the container runtime based on
 what it could resolve at the start of the batch. See
 `container/agent-runner/src/request-identity.ts` for the resolution rules.
+
+`requester.userId` 是 Host 解析出的规范 `users.id`，调用方必须把它当作不透明授权主体，不能
+重新按 `feishu:<open_id>` 拆解或推导。飞书 Channel 与飞书 SSO 的外部 Subject 在 Host 侧通过
+`user_identities` 关联；Organization 仍是 Host 访问门，不加入 Gateway 业务授权输入。
 
 ## Identity propagation across agent-to-agent hops
 
@@ -220,7 +224,7 @@ proxy; the proxy verifies the token, confirms the request's claimed agent group
 matches the token's authoritative (central-DB) group, signs the canonical bytes
 with the real key, and forwards. The backend sees the exact same signed request
 as in direct mode — no contract change. From the gateway's perspective nothing
-changes; this only moves *where* the signature is produced. See ADR-0034 for the
+changes; this only moves _where_ the signature is produced. See ADR-0034 for the
 threat model, token scoping, source-IP pin caveats, and audit columns.
 
 ### Enabling signing
@@ -272,6 +276,9 @@ Recorded fields:
 - `occurred_at`, `session_id`, `agent_group_id`, `user_id`
 - `path` — `/describe` / `/authorize` / `/execute` / `/memory/get` / `/memory/upsert` / `/memory/search`
 - `operation` — for authorize/execute calls
+- `logical_resource` — 仅对 `feishu.bitable.*` 保存经过格式校验的运营者逻辑资源别名；不会保存
+  `app_token`、`table_id` 或其映射。`/bulk_execute` 只有在所有 Operation 都指向同一别名时才记录，
+  混合资源保持 `NULL`
 - `requester_source` — same `'session'` / `'agent-asserted'` value the
   gateway saw
 - `status` — `ok` / `error`
@@ -289,16 +296,16 @@ Typical queries:
 
 ```bash
 pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT occurred_at, user_id, path, operation, status, http_status
+  "SELECT occurred_at, user_id, path, operation, logical_resource, status, http_status
      FROM gateway_audit
      WHERE occurred_at > datetime('now', '-1 hour')
      ORDER BY id DESC LIMIT 50"
 ```
 
-The audit write is best-effort (container → host → DB); if the DB write
-itself fails, the row is dropped. For environments where the gateway side
-needs to reconcile the full trail even when that happens, run audit on
-the gateway as well and match by `idempotencyKey` / returned audit id.
+容器经 Outbound Message 上报的审计行仍是 Best-effort。启用 Host Signing Proxy 时，Proxy 会从其实际
+签名的规范化请求体重新提取 `logical_resource`，并在转发前写入两阶段权威审计 Intent；该写入失败
+会拒绝签名和转发。Gateway 仍须保留自己的后端审计，并可通过写幂等键、Input Hash 或返回的
+`auditId` 与 Host 侧记录核对。
 
 ### Execution attestation (user-visible trust signal)
 
@@ -326,7 +333,7 @@ When the host signing proxy is enabled, the proxy writes its own **authoritative
 rows carrying facts only the host knows, via additive (nullable) columns added by
 migration 029: `signed_as_group`, `token_jti`, `proxy_request_id`,
 `identity_mismatch`, `requester_source_coerced`, `audit_phase`. These rows are
-written in two phases — an `audit_phase='intent'` row (`status='pending'`) *before*
+written in two phases — an `audit_phase='intent'` row (`status='pending'`) _before_
 forwarding, updated to `audit_phase='final'` with the outcome afterwards — so a
 crash mid-call still leaves a forensic row. Any `intent` row left stranded by a
 crash is reconciled to a terminal `error` at the next host start. The default
@@ -352,21 +359,29 @@ agent so it can decide whether to retry. Two ways your backend can drive this:
 2. **HTTP status only** — if the body isn't a structured error, the platform
    maps the status code:
 
-| HTTP status | error code | retryable (default) |
-|-------------|-----------|---------------------|
-| 401, 403 | `BACKEND_UNAUTHORIZED` | no |
-| 404 | `OPERATION_NOT_FOUND` | no |
-| 400, 422 | `VALIDATION_FAILED` | no |
-| 5xx | `BACKEND_UNAVAILABLE` | yes |
-| other | `UNKNOWN` | no |
+| HTTP status | error code             | retryable (default) |
+| ----------- | ---------------------- | ------------------- |
+| 401, 403    | `BACKEND_UNAUTHORIZED` | no                  |
+| 404         | `OPERATION_NOT_FOUND`  | no                  |
+| 409         | `CONFLICT`             | yes                 |
+| 429         | `RATE_LIMITED`         | yes                 |
+| 400, 422    | `VALIDATION_FAILED`    | no                  |
+| 5xx         | `BACKEND_UNAVAILABLE`  | yes                 |
+| other       | `UNKNOWN`              | no                  |
 
-Additional codes the platform itself can emit (not from your HTTP status):
+Additional closed codes (usually supplied in a structured error body):
 
-| code | when |
-|------|------|
-| `TIMEOUT` | request exceeded `backendGateway.timeoutMs` (retryable) |
-| `GATEWAY_NOT_CONFIGURED` | the agent group has no `baseUrl` |
-| `CONTRACT_VERSION_MISMATCH` | backend echoed a different `contractVersion` (warn-only, not a hard error) |
+| code                             | when                                                                                      |
+| -------------------------------- | ----------------------------------------------------------------------------------------- |
+| `TIMEOUT`                        | request exceeded `backendGateway.timeoutMs` (retryable)                                   |
+| `GATEWAY_NOT_CONFIGURED`         | the agent group has no `baseUrl`                                                          |
+| `CONTRACT_VERSION_MISMATCH`      | backend echoed a different `contractVersion` (warn-only, not a hard error)                |
+| `RESOURCE_NOT_ALLOWED`           | the logical resource alias is not on the operator whitelist                               |
+| `CONFIRMATION_REQUIRED`          | a confirmation-bound write lacks a valid user/target/patch/version-bound confirmation     |
+| `UPSTREAM_AUTHENTICATION_FAILED` | the Gateway could not authenticate to its upstream system                                 |
+| `NOT_FOUND`                      | the requested upstream business object or record does not exist                           |
+| `CONFLICT`                       | the upstream rejected a concurrent or revision-conflicting write (retryable by default)   |
+| `RATE_LIMITED`                   | the upstream rate-limited the call (retryable by default; include bounded `retryAfterMs`) |
 
 The code is also folded into the `gateway_audit` row (see below) as an
 `[CODE]`-prefixed `error_msg`, and as a dedicated `errorCode` field in the
@@ -384,7 +399,234 @@ container-emitted audit message.
 - **Domain "no" that isn't an infra error** (e.g. "insufficient budget"):
   prefer `ok: false` in a **2xx** result with a structured business reason the
   agent can relay, rather than a transport error code. The closed enum is for
-  *transport/retry* classification, not for business outcomes.
+  _transport/retry_ classification, not for business outcomes.
+
+## 飞书多维表格 Operation（ADR-0063）
+
+这一节是 `feishu.bitable.*` 的人类可读契约；机器可校验的唯一事实来源位于
+`container/agent-runner/src/mcp-tools/feishu-bitable-contract.ts`。
+
+### 为什么仍然走通用 Gateway
+
+飞书聊天 Adapter 只负责接收和发送消息，不是业务数据库客户端。Web 或飞书产生的 Turn 都由
+Agent 调用相同的 `gateway_describe`、`gateway_authorize` 和 `gateway_execute`。只有运营者控制的
+Gateway 进程保存 `app_id`、`app_secret`、`tenant_access_token`、`app_token` 和 `table_id`。
+Host、Web、Channel、Agent 容器和 Prompt 都不得持有这些值，也不得直连多维表格。
+
+`requester.userId` 是每次调用的规范用户授权主体。Gateway 必须逐调用检查用户、Operation、逻辑资源
+和目标 Record Scope；`requesterSource='agent-asserted'` 的写操作默认拒绝。Host 的 Organization
+访问门不进入这一业务授权输入，也不能替代 Gateway 授权。
+
+### Operation Catalog
+
+| Operation                            | 用途                                  | 写操作 | 确认规则                       |
+| ------------------------------------ | ------------------------------------- | -----: | ------------------------------ |
+| `feishu.bitable.app.get`             | 读取逻辑应用元数据                    |     否 | 无                             |
+| `feishu.bitable.table.list`          | 列出该逻辑应用中批准暴露的数据表      |     否 | 无                             |
+| `feishu.bitable.field.list`          | 获取字段名、类型、必填、可写等 Schema |     否 | 无                             |
+| `feishu.bitable.record.list`         | 有界分页或结构化条件读取 Record       |     否 | 无                             |
+| `feishu.bitable.record.get`          | 读取单条 Record                       |     否 | 无                             |
+| `feishu.bitable.record.create`       | 创建单条 Record                       |     是 | 按业务策略                     |
+| `feishu.bitable.record.update`       | 更新单条 Record                       |     是 | 当前试点始终确认               |
+| `feishu.bitable.record.delete`       | 删除单条 Record                       |     是 | 始终确认                       |
+| `feishu.bitable.record.batch_create` | 批量创建                              |     是 | 按业务策略                     |
+| `feishu.bitable.record.batch_update` | 批量更新                              |     是 | 任一项命中高影响字段时整批确认 |
+| `feishu.bitable.record.batch_delete` | 批量删除                              |     是 | 始终确认                       |
+
+Gateway 只在 `/describe` 中发布当前真正启用的 Operation。Agent 必须先发现再调用；没有声明就要明确
+报告能力不可用，不能根据 Prompt 猜测“应该支持”。
+
+参考 Gateway 进一步用 `FEISHU_BITABLE_READ_ENABLED` 和
+`FEISHU_BITABLE_WRITE_ENABLED` 分别控制只读与写 Operation，两者默认关闭。开关同时约束
+Discovery 和执行；关闭的 Operation 返回 `OPERATION_NOT_FOUND`，不会触达飞书 API。分阶段启用和
+回滚流程见 [Web 与飞书统一消息运维手册](web-feishu-unified-messaging-operations.md)。
+
+### 公共输入规则
+
+- `resource` 是稳定的逻辑别名，例如 `sales.pipeline`。Gateway 在运营者白名单中把它映射到
+  `app_token`/`table_id`；未知别名返回 `RESOURCE_NOT_ALLOWED`。
+- 输入 Schema 不接受 `app_token` 或 `table_id`。即使 Agent 猜到真实标识，也不能绕过别名白名单。
+- `recordId` 只能在已经通过资源和用户授权后使用。
+- List 的 `viewAlias`、`filterAlias`、`sortAlias` 仍是运营者配置的查询别名，不是任意飞书表达式。
+- `cursor` 是 Gateway 包装并校验的不透明 Cursor，不直接暴露飞书 `page_token`。
+- 默认 `pageSize=20`，单页最大 `100`。飞书 Record API 当前允许最大 500，但平台主动收紧到 100，
+  防止一次读取撑大 Agent 上下文；运营者可以进一步收紧，不能放宽机器契约。
+- 临时自然语言条件使用 `record.list.query`/`orderBy`，不能把原生飞书 Filter、Sort、Formula 或
+  Provider Payload 作为输入。`filterAlias`/`sortAlias` 不得和结构化 Query/Order 混用。
+
+典型读取：
+
+```jsonc
+{
+  "operation": "feishu.bitable.record.list",
+  "input": {
+    "resource": "sales.pipeline",
+    "pageSize": 20,
+    "filterAlias": "active",
+    "sortAlias": "recently-updated",
+    "cursor": "<opaque-cursor-from-previous-result>",
+  },
+}
+```
+
+结构化条件示例：
+
+```jsonc
+{
+  "operation": "feishu.bitable.record.list",
+  "input": {
+    "resource": "sales.pipeline",
+    "fields": ["客户", "阶段", "金额", "截止日期"],
+    "query": {
+      "conjunction": "and",
+      "conditions": [
+        { "field": "阶段", "operator": "eq", "value": "跟进中" },
+        { "field": "金额", "operator": "gte", "value": 10000 },
+        { "field": "截止日期", "operator": "lte", "value": 1800000000000 },
+      ],
+    },
+    "orderBy": [{ "field": "金额", "direction": "desc" }],
+    "pageSize": 20,
+  },
+}
+```
+
+Gateway 必须先读取当前 Field Schema，再检查字段存在性、Operator Matrix、值类型和选项值，
+最后才编译成 Provider 查询。支持单层 `and|or`、最多 10 个条件和 3 个排序项：
+
+- 文本：`eq/ne/contains/notContains`
+- 数字：`eq/ne/gt/gte/lt/lte`
+- 日期：`eq/gt/gte/lt/lte`，值使用 Unix 毫秒
+- 单选：`eq/ne`
+- 复选框：布尔 `eq/ne`
+- 上述字段均支持 `isEmpty/isNotEmpty`
+
+`startsWith` 在通用封闭词汇中保留，但参考飞书 Provider 当前没有等价表达，会在网络调用前
+返回 `VALIDATION_FAILED`。Cursor 必须同时绑定 Resource、View、字段投影、Query 和 Order；
+条件变化后重放旧 Cursor 必须拒绝。Gateway 每次只取一个有界页面，不得先拉取全表多页再交给
+模型筛选。用于选择单个写入目标时，零匹配、多匹配或 `hasMore=true` 都不能默认第一条。
+
+返回：
+
+```jsonc
+{
+  "ok": true,
+  "result": {
+    "items": [{ "recordId": "rec...", "fields": { "客户": "示例公司", "阶段": "跟进中" } }],
+    "hasMore": true,
+    "nextCursor": "<opaque-cursor>",
+  },
+  "auditId": "...",
+}
+```
+
+### 字段发现与写入校验
+
+写入前，Gateway 必须从飞书获取或读取有界 TTL 缓存的 Field Schema，并检查：
+
+- 字段名存在；
+- 字段可写（公式、自动编号、创建/修改人时间等计算字段不能写）；
+- 值类型与飞书字段类型相符；
+- Create 提供所有必填字段；
+- 单选/多选值、是否多值等约束满足当前 Schema。
+
+校验失败不得产生部分写入。若飞书返回疑似 Schema 漂移错误，Gateway 清除该 Table 的 Schema
+缓存、重新发现并最多重新校验一次；已经可能提交成功的写不能无幂等保护地重发。
+
+单条创建输入：
+
+```jsonc
+{
+  "operation": "feishu.bitable.record.create",
+  "input": {
+    "resource": "sales.pipeline",
+    "fields": { "客户": "示例公司", "阶段": "新建" },
+  },
+  "idempotencyKey": "stable-key",
+}
+```
+
+Create、Update、Delete 和三个 Batch Operation 的提交调用都必须携带非空幂等键。Gateway 持久化
+“幂等键 + 规范用户 + Operation + 逻辑资源 + 输入 Hash”及首次提交结果；相同请求重放时返回第一次
+的结果，不再次写飞书。同一幂等键绑定到不同输入时返回 `CONFLICT`。
+
+### Update/Delete Preview 与 Host-mediated 确认
+
+当前试点的每一次单条 Update/Delete 都要求显式确认；`highImpactFields` 只决定 Update 风险标识，
+不再让普通字段绕过确认。两者都使用两阶段协议：
+
+1. Worker 对 Update 用 `dryRun=true` 提交 `{resource, recordId, fields}`，对 Delete 提交
+   `{resource, recordId}`。
+2. Gateway 读取完整当前 Record；Update 生成字段级 Before/After Diff，Delete 生成有界当前字段摘要。
+   两者都返回稳定 Record Fingerprint、Binding Hash、过期时间、后端 `auditId` 和 opaque
+   `confirmationRequest`。
+3. Runner 严格验证并在当前 MCP Session 的有界 TTL Cache 中私有保存完整 Preview，返回模型前
+   删除 opaque Request。`gateway_request_confirmation` 只接受模型可见展示 Preview；按 Binding
+   Hash 命中缓存且逐字段一致时，才把原始 opaque Request 和未经重算的展示数据写入 Outbound。
+   缓存缺失、过期或展示漂移都要求重新 dry-run。Host 从可信 Session/Inbound 链重新解析原规范
+   用户和来源路由，并创建持久化 Pending。
+4. 飞书按钮、飞书文本或 Web 决策都必须匹配 Pending 的原请求者；群聊其他成员不能批准。
+5. 批准后 Host Signing Proxy 调用 `POST /confirmation/issue`。Gateway 验证自身 opaque Request、
+   精确展示摘要、用户、Agent Group 和有效期，再签发 Token。
+6. Commit 必须携带原目标、Preview Fingerprint 和 Token；Update 还必须携带原 Patch。Gateway
+   先命中相同幂等 Replay，否则验证 Token、重新 Get 并比较 Fingerprint；变化返回 `CONFLICT`，
+   不执行 PUT/DELETE。Update 成功后 Get 并核对 Patch；Delete 成功后只有 Get 明确返回
+   `NOT_FOUND` 才报告 `deleted=true` 和 `verification.verified=true`，并返回关联审计 ID。
+
+Update Token 至少绑定规范用户、Agent Group、Operation、Resource、`recordId`、Patch Hash、
+Fingerprint、过期时间和 Nonce；Delete Token 使用独立 Purpose，绑定相同主体与目标但不伪造
+Patch Hash。Nonce 只允许在同一幂等绑定中重放；不同输入或不同幂等键复用必须拒绝。Token 只能
+进入等待中的 Worker 私有系统响应。opaque Request 不得进入外部模型上下文；Request 和 Token
+都不得进入飞书卡片、Web API、日志或审计明文。
+
+旧 Gateway 对 `/confirmation/issue` 返回 404、Host 签名失败、用户不匹配、Preview 被篡改、
+过期或 Fingerprint 冲突时，Update/Delete 都保持 Fail Closed，不能降级为 Prompt 中的
+`confirmed=true`。Create 可复用同一 Host Pending 交互，但低风险试点不要求 Gateway Token。
+单条 Delete 可以发布；所有 Batch Operation 仍关闭。
+
+### 批量语义
+
+三个 Batch Operation 都要求显式 `mode: "atomic" | "best-effort"`，单批最多 100 条：
+
+- `atomic`：Gateway 只有在能够保证全成或全败时才接受；做不到就整批拒绝，不能伪装成原子。
+- `best-effort`：每项独立校验/执行；返回与输入索引一一对齐的 `results`。部分成功时
+  `ok=false, partial=true`，不得报告“全部成功”。
+
+示例部分成功结果：
+
+```jsonc
+{
+  "mode": "best-effort",
+  "ok": false,
+  "partial": true,
+  "results": [
+    { "index": 0, "ok": true, "record": { "recordId": "rec1", "fields": {} } },
+    {
+      "index": 1,
+      "ok": false,
+      "error": { "code": "VALIDATION_FAILED", "message": "unknown field: 不存在" },
+    },
+  ],
+}
+```
+
+### 飞书错误转换与审计
+
+参考映射如下；结构化 `code` 优先于 HTTP 状态：
+
+| 飞书结果                              | Gateway code                     |                  默认重试 |
+| ------------------------------------- | -------------------------------- | ------------------------: |
+| 应用凭证/tenant token 无效            | `UPSTREAM_AUTHENTICATION_FAILED` |                        否 |
+| 应用无文档或高级权限                  | `BACKEND_UNAUTHORIZED`           |                        否 |
+| 参数或字段校验失败                    | `VALIDATION_FAILED`              |                        否 |
+| App/Table/Field/Record 不存在         | `NOT_FOUND`                      |                        否 |
+| 同表并发写冲突（如飞书 `1254291`）    | `CONFLICT`                       |                是，带退避 |
+| 限流（如飞书 `1254290`/HTTP 429）     | `RATE_LIMITED`                   | 是，带有界 `retryAfterMs` |
+| 请求超时（如飞书 `1255040`/HTTP 504） | `TIMEOUT`                        |                        是 |
+| 飞书内部错误                          | `BACKEND_UNAVAILABLE`            |                        是 |
+
+Gateway 自身还必须留下后端审计：规范用户、Operation、逻辑资源别名、结果、耗时、写幂等键和安全
+Input Hash。不能记录 Access Token、`app_secret`、真实资源映射，或不受限的单元格明文。
 
 ## Transactions, partial failure & compensation
 
@@ -412,7 +654,7 @@ not a contract gap. Three patterns, in order of preference:
    recoverable.** Every mutating `/execute` carries a platform-generated
    `idempotencyKey` (see [`idempotencyKey`](#idempotencykey-write-operations));
    dedupe on it so a host retry replays the prior result instead of double-
-   writing. For a step that a *later* step invalidates, expose an explicit
+   writing. For a step that a _later_ step invalidates, expose an explicit
    **compensating operation** (e.g. `sales.order.unpost`, `payment.refund`) and
    have the agent call it — do not expect the platform to undo a committed
    write. Record both the original and the compensation in your backend audit so
@@ -441,11 +683,11 @@ Request — each operation carries its **own** `idempotencyKey`:
   // envelope: contractVersion, agent, requester, requesterSource
   "operations": [
     { "operation": "sales.order.create", "input": { "sku": "A", "quantity": 1 }, "idempotencyKey": "k1" },
-    { "operation": "sales.order.create", "input": { "sku": "B", "quantity": 2 }, "idempotencyKey": "k2" }
+    { "operation": "sales.order.create", "input": { "sku": "B", "quantity": 2 }, "idempotencyKey": "k2" },
   ],
   "context": {},
   "dryRun": false,
-  "atomic": false   // optional; see below
+  "atomic": false, // optional; see below
 }
 ```
 
@@ -455,10 +697,10 @@ Response — `results` is index-aligned with `operations`:
 {
   "ok": true,
   "results": [
-    { "ok": true, "result": { /* ... */ }, "auditId": "..." },
-    { "ok": false, "error": { "code": "VALIDATION_FAILED", "message": "..." } }
+    { "ok": true, "result": {/* ... */}, "auditId": "..." },
+    { "ok": false, "error": { "code": "VALIDATION_FAILED", "message": "..." } },
   ],
-  "partial": true   // best-effort: true when any op failed
+  "partial": true, // best-effort: true when any op failed
 }
 ```
 
@@ -565,6 +807,9 @@ Optional environment:
 - `GATEWAY_HEADERS` — extra headers as JSON, e.g. `'{"x-tenant":"tenant-a"}'`.
 - `GATEWAY_STRICT_RESPONSES=true` — fail on a response-schema mismatch.
 - `GATEWAY_TEST_USER_ID` — the sample `requester.userId`.
+- `GATEWAY_REQUIRE_FEISHU_BITABLE=true` — require `/describe` to advertise the
+  complete `feishu.bitable.*` catalog; useful in the Bitable-enabled deployment
+  stage, off by default for generic Gateways.
 
 The runner sends dummy payloads with `requesterSource='agent-asserted'` and sets
 `dryRun=true` on `/execute` — point it at a staging backend, not one that would
@@ -628,9 +873,13 @@ chooses how to hand them to your backend.
    field of the operation input:
 
    ```json
-   { "operation": "finance.invoice.submit",
-     "input": { "vendor": "ACME",
-                "document": { "filename": "po-8821.pdf", "contentType": "application/pdf", "base64": "<...>" } } }
+   {
+     "operation": "finance.invoice.submit",
+     "input": {
+       "vendor": "ACME",
+       "document": { "filename": "po-8821.pdf", "contentType": "application/pdf", "base64": "<...>" }
+     }
+   }
    ```
 
    Base64 adds ~33% overhead, so keep the encoded size comfortably under your
@@ -640,7 +889,7 @@ chooses how to hand them to your backend.
 2. **Already-hosted files: pass a URL/handle, not the bytes.** When the file
    already lives in your DMS / object store, put its stable URL or document id in
    `input`, and `gateway_memory_upsert` the reference if it should be remembered
-   across turns (store the *reference*, never the blob, in memory).
+   across turns (store the _reference_, never the blob, in memory).
 
 3. **Large or binary documents: out-of-band file service (pre-signed URL).**
    Keep big payloads off the JSON path entirely:
@@ -697,8 +946,26 @@ Suggested namespaces:
 - `user.profile`
 - `user.preferences`
 - `user.permission_hints`
-- `conversation.summary`
+- `persona` — durable facts the user states about themselves (role, expertise,
+  preferences, projects); written live by the agent under its persona
+  distillation rules (ADR-0057)
+- `conversation.summary.<agentGroupId>` — auto-saved compaction summaries,
+  one namespace **per agent group** (ADR-0057; the platform's flush writes
+  this per-agent form so one user's Finance-agent context never surfaces in
+  their HR-agent recall). The bare `conversation.summary` form appears only
+  from pre-ADR-0057 runners or when the runner has no agent group id —
+  treat both as the same family for retention/curation policy.
 - `approval.history`
+
+**Trust note for `persona` (and any agent-written namespace):** the request's
+`context` block — including `context.source: 'user-stated'` — is
+**agent-asserted**, exactly like any other model-supplied argument; only
+`requesterSource` is host-tagged (see above). A prompt-injected agent can claim
+`user-stated` on a fabricated fact, and persona records are long-lived, so this
+namespace deserves your strictest write-side curation: version rather than
+overwrite (ADR-0050 A.U.D.N.), surface conflicts, and expose records to
+operator review / the `/memory/feedback` loop (ADR-0043). Do not let a memory
+record substitute for per-operation authorization.
 
 ### Subject scoping & isolation (the backend's job)
 
@@ -713,13 +980,13 @@ warning for a mis-scoped subject, so make the scope explicit and enforce it.
 Recommended subject-type vocabulary (pick the smallest scope that fits the
 fact), widest → narrowest:
 
-| `subject.type` | `subject.id` example | Use for | Who may read |
-|---|---|---|---|
-| `org` | `org:acme` | org-wide policy, holiday calendar | everyone in the org |
-| `department` | `dept:finance` | departmental SOPs, cost centers | members of that department |
-| `team` | `team:qa-eu` | team conventions, rotation | members of that team |
-| `contract` | `contract:CT-8821` | per-engagement state | parties on that contract |
-| `user` | `feishu:ou_alice` | personal prefs, drafts, PII | that user only |
+| `subject.type` | `subject.id` example | Use for                           | Who may read               |
+| -------------- | -------------------- | --------------------------------- | -------------------------- |
+| `org`          | `org:acme`           | org-wide policy, holiday calendar | everyone in the org        |
+| `department`   | `dept:finance`       | departmental SOPs, cost centers   | members of that department |
+| `team`         | `team:qa-eu`         | team conventions, rotation        | members of that team       |
+| `contract`     | `contract:CT-8821`   | per-engagement state              | parties on that contract   |
+| `user`         | `feishu:ou_alice`    | personal prefs, drafts, PII       | that user only             |
 
 Isolation rules your gateway must enforce on **every** `get` / `upsert` /
 `search`:
@@ -762,7 +1029,7 @@ business memory.
   "agent": { "agentGroupId": "ag-...", "groupName": "...", "assistantName": "..." },
   "requester": { "userId": "feishu:ou_xxx", "channelType": "feishu", "platformId": "oc_xxx", "threadId": null },
   "requesterSource": "session",
-  "namespace": "conversation.summary",
+  "namespace": "conversation.summary.ag-frontdesk",
   "query": "what did the user say about the Q3 budget",
   "subject": { "type": "user", "id": "feishu:ou_xxx" },
   "limit": 10,
@@ -791,7 +1058,7 @@ provenance block + an optional `score`:
     {
       "value": { "note": "user prefers async approvals" },
       "source": {
-        "namespace": "conversation.summary",
+        "namespace": "conversation.summary.ag-frontdesk",
         "subjectType": "user",
         "subjectId": "feishu:ou_xxx",
         "recordId": "rec_8123",
@@ -827,7 +1094,7 @@ Over months, a `user.preferences` or `conversation.summary` namespace
 accumulates facts that drift, get superseded, or contradict each other. If your
 gateway just key-addresses and overwrites, stale facts linger and recall returns
 them as if current — and the agent has no way to tell. The `/memory/feedback`
-endpoint (ADR-0043) lets the agent/operator *flag* a bad record, but flagging
+endpoint (ADR-0043) lets the agent/operator _flag_ a bad record, but flagging
 isn't resolving; resolution is a **curation** step the backend owns.
 
 The recommended write-side shape is **A.U.D.N.** — on each upsert, reconcile the
@@ -860,9 +1127,8 @@ ISO-8601 fields on each search result for this:
 {
   "ok": true,
   "results": [
-    { "value": { "city": "SF" },  "validAt": "2026-06-15T00:00:00Z" },
-    { "value": { "city": "NYC" }, "validAt": "2026-06-01T00:00:00Z",
-      "invalidAt": "2026-06-15T00:00:00Z" }
+    { "value": { "city": "SF" }, "validAt": "2026-06-15T00:00:00Z" },
+    { "value": { "city": "NYC" }, "validAt": "2026-06-01T00:00:00Z", "invalidAt": "2026-06-15T00:00:00Z" }
   ]
 }
 ```

@@ -24,6 +24,7 @@ import type { AgentGroup } from './types.js';
 // dance instead of existsSync), valid inside the container via RO mounts.
 const SHARED_CLAUDE_MD_CONTAINER_PATH = '/app/CLAUDE.md';
 const SHARED_SKILLS_CONTAINER_BASE = '/app/skills';
+const GROUP_SKILLS_CONTAINER_BASE = '/workspace/agent/skills';
 const SHARED_MCP_TOOLS_CONTAINER_BASE = '/app/src/mcp-tools';
 
 // Host-side source paths used to discover fragment sources at compose time.
@@ -35,6 +36,33 @@ const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.loc
 interface SkillFrontmatter {
   name?: string;
   description?: string;
+}
+
+export interface ResolvedSkillSource {
+  hostDir: string;
+  containerDir: string;
+}
+
+/**
+ * Resolve an enabled Skill with group-private precedence. Business-specific
+ * Skills can live with one agent group while reusable platform Skills remain
+ * in container/skills.
+ */
+export function resolveSkillSource(
+  groupDir: string,
+  sharedSkillsDir: string,
+  skillName: string,
+): ResolvedSkillSource | null {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(skillName)) return null;
+  const privateDir = path.join(groupDir, 'skills', skillName);
+  if (fs.existsSync(path.join(privateDir, 'instructions.md'))) {
+    return { hostDir: privateDir, containerDir: `${GROUP_SKILLS_CONTAINER_BASE}/${skillName}` };
+  }
+  const sharedDir = path.join(sharedSkillsDir, skillName);
+  if (fs.existsSync(path.join(sharedDir, 'instructions.md'))) {
+    return { hostDir: sharedDir, containerDir: `${SHARED_SKILLS_CONTAINER_BASE}/${skillName}` };
+  }
+  return null;
 }
 
 // Lightweight YAML frontmatter reader for SKILL.md — only handles single-line
@@ -100,9 +128,27 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   // instructions on demand. Keeps the system prompt small + cache-stable;
   // skill content lands in transcript only when needed.
   const skillsHostDir = path.join(process.cwd(), 'container', 'skills');
-  if (fs.existsSync(skillsHostDir)) {
-    const candidates = config.skills === 'all' ? fs.readdirSync(skillsHostDir) : config.skills;
+  const privateSkillsHostDir = path.join(groupDir, 'skills');
+  const candidates =
+    config.skills === 'all'
+      ? [
+          ...new Set(
+            [skillsHostDir, privateSkillsHostDir].flatMap((directory) =>
+              fs.existsSync(directory)
+                ? fs
+                    .readdirSync(directory, { withFileTypes: true })
+                    .filter((entry) => entry.isDirectory())
+                    .map((entry) => entry.name)
+                : [],
+            ),
+          ),
+        ].sort()
+      : config.skills;
+  const resolvedSkills = candidates
+    .map((skillName) => ({ skillName, source: resolveSkillSource(groupDir, skillsHostDir, skillName) }))
+    .filter((item): item is { skillName: string; source: ResolvedSkillSource } => item.source !== null);
 
+  if (resolvedSkills.length > 0) {
     if (config.progressiveDisclosure === 'lean') {
       // Lean mode — no skill index at all. Dispatcher agents that route
       // to workers via <message to="..."> blocks don't need the index;
@@ -130,10 +176,8 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
         '## Skill index',
         '',
       ];
-      for (const skillName of candidates) {
-        const hostFragment = path.join(skillsHostDir, skillName, 'instructions.md');
-        if (!fs.existsSync(hostFragment)) continue;
-        const meta = readSkillFrontmatter(path.join(skillsHostDir, skillName, 'SKILL.md'));
+      for (const { skillName, source } of resolvedSkills) {
+        const meta = readSkillFrontmatter(path.join(source.hostDir, 'SKILL.md'));
         const name = meta.name ?? skillName;
         const desc = (meta.description ?? '').trim() || '(no description)';
         indexLines.push(`- **${name}** — ${desc}`);
@@ -144,14 +188,11 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
         content: indexLines.join('\n'),
       });
     } else {
-      for (const skillName of candidates) {
-        const hostFragment = path.join(skillsHostDir, skillName, 'instructions.md');
-        if (fs.existsSync(hostFragment)) {
-          desired.set(`skill-${skillName}.md`, {
-            type: 'symlink',
-            content: `${SHARED_SKILLS_CONTAINER_BASE}/${skillName}/instructions.md`,
-          });
-        }
+      for (const { skillName, source } of resolvedSkills) {
+        desired.set(`skill-${skillName}.md`, {
+          type: 'symlink',
+          content: `${source.containerDir}/instructions.md`,
+        });
       }
     }
   }
@@ -199,8 +240,14 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
-  // Composed entry — imports only.
+  // Composed entry — imports only. The operator-seeded role prompt
+  // (instructions.md — template layer, ADR-0055) loads for EVERY session of
+  // the group, per-user scopes included, via an RO shadow mount; the
+  // instance-layer CLAUDE.local.md auto-loads beside it as memory.
   const imports = ['@./.claude-shared.md'];
+  if (fs.existsSync(path.join(groupDir, 'instructions.md'))) {
+    imports.push('@./instructions.md');
+  }
   for (const name of [...desired.keys()].sort()) {
     imports.push(`@./.claude-fragments/${name}`);
   }

@@ -20,14 +20,14 @@
 
 ## 它替你解决了什么
 
-| 关注点 | 平台负责的部分 |
-|---|---|
-| 多人 | 每个用户**完全隔离**的 session,上下文不串味 |
-| 身份 | 每次后端调用都归属到**真实终端用户**,prompt-injected 的 agent 无法伪造 |
-| 派活 | frontdesk 分类分流到专项 worker;身份跨 hop 传递不漂移 |
-| 审计 | 中央 `gateway_audit` 表,每次后端调用一行(who / what / when / 结果) |
-| 容器 | 每 session 一个容器,per-group cgroup 资源上限 + 全局并发上限 |
-| 可观测 | Prometheus `/metrics` + OpenTelemetry trace(Phoenix + Grafana) |
+| 关注点 | 平台负责的部分                                                         |
+| ------ | ---------------------------------------------------------------------- |
+| 多人   | 每个用户**完全隔离**的 session,上下文不串味                            |
+| 身份   | 每次后端调用都归属到**真实终端用户**,prompt-injected 的 agent 无法伪造 |
+| 派活   | frontdesk 分类分流到专项 worker;身份跨 hop 传递不漂移                  |
+| 审计   | 中央 `gateway_audit` 表,每次后端调用一行(who / what / when / 结果)     |
+| 容器   | 每 session 一个容器,per-group cgroup 资源上限 + 全局并发上限           |
+| 可观测 | Prometheus `/metrics` + OpenTelemetry trace(Phoenix + Grafana)         |
 
 ## 架构总览
 
@@ -36,7 +36,7 @@
 ```text
 聊天用户 / 群聊
   -> 通道适配器 (feishu / cli)
-  -> frontdesk agent      (接待、分类、分流)
+  -> entry agent          (用户眼中的"我的助手";分类/委派内部发生 — ADR-0060)
   -> worker agents        (专项执行)
   -> 后端网关             (你的 HTTP 契约)
   -> 你的 ERP / CRM / 审批 / 权限系统
@@ -200,6 +200,23 @@ pnpm dev                # 开发模式
 pnpm build && pnpm start
 ```
 
+### macOS 全量评测组合一键启动
+
+如果使用仓库里的小环语音、图片/JSON、Bitable 与 Vision Archive 示例组合，
+可以把组合 Host 和两个 Gateway 安装为当前用户的 `launchd` 常驻服务：
+
+```bash
+pnpm services:install   # 首次安装并启动
+pnpm services:status    # 查看进程与健康探针
+pnpm services:restart   # 完整重启
+pnpm services:logs      # 跟踪持久化日志
+pnpm services:stop      # 停止但保留配置和数据
+```
+
+终端关闭后服务不会退出，异常退出会被自动拉起。脚本还会启动监控 Compose
+栈，并验证 Host、Web、语音和各网关。完整说明见
+[`examples/local-evaluation-stack/README.md`](examples/local-evaluation-stack/README.md)。
+
 ## 常用命令
 
 ```bash
@@ -209,6 +226,12 @@ pnpm run audit                                          # 供应链门:prod 依�
 pnpm container:build
 pnpm init:enterprise
 pnpm configure:enterprise-gateway --base-url <gateway>
+
+# macOS 本地全量评测组合
+pnpm services:install
+pnpm services:status
+pnpm services:restart
+pnpm services:logs
 
 # 治理 / 多租户运维(ADR-0049 / 0051 / 0052)
 pnpm exec tsx scripts/org.ts list                       # org 管理:create / assign / grant-admin / add-member
@@ -236,6 +259,7 @@ pnpm exec tsx scripts/trace.ts --user <id>              # 只读会话分诊(--a
 - [docs/ENV-QUICK-START.md](docs/ENV-QUICK-START.md) — 环境变量按场景导航(最小 CLI / 生产 Feishu+网关 / 可选 tracing),先看哪些真的必填
 - [docs/configuration-reference.md](docs/configuration-reference.md) — per-group `container.json` 字段全表 + 环境变量入口
 - [docs/feishu-channel.md](docs/feishu-channel.md) — 飞书接入
+- [docs/web-feishu-unified-messaging-operations.md](docs/web-feishu-unified-messaging-operations.md) — Web/飞书统一消息部署、灰度与回滚
 - [docs/decisions/README.md](docs/decisions/README.md) — ADR 决策档案
 - [docs/business-optimization-roadmap.md](docs/business-optimization-roadmap.md) — 业务侧优化 backlog(56 条经核实的待办 + 优先级)
 - [examples/](examples/) — 把业务接入框架的参考样例

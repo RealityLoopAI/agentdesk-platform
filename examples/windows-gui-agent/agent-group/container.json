@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "windows_gui": {
+      "command": "bun",
+      "args": ["run", "/workspace/agent/gui-agent-mcp.ts"],
+      "env": {
+        "GUI_AGENT_BASE_URL": "http://192.168.66.98:8000",
+        "GUI_AGENT_TIMEOUT_MS": "15000",
+        "NO_PROXY": "192.168.66.98",
+        "no_proxy": "192.168.66.98"
+      }
+    }
+  },
+  "packages": {
+    "apt": [],
+    "npm": []
+  },
+  "additionalMounts": [],
+  "skills": ["operate-windows-gui"],
+  "provider": "openai",
+  "memoryMode": "gateway",
+  "a2aSessionMode": "root-session",
+  "groupName": "AgentDesk Windows GUI Worker",
+  "assistantName": "AgentDesk Windows GUI Worker",
+  "resources": {
+    "memoryMb": 1024,
+    "cpus": 1,
+    "pidsLimit": 512
+  },
+  "network": "bridge",
+  "progressiveDisclosure": false
+}

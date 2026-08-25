@@ -107,10 +107,150 @@ export const METRIC_PREFIX = /^[0-9]/.test(rawMetricPrefix) ? `_${rawMetricPrefi
  * their own desks/workers on top. No business-specific roles are baked in.
  */
 export const DEFAULT_FRONTDESK_FOLDER = `${PLATFORM_PROTOCOL_NAMESPACE}-frontdesk`;
-export const DEFAULT_FRONTDESK_NAME = `${PLATFORM_BRAND} Frontdesk`;
+/**
+ * USER-FACING display name of the entry agent. Deliberately NOT "Frontdesk"
+ * (ADR-0060): to the user this is their assistant, not a reception desk that
+ * transfers them onward — delegation is internal plumbing. The folder keeps
+ * the `-frontdesk` slug: it is an operator/topology identifier, never shown
+ * in a chat.
+ */
+export const DEFAULT_FRONTDESK_NAME = `${PLATFORM_BRAND} Assistant`;
 
 /** Folder prefix for worker agent groups created by the bootstrap script. */
 export const DEFAULT_WORKER_FOLDER_PREFIX = PLATFORM_PROTOCOL_NAMESPACE;
+
+export const DEFAULT_UI_THEME = {
+  brandPrimary: '#245866',
+  brandPrimaryHover: '#1B4652',
+  brandPrimaryActive: '#143A44',
+  brandSurfaceSubtle: '#E8F1F2',
+  brandBorder: '#B8D0D3',
+  canvas: '#FAF8F4',
+  surface: '#FFFFFF',
+  border: '#DDE5E5',
+  textPrimary: '#18343B',
+  textSecondary: '#60757A',
+  statusSuccess: '#287A5B',
+  statusWarning: '#A85E18',
+  statusDanger: '#C44545',
+} as const;
+
+export type PublicUiTheme = { -readonly [Key in keyof typeof DEFAULT_UI_THEME]: string };
+
+export interface PublicBranding {
+  displayName: string;
+  logoPath: string;
+  theme: PublicUiTheme;
+}
+
+const UI_THEME_ENV: Record<keyof PublicUiTheme, string> = {
+  brandPrimary: 'BRAND_UI_PRIMARY',
+  brandPrimaryHover: 'BRAND_UI_PRIMARY_HOVER',
+  brandPrimaryActive: 'BRAND_UI_PRIMARY_ACTIVE',
+  brandSurfaceSubtle: 'BRAND_UI_SURFACE_SUBTLE',
+  brandBorder: 'BRAND_UI_BORDER',
+  canvas: 'BRAND_UI_CANVAS',
+  surface: 'BRAND_UI_SURFACE',
+  border: 'BRAND_UI_NEUTRAL_BORDER',
+  textPrimary: 'BRAND_UI_TEXT_PRIMARY',
+  textSecondary: 'BRAND_UI_TEXT_SECONDARY',
+  statusSuccess: 'BRAND_UI_STATUS_SUCCESS',
+  statusWarning: 'BRAND_UI_STATUS_WARNING',
+  statusDanger: 'BRAND_UI_STATUS_DANGER',
+};
+
+function publicDisplayName(raw: string | undefined): string {
+  const normalized = Array.from(raw ?? '')
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint > 31 && codePoint !== 127;
+    })
+    .join('')
+    .trim();
+  return normalized.length >= 1 && normalized.length <= 80 ? normalized : 'Agent Platform';
+}
+
+function publicLogoPath(raw: string | undefined): string {
+  const candidate = raw?.trim() || '/brand/logo.svg';
+  if (
+    !candidate.startsWith('/') ||
+    candidate.startsWith('//') ||
+    candidate.includes('\\') ||
+    candidate.includes('..') ||
+    candidate.includes('?') ||
+    candidate.includes('#') ||
+    !/\.(?:svg|png|webp)$/i.test(candidate)
+  ) {
+    return '/brand/logo.svg';
+  }
+  return candidate;
+}
+
+function publicColor(raw: string | undefined, fallback: string): string {
+  const candidate = raw?.trim();
+  return candidate && /^#[0-9A-Fa-f]{6}$/.test(candidate) ? candidate.toUpperCase() : fallback;
+}
+
+function relativeLuminance(hex: string): number {
+  const channels = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255);
+  const [red = 0, green = 0, blue = 0] = channels.map((channel) =>
+    channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4,
+  );
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function contrastRatio(left: string, right: string): number {
+  const leftLuminance = relativeLuminance(left);
+  const rightLuminance = relativeLuminance(right);
+  return (Math.max(leftLuminance, rightLuminance) + 0.05) / (Math.min(leftLuminance, rightLuminance) + 0.05);
+}
+
+function ensureAccessibleTheme(theme: PublicUiTheme): PublicUiTheme {
+  const whiteTextTokens: Array<keyof PublicUiTheme> = [
+    'brandPrimary',
+    'brandPrimaryHover',
+    'brandPrimaryActive',
+    'statusSuccess',
+    'statusWarning',
+    'statusDanger',
+  ];
+  for (const key of whiteTextTokens) {
+    if (contrastRatio(theme[key], '#FFFFFF') < 4.5) theme[key] = DEFAULT_UI_THEME[key];
+  }
+  if (contrastRatio(theme.textPrimary, theme.canvas) < 4.5) {
+    theme.canvas = DEFAULT_UI_THEME.canvas;
+    theme.textPrimary = DEFAULT_UI_THEME.textPrimary;
+  }
+  if (contrastRatio(theme.textSecondary, theme.canvas) < 4.5) {
+    theme.textSecondary = DEFAULT_UI_THEME.textSecondary;
+  }
+  if (contrastRatio(theme.textPrimary, theme.surface) < 4.5) {
+    theme.surface = DEFAULT_UI_THEME.surface;
+  }
+  return theme;
+}
+
+/**
+ * Public UI-only branding projection. Keeping this builder pure makes the
+ * validation contract testable without mutating process-global constants.
+ */
+export function buildPublicBranding(
+  args: {
+    displayName?: string;
+    read?: (key: string) => string | undefined;
+  } = {},
+): PublicBranding {
+  const read = args.read ?? readBrandVar;
+  const theme = {} as PublicUiTheme;
+  for (const key of Object.keys(DEFAULT_UI_THEME) as Array<keyof PublicUiTheme>) {
+    theme[key] = publicColor(read(UI_THEME_ENV[key]), DEFAULT_UI_THEME[key]);
+  }
+  return {
+    displayName: publicDisplayName(args.displayName ?? PLATFORM_BRAND),
+    logoPath: publicLogoPath(read('BRAND_UI_LOGO_PATH')),
+    theme: ensureAccessibleTheme(theme),
+  };
+}
 
 /**
  * Resolve which frontdesk folder the enterprise autowire path should target.

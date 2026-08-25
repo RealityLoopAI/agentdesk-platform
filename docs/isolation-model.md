@@ -45,7 +45,7 @@ Multiple channels share the same agent (same workspace, memory, personality) but
 **Technical:** Multiple messaging groups are wired to the same agent group with `session_mode: 'shared'` (or `'per-thread'`). Each messaging group gets its own session, but they all run in the same agent group folder.
 
 > Note: this level isolates by **channel/room**, not by **sender**. Two
-> different employees writing in the *same* room share one session here. For an
+> different employees writing in the _same_ room share one session here. For an
 > enterprise bot where many employees share one surface and must not see each
 > other's context, use the user-scoped modes below — that is the platform
 > default, not this level.
@@ -76,13 +76,13 @@ The key question: **Are you okay with any and every piece of information from on
 
 ### Rules of Thumb
 
-| Scenario | Recommended Level / Mode |
-|----------|------------------|
-| **Shared enterprise bot, many employees, one surface** | **User-scoped: `per-user` / `per-user-per-thread`** (the default — see below) |
-| One agent group fronting several team rooms (same trusted audience) | Same agent, separate sessions |
-| Webhook channel + ops-room chat channel (notifications feed context into chat) | Shared session |
-| Two business units that must never see each other's context | Separate agent groups |
-| Frontdesk desk and a sensitive worker with different access levels | Separate agent groups |
+| Scenario                                                                       | Recommended Level / Mode                                                      |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| **Shared enterprise bot, many employees, one surface**                         | **User-scoped: `per-user` / `per-user-per-thread`** (the default — see below) |
+| One agent group fronting several team rooms (same trusted audience)            | Same agent, separate sessions                                                 |
+| Webhook channel + ops-room chat channel (notifications feed context into chat) | Shared session                                                                |
+| Two business units that must never see each other's context                    | Separate agent groups                                                         |
+| Frontdesk desk and a sensitive worker with different access levels             | Separate agent groups                                                         |
 
 ### When in Doubt
 
@@ -104,17 +104,84 @@ AgentDesk supports two user-scoped `session_mode` values for that case:
 - `per-user` — one session per `(agent_group, messaging_group, user)`
 - `per-user-per-thread` — one session per `(agent_group, messaging_group, user, thread)`
 
+这里的 `user` 是权限模块解析出的规范 `users.id`，不是浏览器或消息正文自报的字符串。
+原生 Channel 的可信外部身份先经 `user_identities`（包含 Provider Scope）解析，再进入
+Session Key 和访问门。Organization 仍只在 Host 侧按规范用户检查，既不会写进外部身份唯一键，
+也不会成为 Backend Gateway 的业务授权输入。
+
 Use these when:
 
 - many employees share one entry bot
-- you want the same agent group/workspace but separate conversation state per person
+- you want the same agent (template, config, skills) but a **separate workspace,
+  memory, and conversation state per person**
 - group chat is only a coordination surface and execution should not share context
+
+**State isolation (ADR-0055):** a user-scoped session mounts a per-user _state
+scope_ — its own `/workspace/agent` (working files, `CLAUDE.local.md` memory,
+`conversations/` transcripts) and its own `/home/node/.claude` (Claude state,
+auto-memory) under `data/v2-scopes/<agent_group>/<user>/`. Config and composed
+artifacts (`container.json`, `CLAUDE.md`, operator-seeded `instructions.md`,
+`prompts/`) stay group-level as read-only mounts; skill **content** is a shared
+read-only mount (`/app/skills`) while the group's skill **selection** is synced
+as symlinks into each scope's own Claude state dir at spawn. So per-user modes isolate **workspace and memory per
+person**, not just conversation state; ownerless modes (`shared`, `per-thread`,
+`agent-shared`) keep the historical group-level layout, where memory sharing is
+the documented feature. The same-user scope is shared across that user's
+sessions and threads — memory follows the person, not the chat room — and
+root-session a2a lanes inherit the owner, so per-user isolation propagates
+through delegation.
 
 Recommended defaults:
 
-- 1:1 DM with the bot: `shared`
+- 1:1 DM with the bot: `per-user` (each DM is its own messaging group, but
+  `shared` leaves the owner unset, so every DM user's session would mount the
+  GROUP state scope — all DM users of one bot sharing workspace and memory.
+  `per-user` gives the person their own scope, shared with their group-chat
+  lanes on the same agent; enterprise autowire wires DMs this way by default)
 - shared group/channel: `per-user` or `per-user-per-thread`
 - webhook + ops-room pair: `agent-shared`
+
+### 跨渠道 Conversation Lane
+
+普通 `per-user` 查询仍包含 Messaging Group，所以同一用户从飞书和 Web 进入时会得到两个
+Session。需要两端连续上下文时，Host 使用 `conversation_lanes` 增加一层用户拥有的结构映射：
+
+```text
+规范用户 + Agent Group
+        ↓
+Conversation Lane ──→ 一个根 Session（同一对 inbound.db/outbound.db）
+        ↑
+经过验证的飞书/Web Binding
+```
+
+Router 只接受两种 Lane 来源：
+
+- Web Server 已认证 Session、重新执行 Agent Group/Organization 访问门后写入的 Lane ID；
+- 原生 Channel 的可信 `senderIdentity` 与活跃 Binding 的精确匹配，或在
+  `CROSS_CHANNEL_LANES_ENABLED=true` 时由相同结构性 Session Key 在访问门后确定性建立的新
+  Binding。
+
+浏览器 JSON、消息正文中的 `senderId` 和 `conversation_thread_id` 都不能成为 Lane 查询键。最终
+还要同时校验 Lane 的 `owner_user_id`、`agent_group_id` 和用户级 Session Mode。任一不一致都会
+Fail Closed。
+
+Alice 和 Bob 即使在同一个飞书群也分别拥有 Lane 和根 Session；Alice 的 Web 消息只能复用
+Alice 的根 Session。共享模式的旧历史不能自动关联，因为其中可能已经含有其他用户内容。
+
+Lane 不是 `(用户, Agent Group)` 的唯一会话。每个既有飞书根 Session 都映射到自己的 Lane，所以
+同一用户和同一助手在两个飞书地址或根上下文中的历史不会拼接。SSO/运营历史协调只读取中央数据库
+结构字段，并拒绝 `shared`、`per-thread`、`agent-shared`；它不会为了“判断是不是同一对话”搜索
+消息正文。
+
+自动关联只建立结构映射，不能授予访问权。公开飞书群不会因此成为 Web 公开会话；每次列表、历史、
+SSE 和消息写入仍重新执行当前的 Agent Group/Organization Host 访问门。撤销 Membership 后 Lane
+立即不可见，恢复权限后重新看到同一 Lane，不会创建替代 Lane。Organization 继续只在 Host 侧由
+`agent_group_id` 推导，绝不进入 Gateway 业务授权输入。
+
+同一根 Session 内每个 Turn 仍保留自己的来源地址。出站回复通过 `in_reply_to` 回查 Host 写入的
+入站行，不使用 Session 最初绑定的 Messaging Group 作为当前地址；来源行的
+`origin_user_id` 还必须与 Lane Owner 一致。这一逐轮校验同时阻止 Web 私聊泄露到旧飞书群，以及
+其他群成员的行进入当前用户的 Web History。
 
 ## Entity Model
 
@@ -136,7 +203,7 @@ messaging_group_agents (session_mode, trigger_rules, priority)
 Above the channel↔agent isolation is an optional **tenant** boundary. An
 `agent_group` belongs to at most one `organization` (`agent_groups.organization_id`,
 nullable — `NULL` = legacy / un-orged, no tenancy). `organizations` +
-`organization_members` (membership = *reachability*, never privilege) draw the
+`organization_members` (membership = _reachability_, never privilege) draw the
 boundary; `user_roles.organization_id` carries org-scoped grants (`org-admin`,
 org-scoped `operator`/`viewer`).
 
@@ -156,3 +223,5 @@ sessions / messaging_groups / audit carry **no** org column — they derive org 
 JOIN through their immutable `agent_group_id`, so there is no second copy to
 drift, and org never enters the backend-gateway business-authz path (invariant:
 the gateway is the only authorization path; org isolation is host gating only).
+`conversation_lanes` 同样不保存 Organization 列；它从自己的 `agent_group_id` 走相同的 Host
+访问门，不能把 Organization 传入 Backend Gateway 业务授权。

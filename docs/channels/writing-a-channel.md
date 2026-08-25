@@ -40,10 +40,34 @@ Optional methods (`setTyping`, `syncConversations`, `resolveChannelName`,
 `isMember`, `subscribe`, `openDM`) — if you implement them, they must be
 functions. Omit the ones you don't support.
 
+`message.source` 是可选的 Host 可信持久化引用，形如
+`{ messageId, sessionId }`。普通第三方 Channel 可以完全忽略它；需要以服务端消息 ID 做投递去重
+或通知的 Adapter 可以读取，但不得把它当作用户身份或业务授权输入。该字段只说明“哪个已持久化
+出站行触发本次投递”。
+
 Inbound flows in via the `ChannelSetup` callbacks the host passes to `setup()`:
 `onInbound` (normal chat), `onInboundEvent` (admin transport), `onMetadata`,
 `onAction`. See the in-tree `cli` adapter (`src/channels/cli.ts`) for a small,
 complete reference.
+
+### 可信发送者身份（ADR-0061）
+
+如果平台回调已经以签名、长连接 SDK 或等价协议验证了发送者，适配器可以在
+`InboundMessage.senderIdentity` 中附带：
+
+```ts
+{
+  provider: 'feishu',
+  providerScope: configuredAppId,
+  identifierType: 'open_id',
+  externalSubject: verifiedOpenId,
+}
+```
+
+该字段属于 Host Envelope，不会进入 Agent Prompt。只能从 Provider 已验证的事件字段构造，
+绝不能从消息正文、浏览器请求体或 Agent 输出复制。`providerScope` 必须反映真实身份命名空间；
+例如飞书 `open_id` 必须带产生它的 App Scope。没有可靠身份协议时请省略该字段，Host 会继续
+使用兼容的旧 Sender 解析路径。
 
 ## 2. Self-register on import
 

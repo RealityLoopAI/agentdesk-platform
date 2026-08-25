@@ -38,7 +38,10 @@ function writeRepoFile(repoRoot: string, relativePath: string, content: string):
   fs.writeFileSync(filePath, content, 'utf8');
 }
 
-function buildBaselineSource(extraCalls = '', deliveryAttrs = "chainAttrs({ 'msg.id': 'm-1', 'message.kind': 'chat' })"): string {
+function buildBaselineSource(
+  extraCalls = '',
+  deliveryAttrs = "chainAttrs({ 'msg.id': 'm-1', 'message.kind': 'chat' })",
+): string {
   return `
 import { withSpan } from './with-span.js';
 import { chainAttrs, outputAttrs, rootInputAttrs } from './openinference.js';
@@ -109,10 +112,12 @@ ${extraCalls}
 `;
 }
 
-function makeFixtureRepo(opts: {
-  baselineSource?: string;
-  extraFiles?: Record<string, string>;
-} = {}): string {
+function makeFixtureRepo(
+  opts: {
+    baselineSource?: string;
+    extraFiles?: Record<string, string>;
+  } = {},
+): string {
   const repoRoot = makeTempRepo();
   writeRepoFile(repoRoot, 'src/fixture.ts', opts.baselineSource ?? buildBaselineSource());
 
@@ -259,7 +264,9 @@ export async function runCoverageFixture(): Promise<void> {
 
     const validation = validateObservabilityCoverage(collectObservabilityCoverage({ repoRoot }));
 
-    expect(validation.backwardViolations.map((violation) => violation.requiredTarget)).toContain('channel.feishu.receive');
+    expect(validation.backwardViolations.map((violation) => violation.requiredTarget)).toContain(
+      'channel.feishu.receive',
+    );
     expect(formatCoverageGateFailure(validation)).toContain('channel.feishu.receive');
   });
 
@@ -276,7 +283,9 @@ export async function runCoverageFixture(): Promise<void> {
 
     const validation = validateObservabilityCoverage(collectObservabilityCoverage({ repoRoot }));
 
-    expect(validation.backwardViolations.map((violation) => violation.requiredTarget)).toContain('router.container.wake');
+    expect(validation.backwardViolations.map((violation) => violation.requiredTarget)).toContain(
+      'router.container.wake',
+    );
     expect(formatCoverageGateFailure(validation)).toContain('must be absent');
   });
 
@@ -332,6 +341,12 @@ export async function ignoredFixture(): Promise<void> {
     expect(report.migrations).toHaveLength(11);
     expect(report.moduleSlugs).toHaveLength(13);
     expect(report.hostSpanOccurrences.length).toBeGreaterThanOrEqual(10);
+    const hostNames = report.hostSpanOccurrences.map((occurrence) => occurrence.name);
+    expect(hostNames).toContain('channel.web.receive');
+    const webIngress = report.hostSpanOccurrences.find((occurrence) => occurrence.name === 'channel.web.receive');
+    expect(webIngress?.relativePath).toBe('src/channels/web.ts');
+    expect(webIngress?.attrCoverage.userId).toBe('present');
+    expect(webIngress?.callSlice).toContain("'channel.type': 'web'");
 
     // Runner-tracing wave (ADR-0026): the runner now emits manual spans. The
     // ADR-0015 §47 "runnerSpanOccurrences === 0" waiver is lifted. Assert the

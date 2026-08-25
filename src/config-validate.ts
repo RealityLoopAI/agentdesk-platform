@@ -30,8 +30,10 @@
  * taking precedence — mirroring how the rest of the host resolves config.
  */
 import { readEnvFile } from './env.js';
+import { HOST_FEATURE_FLAG_KEYS, parseHostFeatureFlags } from './feature-flags.js';
 import { log } from './log.js';
 import { assertSecretNotKnownWeak } from './security/known-weak-secrets.js';
+import { parseWebConfig, WEB_CONFIG_KEYS } from './web/config.js';
 
 /**
  * Security-critical secrets that get the known-weak check IF they are set.
@@ -47,6 +49,7 @@ const SECURITY_CRITICAL_SECRET_KEYS = [
   'FEISHU_ENCRYPT_KEY',
   'FEISHU_VERIFICATION_TOKEN',
   'OPENAI_API_KEY',
+  'WEB_SESSION_SECRET',
 ] as const;
 
 /** All keys this validator inspects (so we read `.env` once). */
@@ -58,11 +61,15 @@ const INSPECTED_KEYS = [
   'OPENAI_MODEL',
   'OPENAI_REASONING_EFFORT',
   'OPENAI_TIMEOUT_MS',
+  'OPENAI_FORCE_TRANSPORT',
   'OPENAI_COMPACT_MODEL',
+  'OPENAI_MAX_REQUEST_CONTEXT_CHARS',
   'OTEL_CAPTURE_CONTENT',
   // ADR-0035: in vault mode the host needs ONECLI_URL (not OPENAI_API_KEY).
   'AGENTDESK_OPENAI_VIA_ONECLI',
   'ONECLI_URL',
+  ...HOST_FEATURE_FLAG_KEYS,
+  ...WEB_CONFIG_KEYS,
 ] as const;
 
 /**
@@ -142,7 +149,9 @@ export function validateStartupConfig(): void {
     !!get('OPENAI_MODEL') ||
     !!get('OPENAI_REASONING_EFFORT') ||
     !!get('OPENAI_TIMEOUT_MS') ||
-    !!get('OPENAI_COMPACT_MODEL');
+    !!get('OPENAI_FORCE_TRANSPORT') ||
+    !!get('OPENAI_COMPACT_MODEL') ||
+    !!get('OPENAI_MAX_REQUEST_CONTEXT_CHARS');
   // ADR-0035 vault mode flips the requirement: the OpenAI key is intentionally
   // NOT on the host (the OneCLI vault holds + injects it), so requiring it here
   // would block the secure setup from booting and push the key back onto disk.
@@ -177,6 +186,23 @@ export function validateStartupConfig(): void {
       'ONECLI_API_KEY is required when ONECLI_URL is set ' +
         '(the OneCLI control plane rejects unauthenticated calls — the gateway/credential proxy would fail at runtime).',
     );
+  }
+
+  // 2e. Web/SSO is opt-in. When enabled, parse the complete schema so port,
+  // exact origin, cookie policy, TTLs, body limits and Feishu OAuth endpoints
+  // fail fast before a listener opens.
+  try {
+    parseWebConfig(get);
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
+  }
+
+  // 2f. Release gates are security boundaries, not permissive string toggles.
+  // Reject typos such as "enabled" at startup instead of guessing.
+  try {
+    parseHostFeatureFlags(get);
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
   }
 
   // --- 3. Soft warnings (degrade gracefully, never block startup) ---

@@ -31,6 +31,22 @@ const DASHBOARDS_DIR = path.join(REPO_ROOT, 'infra', 'observability', 'grafana',
 // rebrand caveat is documented in ADR-0021. Keep this in sync with the
 // METRIC_PREFIX default in src/branding.ts.
 const PREFIX = 'agentdesk';
+const REQUIRED_WEB_DASHBOARD_METRICS = [
+  `${PREFIX}_web_login_total`,
+  `${PREFIX}_web_active_sessions`,
+  `${PREFIX}_web_api_rejected_total`,
+  `${PREFIX}_web_sse_connections`,
+  `${PREFIX}_web_sse_events_total`,
+  `${PREFIX}_conversation_binding_failures_total`,
+  `${PREFIX}_feishu_bitable_operations_total`,
+  `${PREFIX}_cross_channel_loop_suppressed_total`,
+] as const;
+const REQUIRED_WEB_ALERT_METRICS = [
+  `${PREFIX}_web_login_total`,
+  `${PREFIX}_web_api_rejected_total`,
+  `${PREFIX}_conversation_binding_failures_total`,
+  `${PREFIX}_feishu_bitable_operations_total`,
+] as const;
 
 /** Base metric names exported from src/metrics.ts, plus histogram derivations. */
 function declaredMetrics(): { base: Set<string>; histogram: Set<string> } {
@@ -100,6 +116,17 @@ describe('alerts/dashboards ↔ metrics.ts drift guard', () => {
     }
     const unknown = [...refs].filter((r) => !isKnown(r, declared));
     expect(unknown).toEqual([]);
+  });
+
+  it('keeps every Web/cross-channel operational signal visible in the primary dashboard', () => {
+    const dashboard = fs.readFileSync(path.join(DASHBOARDS_DIR, 'platform-health.json'), 'utf-8');
+    const refs = referencedMetrics(dashboard);
+    expect(REQUIRED_WEB_DASHBOARD_METRICS.filter((metric) => !refs.has(metric))).toEqual([]);
+  });
+
+  it('keeps actionable Web identity, access, Binding, and Bitable failures wired to alerts', () => {
+    const refs = referencedMetrics(fs.readFileSync(ALERTS_PATH, 'utf-8'));
+    expect(REQUIRED_WEB_ALERT_METRICS.filter((metric) => !refs.has(metric))).toEqual([]);
   });
 
   it('rejects a fabricated metric name (negative self-check)', () => {

@@ -1,0 +1,192 @@
+# Rebase 与迁移验证记录
+
+## Git 恢复点
+
+- 远端底座：`origin/main@df5d239`
+- Rebase 前功能提交范围：`986b92d..86a8abb`（56 个提交）
+- Rebase 后功能提交范围：`origin/main..601f14e`（56 个提交）
+- OpenSpec 计划提交：`2951614` → `fc09e35`
+- 本地备份分支：`codex/backup-pre-rebase-20260820`
+- WIP 快照：`ceb2dfb`
+- 数据库只读恢复副本：`data/rebase-backups/20260820-pre-rebase-86a8abb/`
+
+`git range-diff` 的逐项映射如下。第 6、22、38 项因冲突解决和底座依赖变化显示为
+左右各一条，而不是 `=`/`!`；提交位置、主题和最终内容审计均一一对应，没有执行
+`git rebase --skip`。
+
+| # | Rebase 前 | Rebase 后 |
+|---:|---|---|
+| 1 | `f4bd05c` | `60417ce` |
+| 2 | `b5abf6d` | `638c909` |
+| 3 | `625177d` | `880afcd` |
+| 4 | `6a7d268` | `c1ddec6` |
+| 5 | `b9ba984` | `f1763ed` |
+| 6 | `e2ef42c` | `e7deefb` |
+| 7 | `5ad9bd1` | `753a706` |
+| 8 | `e44921e` | `5980d27` |
+| 9 | `17df447` | `0780d0d` |
+| 10 | `7e001b5` | `d030405` |
+| 11 | `a89d6ac` | `6d94e6c` |
+| 12 | `eac9917` | `7193f02` |
+| 13 | `40d8995` | `3a36dbf` |
+| 14 | `d0e7bed` | `669d23f` |
+| 15 | `d3293c7` | `fbe4d6c` |
+| 16 | `cf66a27` | `041e1a0` |
+| 17 | `abd1945` | `9436ef1` |
+| 18 | `cd825d5` | `07d9509` |
+| 19 | `c18271c` | `b251a2c` |
+| 20 | `87494c2` | `d73be56` |
+| 21 | `4685ab8` | `2ecf1d2` |
+| 22 | `9d0c28f` | `fca8f83` |
+| 23 | `21f5a7e` | `57a4329` |
+| 24 | `af8be02` | `fc9dfd3` |
+| 25 | `3f34276` | `ca0a7bf` |
+| 26 | `c8f0339` | `00396f6` |
+| 27 | `c69026d` | `9235420` |
+| 28 | `758e0eb` | `ae77202` |
+| 29 | `bbae3d9` | `4930753` |
+| 30 | `eb8e7b1` | `7e10d47` |
+| 31 | `f0b8505` | `0e76850` |
+| 32 | `b4b0f31` | `8d26ae7` |
+| 33 | `911e465` | `23bc67e` |
+| 34 | `c854327` | `28da3ea` |
+| 35 | `be5eae1` | `13d51bf` |
+| 36 | `c236ae9` | `c67a48b` |
+| 37 | `121fa5a` | `ac895d8` |
+| 38 | `5f87d18` | `e92c7e0` |
+| 39 | `75c85bf` | `ea50a75` |
+| 40 | `f8c6238` | `1daf954` |
+| 41 | `772c809` | `314f78d` |
+| 42 | `900a817` | `3e20dea` |
+| 43 | `c963018` | `5be1ad8` |
+| 44 | `917db94` | `f5e6db7` |
+| 45 | `525cfda` | `5d294ed` |
+| 46 | `1e0d0af` | `c357f77` |
+| 47 | `bd9bd8d` | `761b44f` |
+| 48 | `2109eda` | `937d5c9` |
+| 49 | `d8c2970` | `32299dc` |
+| 50 | `72acc35` | `a9fc1af` |
+| 51 | `af11c3a` | `61a6b82` |
+| 52 | `932392c` | `567de10` |
+| 53 | `5e36ead` | `9ecbb24` |
+| 54 | `4e0bf59` | `0da0677` |
+| 55 | `da83514` | `4ec1ded` |
+| 56 | `86a8abb` | `601f14e` |
+
+## ADR 映射
+
+- 保留远端 `ADR-0054`～`ADR-0060`。
+- 本地 ADR 整体顺延 7：`0054→0061`、`0055→0062`，依次到 `0085→0092`。
+- 自动校验结果：文件编号唯一；文件名与一级标题一致；索引链接全部存在且编号唯一；
+  `0061`～`0092` 连续无缺口；残留的 `0054`～`0060` 引用逐项属于远端语义。
+
+## 数据库迁移映射与兼容性
+
+- 保留远端 `036-agent-group-role.ts`。
+- 本地文件 `036`～`044` 顺延为 `037`～`045`，持久化 `name` 保持不变。
+- 新增 `migration-plan-integrity.test.ts` 固定已部署名称、合并顺序、唯一性和重复运行幂等性。
+- 空库迁移 + schema drift：5 个测试文件、10 个测试通过。
+- 升级前数据库副本：升级前 42 个迁移；仅新增 `agent-group-role`；升级后 43 个；
+  所有业务表行数保持一致；第二次运行无新增；`schema_version.name` 无重复。
+
+## 第一次质量门（恢复 WIP 前）
+
+- 依赖：从合并后的 manifest 重新生成 `pnpm-lock.yaml`；冻结、离线 lockfile 校验通过；
+  Runner 的 `bun.lock` 在安全 overrides 更新后通过 `bun install --frozen-lockfile`。
+- 静态检查：Host `pnpm typecheck`、Runner `bun run typecheck`、Web typecheck 和 Web production build
+  全部通过；ESLint 为 0 error（保留 210 个既有 warning）。
+- Host：完整 Vitest 为 138 个文件、1365 项通过；Reference Gateway 为 36 项通过。
+- Runner：40 个文件、438 项、1183 个断言通过，覆盖 RequestIdentity、A2A、dual-LLM、
+  continuation、OpenAI-compatible transport、MCP 二进制结果与请求预算。
+- Web：8 个文件、23 项通过；迁移后的 Web/飞书/Gateway/语音图片专项回归为 30 个文件、
+  250 项通过。
+- 小华 Bridge：独立 TypeScript 检查和 `assertChannelAdapterContract` 自检通过。
+- 供应链：Host 的 production high-level 审计仅保留 `SECURITY.md` 已记录且与静态 SPA 无关的
+  React Router RSC advisory；Runner 无 high，仅保留已记录的 Anthropic 本地 filesystem memory
+  tool 默认权限 moderate advisory，平台 Gateway memory 路径不调用该工具。
+- 业务边界：`src/` 中没有华聚、实验室或 Xiaohuan 专用逻辑；核心中的飞书 Bitable 代码仅为
+  通用 Gateway 操作、确认和凭证无关审计契约，具体映射、语音、图片、Archive 与 GUI Worker
+  均位于 `examples/`。
+
+WIP 恢复、第二次全量质量门和运行态验收结果在后续步骤追加。
+
+## WIP 恢复与第二次质量门
+
+- 在第 4～7 组全部通过后，将 `ceb2dfb` 恢复为 `0bdc94f`；唯一冲突是同一路径新增的
+  OpenSpec `tasks.md`，解决方式是保留当前已完成状态，不回退为备份中的未执行状态。
+- `package.json` 自动合并并保留全部新底座依赖/overrides，以及 `services:install/start/restart/stop/status/logs`
+  六个本地评测命令；重新生成/冻结安装校验后 lockfile 无变化。
+- 备份新增的代码、文档、模型选择器和统一服务脚本与 `ceb2dfb` 逐字一致；备份中的 sync OpenSpec
+  planning 文件已由 `fc09e35` 和当前验证记录替代，没有静默丢失文件。
+- 服务脚本通过 `bash -n`，监控 Compose 通过 `docker compose config --quiet`，三个 launchd plist
+  在隔离的临时目录成功渲染并通过 `plutil`。
+- 第二轮检查：Host/Web/Runner typecheck 通过；ESLint 0 error（210 个既有 warning）；Web 9 个文件、
+  26 项测试及 production build 通过；Host 完整测试与 Reference Gateway 通过；Runner 40 个文件、
+  438 项、1183 个断言通过；迁移顺序/幂等/schema drift 4 个文件、8 项通过。
+- 第二轮供应链结果与第一次一致：Host high-level 审计 exit 0（1 个已记录 ignored high）；Runner
+  仅 1 个已记录且不在 Gateway memory 路径使用的 moderate advisory。
+
+运行态重建、健康探针与人工端到端验收结果在后续步骤追加。
+
+## 运行态重建与当前阻塞
+
+- Docker Desktop 已恢复，Agent Runner 镜像重建为 `agentdesk-agent-v2-69585351:latest`
+  （image id `sha256:d4c232a1766f...`）。第一次构建因 npm registry TLS/ECONNRESET
+  中断，利用缓存层重试后成功；没有更改固定依赖版本。
+- `pnpm services:install` 已安装三个带 `KeepAlive` 的用户 LaunchAgent 并启动监控 Compose。
+  Bitable、Archive、Host、Voice Bridge、Web、signing proxy、Grafana、Prometheus、Alertmanager
+  和 Phoenix 的端口/HTTP 探针均通过；三个 Node job 均为 `running` 且 `runs=1`。
+- 局域网 `http://192.168.66.113:50020/healthz` 返回 `ok=true`、0 failures/queued；
+  Windows GUI Worker `http://192.168.66.98:8000/health` 返回 `status=ok`。真实浏览器中的 Web
+  登录页成功渲染，未代替用户执行飞书账号登录。
+- 运行态发现图片/JSON 与 Archive 共用的 `/Volumes/video_database` 没有挂载。旧 SMB 地址
+  `192.168.66.149:445` 超时；同网段 `192.168.66.150:445` 可达但拒绝 guest，Finder 未能在
+  无用户交互的情况下自动挂载。需要用户通过系统凭据窗口完成认证后才能继续现场图片/JSON/
+  Archive 验收。
+- 为避免端口存活掩盖数据卷故障，统一服务脚本新增 Photo/JSON root 与 Archive root 可读性探针；
+  `services:status` 现在准确返回非零并显示这两项 `[FAIL]`，脚本语法、plist 渲染仍通过。
+- 当前启动后没有新 502。启动检查发现 6 条 2026-07-30 的 inbound dead-letter，以及 9 条
+  2026-07-30～31 的历史 JSON `submitted` 状态；为避免重复写表，未在没有业务核对的情况下
+  自动重投或删除。因此任务 9.2～9.5 保持未完成，等待 SMB 挂载与人工验收。
+
+## SMB 恢复后的运行态验收与停止条件
+
+- 2026-08-21 用户通过 Finder 将 `//fzxl@192.168.66.150/video_database` 挂载到
+  `/Volumes/video_database`；`voice_photos` 与 `VisionCortexExperimentArchive` 均可读。
+- 统一服务第一次重启暴露两项管理脚本缺陷并已修复：本机探针继承失效的
+  `http_proxy/https_proxy`，现强制使用 `curl --noproxy '*'`；Host 的正常关闭预算为 20 秒、
+  launchd `ExitTimeOut` 为 30 秒，但脚本只等 10 秒，现将卸载等待窗口延长到 45 秒。
+- 修正后 `pnpm services:restart` 与 `pnpm services:status` 通过。三个 LaunchAgent 均为
+  `running/runs=1`；Bitable、Archive、Host `/readyz`、Voice Bridge、Web、signing proxy、
+  Photo/JSON root、Archive root、Grafana、Prometheus、Alertmanager 和 Phoenix 全部为 `[OK]`。
+  3100/3200/50020/8799 同属组合 Host，8088/8090 属于独立 Gateway；没有 UDP 50020 争用，
+  也没有 `Created` 残余 Agent 容器。任务 9.2 完成。
+- 进入业务验收前发现历史积压回放，触发 `MANUAL-ACCEPTANCE.md` 的立即停止条件。图片状态库
+  在本轮产生 1 条新 `delivered`，并积压 1258 条 `ready`；JSON 状态库有 55 条 `submitted`。
+  这些来源时间跨越 2026-07-28～2026-08-21，并非本轮基线完成后专门生成的单个测试样本。
+- 2026-08-21 07:36:20Z 之后的 `gateway_audit` 显示 8 次最终阶段
+  `feishu.bitable.record.create` 成功、2 次最终阶段 422，以及 1 次最终阶段 `record.get` 成功；
+  所有最终审计的 `identity_mismatch=0`。由于 Worker 结果尚未回写状态库，这些创建对应的 JSON
+  仍显示 `submitted`，继续重启存在重复处理风险。
+- 已立即执行 `pnpm services:stop`；三个 Node 服务、监控 Compose 和 Agent 容器均停止，SMB
+  挂载与所有 SQLite/审计证据保留。没有自动删除外部记录、清理 NAS、重排 inbound 或伪造
+  verified 状态。任务 9.3、9.4 保持未完成，等待业务方选择“隔离历史积压并核对已创建记录”
+  或“允许历史积压继续处理”；在选择前不得恢复组合 Host。
+
+## 测试积压隔离
+
+- 2026-08-24 用户确认当前图片、JSON 和 Worker 积压均为测试信息，并授权全部丢弃。操作前
+  再次确认 Host、两个 Gateway、监控 Compose 和 Agent 容器均已停止。
+- 中央库、图片状态库和 JSON 状态库先通过 `PRAGMA integrity_check`，再备份到
+  `data/runtime-backups/20260824-discard-voice-photo-test-backlog-be42d97/`。备份包含 SQLite
+  在线副本及被轮换的原状态库/WAL/SHM，可用于恢复本次操作。
+- 精确选择 `Voice Photo JSON Bitable Worker`（`ag-1785422930854-osgw2d`）的 76 个活动测试
+  Session；实际 Docker 容器为零，因此将 7 条残留 `container_status=running` 纠正为 stopped，
+  随后通过正式 session lifecycle 路径逐项归档。结果为 76/76 archived、0 active，session
+  目录转为 `data/v2-sessions-archive/<agent-group>/<session>.tar.gz`，中央审计记录保留。
+- 将包含 1258 条图片 `ready` 和 55 条 JSON `submitted` 的两个活动状态库移出 `.state/`。
+  未删除 NAS 文件，也未删除此前已写入 Bitable 的 8 条记录；后者已经完成外部副作用，不属于
+  未处理积压，保留其 `gateway_audit` 作为核对依据。
+- 清理后 SMB 445 端口可达，但 Finder 未自动恢复 `/Volumes/video_database` 挂载。服务继续
+  保持停止，且活动状态库尚未重建。待用户完成系统凭据挂载后，首次启动扫描会把共享盘现有
+  图片和 JSON 全部写入新 baseline，不投递、不写表；只有 baseline 完成后新增的文件才进入验收。

@@ -20,6 +20,13 @@ import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
+  ConversationLaneConflictError,
+  createConversationLaneRootSession,
+  getConversationLane,
+  linkSessionToConversationLane,
+  sessionForConversationLane,
+} from './db/conversation-lanes.js';
+import {
   createSession,
   findSessionByAgentGroup,
   findSessionForAgent,
@@ -164,6 +171,9 @@ function isUserScopedSessionMode(
  * this resolve. New sessions are created at `sourceDepth + 1`; existing
  * sessions are returned unchanged. Channel-entry callers leave this null so
  * frontdesk-style sessions start at 0.
+ *
+ * `conversationLaneId` is a Host-verified cross-channel structural key
+ * (ADR-0062). It is never derived from conversation_thread_id.
  */
 export function resolveSession(
   agentGroupId: string,
@@ -173,9 +183,43 @@ export function resolveSession(
   ownerUserId: string | null = null,
   rootSessionId: string | null = null,
   sourceDepth: number | null = null,
+  conversationLaneId: string | null = null,
 ): { session: Session; created: boolean } {
   if (isUserScopedSessionMode(sessionMode) && !ownerUserId) {
     throw new Error(`ownerUserId is required for session_mode=${sessionMode}`);
+  }
+  if (conversationLaneId && rootSessionId) {
+    throw new ConversationLaneConflictError('lane_and_a2a_root_conflict');
+  }
+  if (conversationLaneId) {
+    if (!isUserScopedSessionMode(sessionMode) || !ownerUserId) {
+      throw new ConversationLaneConflictError('shared_session_mode');
+    }
+    const lane = getConversationLane(conversationLaneId);
+    if (!lane || lane.status !== 'active') {
+      throw new ConversationLaneConflictError('lane_unavailable');
+    }
+    if (lane.agent_group_id !== agentGroupId) {
+      throw new ConversationLaneConflictError('agent_group_mismatch');
+    }
+    if (lane.owner_user_id !== ownerUserId) {
+      throw new ConversationLaneConflictError('owner_mismatch');
+    }
+    const existing = sessionForConversationLane(lane);
+    if (existing) {
+      if (
+        existing.status !== 'active' ||
+        existing.agent_group_id !== agentGroupId ||
+        existing.owner_user_id !== ownerUserId ||
+        existing.conversation_lane_id !== lane.id
+      ) {
+        throw new ConversationLaneConflictError('lane_root_invalid');
+      }
+      return { session: existing, created: false };
+    }
+    if (lane.root_session_id) {
+      throw new ConversationLaneConflictError('lane_root_unavailable');
+    }
   }
 
   if (rootSessionId) {
@@ -203,6 +247,19 @@ export function resolveSession(
         existing = findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
       }
       if (existing) {
+        if (conversationLaneId) {
+          linkSessionToConversationLane({
+            laneId: conversationLaneId,
+            sessionId: existing.id,
+            sourceSessionMode: sessionMode,
+            actor: ownerUserId,
+          });
+          const linked = getSession(existing.id);
+          if (!linked) {
+            throw new ConversationLaneConflictError('linked_session_unavailable');
+          }
+          return { session: linked, created: false };
+        }
         return { session: existing, created: false };
       }
     }
@@ -221,6 +278,7 @@ export function resolveSession(
     // child a2a session (rootSessionId set) inherits it via propagation
     // (ADR-0039 commit 3/4), so minting here would shatter the thread.
     conversation_thread_id: rootSessionId ? null : `conv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    conversation_lane_id: conversationLaneId,
     agent_provider: null,
     status: 'active',
     container_status: 'stopped',
@@ -229,7 +287,19 @@ export function resolveSession(
     created_at: new Date().toISOString(),
   };
 
-  createSession(session);
+  if (conversationLaneId) {
+    if (!isUserScopedSessionMode(sessionMode)) {
+      throw new ConversationLaneConflictError('shared_session_mode');
+    }
+    createConversationLaneRootSession({
+      laneId: conversationLaneId,
+      session,
+      sourceSessionMode: sessionMode,
+      actor: ownerUserId,
+    });
+  } else {
+    createSession(session);
+  }
   initSessionFolder(agentGroupId, id);
   log.info('Session created', {
     id,
@@ -240,6 +310,7 @@ export function resolveSession(
     rootSessionId: session.root_session_id,
     spawnDepth: session.spawn_depth,
     sessionMode,
+    conversationLaneId,
   });
 
   return { session, created: true };
@@ -333,7 +404,9 @@ export function writeSessionMessage(
      * For agent-to-agent inbound: the namespaced user id of the employee
      * who ultimately triggered the chain. Propagates identity into worker
      * sessions so downstream ERP calls don't fall back to agent-asserted.
-     * NULL on channel-side inbound (senderId already embedded in content).
+     * On channel-side inbound, the Host stamps the canonical user resolved by
+     * the permissions module (ADR-0061). Legacy rows may still be NULL and fall
+     * back to senderId embedded in content.
      */
     originUserId?: string | null;
     /**

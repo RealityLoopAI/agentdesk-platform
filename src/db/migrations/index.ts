@@ -32,6 +32,16 @@ import { migration032 } from './032-session-conversation-thread.js';
 import { migration033 } from './033-routing-feedback-fields.js';
 import { migration034 } from './034-rbac-operability-roles.js';
 import { migration035 } from './035-multi-tenant-organizations.js';
+import { migration036 } from './036-agent-group-role.js';
+import { migration037 } from './037-user-identities.js';
+import { migration038 } from './038-web-auth.js';
+import { migration039 } from './039-conversation-lanes.js';
+import { migration040 } from './040-web-message-receipts.js';
+import { migration041 } from './041-web-events.js';
+import { migration042 } from './042-cross-channel-delivery.js';
+import { migration043 } from './043-gateway-audit-logical-resource.js';
+import { migration044 } from './044-gateway-confirmations.js';
+import { migration045 } from './045-gateway-confirmation-delete-kind.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 
@@ -75,9 +85,19 @@ const migrations: Migration[] = [
   migration033,
   migration034,
   migration035,
+  migration036,
+  migration037,
+  migration038,
+  migration039,
+  migration040,
+  migration041,
+  migration042,
+  migration043,
+  migration044,
+  migration045,
 ];
 
-export function runMigrations(db: Database.Database): void {
+function runMigrationPlan(db: Database.Database, plan: readonly Migration[]): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER PRIMARY KEY,
@@ -96,7 +116,7 @@ export function runMigrations(db: Database.Database): void {
   const applied = new Set<string>(
     (db.prepare('SELECT name FROM schema_version').all() as { name: string }[]).map((r) => r.name),
   );
-  const pending = migrations.filter((m) => !applied.has(m.name));
+  const pending = plan.filter((m) => !applied.has(m.name));
   if (pending.length === 0) return;
 
   log.info('Running migrations', { count: pending.length });
@@ -114,4 +134,22 @@ export function runMigrations(db: Database.Database): void {
     })();
     log.info('Migration applied', { name: m.name });
   }
+}
+
+export function runMigrations(db: Database.Database): void {
+  runMigrationPlan(db, migrations);
+}
+
+/**
+ * Apply the real ordered migration plan through one named migration.
+ *
+ * This exists for upgrade-compatibility rehearsals: a test can materialize the
+ * exact schema an older Host would have left behind, insert legacy workload,
+ * and then call runMigrations() to exercise the normal upgrade path. It is not
+ * a downgrade API and never reverses or deletes a migration.
+ */
+export function runMigrationsThroughForCompatibilityTest(db: Database.Database, throughName: string): void {
+  const endIndex = migrations.findIndex((migration) => migration.name === throughName);
+  if (endIndex === -1) throw new Error(`Unknown migration boundary: ${throughName}`);
+  runMigrationPlan(db, migrations.slice(0, endIndex + 1));
 }

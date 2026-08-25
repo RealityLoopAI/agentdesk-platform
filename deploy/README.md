@@ -12,6 +12,12 @@ fill the `<PLACEHOLDERS>` and install with your process manager.
 
 Both expect a built host (`pnpm build`) and a `.env` (see [`.env.example`](../.env.example)).
 
+For the repository's macOS Xiaohuan full-evaluation example (combined
+voice/photo/JSON/Host plus dedicated Bitable and Archive Gateways), use
+[`examples/local-evaluation-stack/manage-services.sh`](../examples/local-evaluation-stack/manage-services.sh)
+instead of filling three templates manually. It generates per-user plists,
+enables `KeepAlive`, persists logs, and verifies all local health endpoints.
+
 ## Operator checklist before production
 
 This baseline is a **single-host, single-process** platform. The code is

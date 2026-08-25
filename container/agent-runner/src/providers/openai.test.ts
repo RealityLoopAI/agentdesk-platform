@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { initTestSessionDb } from '../db/connection.js';
-import { getContinuation } from '../db/session-state.js';
+import { getContinuation, setContinuation } from '../db/session-state.js';
 import type { ProviderEvent } from './types.js';
-import { OpenAIProvider } from './openai.js';
+import {
+  boundTranscriptToRequestBudget,
+  estimateFullRequestChars,
+  formatToolResult,
+  OpenAIProvider,
+} from './openai.js';
 
 const originalFetch = globalThis.fetch;
 
@@ -39,6 +44,209 @@ async function runQuery(provider: OpenAIProvider, prompt: string, continuation?:
 }
 
 describe('OpenAIProvider', () => {
+  it('keeps Execution continuation unchanged when a Routing-role request succeeds', async () => {
+    setContinuation('openai', 'execution-before-routing');
+
+    globalThis.fetch = (async () =>
+      jsonResponse({
+        id: 'chatcmpl_route',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: '{"action":"answer_self","confidence":0.95,"reason":"greeting"}',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+      })) as typeof fetch;
+
+    const provider = new OpenAIProvider({
+      role: 'routing',
+      env: {
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_BASE_URL: 'https://example.com',
+        OPENAI_FORCE_TRANSPORT: 'chat-completions',
+      },
+    });
+
+    const events = await runQuery(provider, 'route this turn');
+
+    expect(events.find((event) => event.type === 'result')).toEqual({
+      type: 'result',
+      text: '{"action":"answer_self","confidence":0.95,"reason":"greeting"}',
+    });
+    expect(getContinuation('openai')).toBe('execution-before-routing');
+    expect(getContinuation('codex')).toBeUndefined();
+  });
+
+  it('uses exactly one upstream transport request for a Routing-role Responses attempt', async () => {
+    const requests: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests.push(String(input));
+      return jsonResponse({ error: { message: 'Responses API is unavailable' } }, 404);
+    }) as typeof fetch;
+
+    const provider = new OpenAIProvider({
+      role: 'routing',
+      env: {
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_BASE_URL: 'https://example.com',
+        OPENAI_FORCE_TRANSPORT: 'responses',
+        OPENAI_MAX_REQUEST_ATTEMPTS: '1',
+      },
+    });
+
+    let failure: unknown;
+    try {
+      await runQuery(provider, 'route this turn');
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe('Responses API is unavailable (status 404)');
+    expect(requests).toEqual(['https://example.com/v1/responses']);
+  });
+
+  it('rejects a Routing-role tool call without issuing a follow-up request', async () => {
+    const requests: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests.push(String(input));
+      if (requests.length === 1) {
+        return jsonResponse({
+          id: 'resp_route_tool',
+          output: [
+            {
+              type: 'function_call',
+              call_id: 'call_route_tool',
+              name: 'invented_tool',
+              arguments: '{}',
+            },
+          ],
+        });
+      }
+      return jsonResponse({
+        id: 'resp_route_after_tool',
+        output: [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: '{"action":"answer_self","confidence":1,"reason":"x"}' }],
+          },
+        ],
+      });
+    }) as typeof fetch;
+
+    const provider = new OpenAIProvider({
+      role: 'routing',
+      env: {
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_BASE_URL: 'https://example.com',
+        OPENAI_FORCE_TRANSPORT: 'responses',
+        OPENAI_MAX_REQUEST_ATTEMPTS: '1',
+      },
+    });
+
+    let failure: unknown;
+    try {
+      await runQuery(provider, 'route this turn');
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/routing.*tool call/i);
+    expect(requests).toEqual(['https://example.com/v1/responses']);
+  });
+
+  it('omits MCP image bytes instead of serializing base64 into tool text', () => {
+    const base64 = Buffer.alloc(1_024, 0xab).toString('base64');
+    const output = formatToolResult({
+      content: [
+        { type: 'text', text: '{"window":"Console"}' },
+        { type: 'image', data: base64, mimeType: 'image/png' },
+      ],
+    });
+
+    expect(output).toContain('{"window":"Console"}');
+    expect(output).toContain('MCP image omitted from text tool output: image/png, 1024 decoded bytes');
+    expect(output).not.toContain(base64);
+  });
+
+  it('caps MCP text results and asks the model to retry with narrower parameters', () => {
+    const output = formatToolResult({
+      content: [{ type: 'text', text: 'x'.repeat(80_000) }],
+    });
+
+    expect(output.length).toBeLessThan(65_000);
+    expect(output).toContain('Tool output truncated');
+    expect(output).toContain('Retry with narrower parameters');
+  });
+
+  it('re-applies the request budget without retaining an orphaned tool output', () => {
+    const transcript = [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'inspect' }] },
+      { type: 'function_call', call_id: 'call_large', name: 'observe', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_large', output: 'x'.repeat(20_000) },
+    ];
+
+    const bounded = boundTranscriptToRequestBudget(transcript, undefined, [], 16_000);
+
+    expect(bounded.trimmed).toBe(true);
+    expect(bounded.transcript.some((item) => item.type === 'function_call_output')).toBe(false);
+    expect(estimateFullRequestChars(bounded.transcript, undefined, []).totalChars).toBeLessThanOrEqual(16_000);
+  });
+
+  it('counts instructions and tool schemas in the full request budget', () => {
+    const transcript = [
+      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+    ];
+    const withoutFixed = estimateFullRequestChars(transcript, undefined, []);
+    const withFixed = estimateFullRequestChars(
+      transcript,
+      's'.repeat(1_000),
+      [{
+        type: 'function',
+        name: 'large_tool',
+        description: 'd'.repeat(2_000),
+        parameters: { type: 'object', properties: {} },
+      }],
+    );
+
+    expect(withFixed.fixedChars).toBeGreaterThan(withoutFixed.fixedChars + 2_500);
+    expect(withFixed.totalChars - withoutFixed.totalChars).toBe(
+      withFixed.fixedChars - withoutFixed.fixedChars,
+    );
+  });
+
+  it('fails locally when fixed instructions exceed the configured request budget', async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return jsonResponse({});
+    }) as typeof fetch;
+    const provider = new OpenAIProvider({
+      env: {
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_BASE_URL: 'https://example.com',
+        OPENAI_MAX_REQUEST_CONTEXT_CHARS: '16000',
+      },
+    });
+    const query = provider.query({
+      prompt: 'hello',
+      cwd: '/tmp',
+      systemContext: { instructions: 's'.repeat(20_000) },
+    });
+
+    await expect((async () => {
+      for await (const _event of query.events) {
+        // Drain until the provider reports the local budget failure.
+      }
+    })()).rejects.toThrow(/fixed request context exceeds configured budget/);
+    expect(fetchCalls).toBe(0);
+  });
+
   it('falls back to stateless replay when previous_response_id is unsupported', async () => {
     const requests: Array<Record<string, unknown>> = [];
 
@@ -396,6 +604,46 @@ describe('OpenAIProvider', () => {
     ]);
   });
 
+  it('accepts a full chat-completions endpoint and uses it exactly when forced', async () => {
+    const requests: string[] = [];
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(String(input));
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(body.model).toBe('deepseek-v4-flash');
+      expect(body.messages).toEqual([{ role: 'user', content: 'hello' }]);
+      expect(body.tools).toBeUndefined();
+      expect(body.tool_choice).toBeUndefined();
+      expect(body.parallel_tool_calls).toBeUndefined();
+
+      return jsonResponse({
+        id: 'chatcmpl_opencode_go',
+        choices: [
+          {
+            message: { role: 'assistant', content: 'hi from deepseek-v4-flash' },
+            finish_reason: 'stop',
+          },
+        ],
+      });
+    }) as typeof fetch;
+
+    const provider = new OpenAIProvider({
+      env: {
+        OPENAI_API_KEY: 'test-key',
+        OPENAI_BASE_URL: 'https://opencode.ai/zen/go/v1/chat/completions',
+        OPENAI_MODEL: 'deepseek-v4-flash',
+        OPENAI_FORCE_TRANSPORT: 'chat-completions',
+      },
+    });
+
+    const events = await runQuery(provider, 'hello');
+    expect(events.find((event) => event.type === 'result')).toEqual({
+      type: 'result',
+      text: 'hi from deepseek-v4-flash',
+    });
+    expect(requests).toEqual(['https://opencode.ai/zen/go/v1/chat/completions']);
+  });
+
   // ── Summary-based context compaction (ADR-0024) ──
 
   // The compaction soft threshold is 150_000 chars of serialized transcript.
@@ -456,7 +704,9 @@ describe('OpenAIProvider', () => {
         expect(replay.length).toBeLessThan(30);
         return jsonResponse({
           id: 'resp_compacted',
-          output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'after compaction' }] }],
+          output: [
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'after compaction' }] },
+          ],
         });
       }
 
@@ -750,7 +1000,9 @@ describe('OpenAIProvider', () => {
       if (url.endsWith('/responses')) {
         return jsonResponse({
           id: `resp_${calls.length}`,
-          output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'after compaction' }] }],
+          output: [
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'after compaction' }] },
+          ],
         });
       }
       throw new Error(`Unexpected URL: ${url}`);
@@ -763,7 +1015,11 @@ describe('OpenAIProvider', () => {
     // Drive the stream the way the poll-loop does: when a `compacted` event
     // arrives mid-stream, synchronously call pushSystemReminder on the live
     // query handle. The reminder must NOT add another LLM call.
-    const query = provider.query({ prompt: 'newest message', continuation: statelessContinuation(stored), cwd: '/tmp' });
+    const query = provider.query({
+      prompt: 'newest message',
+      continuation: statelessContinuation(stored),
+      cwd: '/tmp',
+    });
     const events: ProviderEvent[] = [];
     let sawCompacted = false;
     for await (const event of query.events) {

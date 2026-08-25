@@ -1,5 +1,9 @@
 # Examples
 
+- [`voice-photos-feishu-monitor/`](voice-photos-feishu-monitor/) — optional
+  durable recursive SMB image monitor that sends only post-baseline images to
+  one configured Feishu private conversation without invoking an Agent.
+
 Worked reference setups that show how to put a real business on top of the
 platform. **None of this is loaded by default** — the baseline ships a single
 blank template frontdesk and no workers. These directories are here to copy
@@ -36,6 +40,7 @@ pnpm exec tsx scripts/configure-enterprise-gateway.ts \
 | [`lab-frontdesk/`](lab-frontdesk/) | A self-contained frontdesk that talks to a backend gateway directly (no worker pool). Originally a lab-automation assistant; a good template for a single-desk deployment with a rich domain prompt. |
 | [`echo-channel/`](echo-channel/) | A **fork-free channel extension** (ADR-0031): a minimal in-memory channel adapter you drop into `EXTENSIONS_DIR` to add a channel without forking the repo. See also `docs/channels/writing-a-channel.md`. |
 | [`multi-tenant/`](multi-tenant/) | **Org isolation walk-through** (ADR-0052): a runnable, self-checking demo (`tsx examples/multi-tenant/demo.ts`, in-memory DB) that sets up two tenants and asserts a user in org A can't reach org B. The readable companion to the `scripts/org.ts` operator CLI. |
+| [`windows-gui-agent/`](windows-gui-agent/) | An **operator-specific Windows GUI worker** (ADR-0086): a private MCP bridge for the configured a11y/screenshot/control service at `192.168.66.31:8000`, isolated from platform core and unrelated workers. |
 
 ## Worked walk-through: a frontdesk → worker topology on the reference gateway
 

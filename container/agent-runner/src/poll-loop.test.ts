@@ -5,6 +5,7 @@ import { getPendingMessages, markCompleted, markProcessing, releaseProcessing } 
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
+import { classifyProviderError, isRetryableProviderErrorCode } from './poll-loop.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -12,6 +13,16 @@ beforeEach(() => {
 
 afterEach(() => {
   closeSessionDb();
+});
+
+describe('provider failure classification', () => {
+  it('preserves transient upstream status for Bridge retries', () => {
+    expect(classifyProviderError('Upstream API request failed (status 502)', false)).toBe('gateway_5xx');
+    expect(isRetryableProviderErrorCode('gateway_5xx')).toBe(true);
+    expect(isRetryableProviderErrorCode('timeout')).toBe(true);
+    expect(isRetryableProviderErrorCode('unauthorized')).toBe(false);
+    expect(isRetryableProviderErrorCode('client_4xx')).toBe(false);
+  });
 });
 
 function insertMessage(id: string, kind: string, content: object, opts?: { processAfter?: string; trigger?: 0 | 1 }) {

@@ -37,6 +37,7 @@ import {
   reconcileOrphanedProxyAudit,
   type GatewayProxyOutcome,
 } from './db/gateway-audit.js';
+import { extractGatewayLogicalResource } from './gateway-audit-resource.js';
 import {
   mintProxyToken,
   verifyProxyToken,
@@ -66,7 +67,13 @@ export const READ_PATHS = ['/describe', '/authorize', '/task/status', '/memory/g
 // /memory/feedback (ADR-0043) writes a feedback record to the backend corpus, so
 // it is write-scoped (added with its tool/handler in the same change to avoid a
 // window where the tool exists but the proxy 403s it).
-export const WRITE_PATHS = ['/execute', '/bulk_execute', '/memory/upsert', '/memory/feedback'] as const;
+export const WRITE_PATHS = [
+  '/execute',
+  '/bulk_execute',
+  '/memory/upsert',
+  '/memory/feedback',
+  '/confirmation/issue',
+] as const;
 export const ALL_GATEWAY_PATHS: readonly string[] = [...READ_PATHS, ...WRITE_PATHS];
 
 const REQUESTER_SOURCES = new Set(['session', 'agent-asserted']);
@@ -203,6 +210,23 @@ function sanitizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
+/**
+ * A group's backendGateway.baseUrl is normally authored for the Agent
+ * container. In local Docker that means host.docker.internal. Proxy mode moves
+ * the actual backend fetch into the Host process, where the Docker-only alias
+ * may not resolve (notably on macOS). Translate only that standard host alias
+ * to loopback; all other internal DNS names remain untouched.
+ */
+export function signingProxyUpstreamBaseUrl(baseUrl: string): string {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.hostname === HOST_ALIAS) parsed.hostname = '127.0.0.1';
+    return sanitizeBaseUrl(parsed.toString());
+  } catch {
+    return sanitizeBaseUrl(baseUrl);
+  }
+}
+
 /** Production gateway resolver: authoritative host-side config for a group. */
 export function resolveGatewayForGroup(agentGroupId: string): BackendGatewayConfig | undefined {
   const group = getAgentGroup(agentGroupId);
@@ -295,6 +319,7 @@ export async function processSigningProxyRequest(
   // not on this field. (Red-teamed 2026-06: confirmed in-scope of accepted R5.)
   const userId = typeof requester?.userId === 'string' ? requester.userId : null;
   const operation = typeof parsed.operation === 'string' ? parsed.operation : null;
+  const logicalResource = extractGatewayLogicalResource(parsed);
   const idempotencyKey = typeof parsed.idempotencyKey === 'string' ? parsed.idempotencyKey : null;
   const proxyRequestId = crypto.randomUUID();
   const inputHash = sha256(canonicalBody);
@@ -311,6 +336,7 @@ export async function processSigningProxyRequest(
       tokenJti: record.jti,
       path: input.pathname,
       operation,
+      logicalResource,
       userId,
       requesterSource,
       requesterSourceCoerced,
@@ -338,6 +364,7 @@ export async function processSigningProxyRequest(
       tokenJti: record.jti,
       path: input.pathname,
       operation,
+      logicalResource,
       userId,
       requesterSource,
       requesterSourceCoerced,
@@ -380,6 +407,7 @@ export async function processSigningProxyRequest(
       tokenJti: record.jti,
       path: input.pathname,
       operation,
+      logicalResource,
       userId,
       requesterSource,
       requesterSourceCoerced,
@@ -395,7 +423,7 @@ export async function processSigningProxyRequest(
     return jsonError(503, 'AUDIT_UNAVAILABLE', 'audit write failed; refusing to sign', 'audit_write_failed');
   }
 
-  const target = `${sanitizeBaseUrl(gateway.baseUrl)}${input.pathname}`;
+  const target = `${signingProxyUpstreamBaseUrl(gateway.baseUrl)}${input.pathname}`;
   const controller = new AbortController();
   const timeoutMs = gateway.timeoutMs ?? FORWARD_TIMEOUT_FALLBACK_MS;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -434,6 +462,55 @@ export async function processSigningProxyRequest(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Host-internal use of the same signing/forwarding/audit core.
+ *
+ * The confirmation broker already owns a Host-resolved Session, actor and
+ * Agent Group, so it does not need (and must not mint/revoke) the container's
+ * raw proxy token. This narrow wrapper supplies an in-memory virtual token
+ * bound to exactly `/confirmation/issue`; every other identity, path,
+ * canonicalization, signing and two-phase-audit check remains identical to the
+ * external proxy path.
+ */
+export async function processHostGatewayConfirmationRequest(args: {
+  sessionId: string;
+  agentGroupId: string;
+  body: Record<string, unknown>;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+}): Promise<ProxyRequestResult> {
+  const now = args.now ?? (() => Date.now());
+  const jti = `host-confirmation:${args.sessionId}`;
+  return processSigningProxyRequest(
+    {
+      method: 'POST',
+      pathname: '/confirmation/issue',
+      token: 'host-internal',
+      sourceIp: 'host',
+      rawBody: JSON.stringify(args.body),
+    },
+    {
+      verifyToken: (_token, sourceIp) => ({
+        ok: true,
+        record: {
+          jti,
+          sessionId: args.sessionId,
+          agentGroupId: args.agentGroupId,
+          allowedPaths: ['/confirmation/issue'],
+          sourceIp,
+          expiresAt: new Date(now() + 60_000).toISOString(),
+        },
+      }),
+      resolveGateway: resolveGatewayForGroup,
+      recordIntent: recordGatewayProxyIntent,
+      finalize: finalizeGatewayProxyAudit,
+      fetchImpl: args.fetchImpl ?? fetch,
+      allowRate: () => true,
+      now,
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------

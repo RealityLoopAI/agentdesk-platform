@@ -127,7 +127,7 @@
 下表是 **authoritative top-level namespace registry**。任何 manual span 的第 1 段必须来自这 20 个 namespace 之一。
 | Namespace | Domain | Default `openinference.span.kind` | Trace role | Status | Example span | Owning files |
 |---|---|---|---|---|---|---|
-| `channel.*` | ingress channel adapters (`cli`, `feishu`, future sanctioned channels) | `CHAIN` | pre-session ingress span；通常 own short trace | Active | `channel.feishu.receive` | `src/channels/` |
+| `channel.*` | ingress channel adapters (`cli`, `feishu`, `web`, future sanctioned channels) | `CHAIN` | pre-session ingress span；通常 own short trace | Active | `channel.feishu.receive`, `channel.web.receive` | `src/channels/` |
 | `router.*` | inbound routing / session resolution / delegation decisions | `CHAIN` | routing spine；`router.deliver_to_agent` is current session-trace root (`AGENT` kind) | Active | `router.deliver_to_agent` | `src/router.ts` |
 | `delivery.*` | outbound queue draining, message materialization, channel delivery | `CHAIN` | downstream session child spans | Active | `delivery.message.deliver` | `src/delivery.ts` |
 | `container.*` | host-side container wake / spawn / kill orchestration | `CHAIN` | host infra child spans inside session trace | Active | `container.spawn` | `src/container-runner.ts` |
@@ -168,7 +168,7 @@ namespace ownership 不是说“只有这些文件能 emit spans”，而是说�
 `channel.*` family 用于 ingress adapters 收到一个 inbound event，并准备进入 routing path。
 | Namespace pattern | Allowed action(s) | Canonical examples | Notes |
 |---|---|---|---|
-| `channel.<channel>.receive` | `receive` | `channel.cli.receive`, `channel.feishu.receive` | 只表示 ingress receive；不在这里表达 routing outcome |
+| `channel.<channel>.receive` | `receive` | `channel.cli.receive`, `channel.feishu.receive`, `channel.web.receive` | 只表示 ingress receive；不在这里表达 routing outcome |
 约束：
 - `channel` 是固定 top-level；
 - 第 2 段是 stable channel slug；

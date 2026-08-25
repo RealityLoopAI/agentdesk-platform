@@ -28,6 +28,9 @@
  *                              mismatch is reported as a warning and the
  *                              endpoint still passes (matches runtime default).
  *   GATEWAY_TEST_USER_ID       Sample requester userId (default a placeholder).
+ *   GATEWAY_REQUIRE_FEISHU_BITABLE
+ *                              When 'true', /describe must advertise the full
+ *                              feishu.bitable.* operation catalog.
  *
  * Exit code: 0 = every endpoint conformant; non-zero = at least one failure
  * (or, under strict mode, at least one schema mismatch).
@@ -40,11 +43,8 @@
 import crypto from 'node:crypto';
 
 import { SIGNING_NONCE_HEADER, SIGNING_SIGNATURE_HEADER, SIGNING_TIMESTAMP_HEADER } from '../src/branding.js';
-import {
-  CONTRACT_VERSION,
-  RESPONSE_SCHEMAS,
-  type GatewayPath,
-} from '../src/mcp-tools/gateway-contract.js';
+import { CONTRACT_VERSION, RESPONSE_SCHEMAS, type GatewayPath } from '../src/mcp-tools/gateway-contract.js';
+import { FEISHU_BITABLE_OPERATION_NAMES } from '../src/mcp-tools/feishu-bitable-contract.js';
 
 interface EndpointResult {
   path: GatewayPath;
@@ -181,7 +181,12 @@ function buildHeaders(bodyString: string): Record<string, string> {
   return headers;
 }
 
-async function probe(baseUrl: string, path: GatewayPath, strict: boolean): Promise<EndpointResult> {
+async function probe(
+  baseUrl: string,
+  path: GatewayPath,
+  strict: boolean,
+  requireFeishuBitable: boolean,
+): Promise<EndpointResult> {
   const body = sampleBody(path);
   const bodyString = JSON.stringify(body);
   let response: Response;
@@ -236,6 +241,23 @@ async function probe(baseUrl: string, path: GatewayPath, strict: boolean): Promi
     };
   }
 
+  if (path === '/describe' && requireFeishuBitable) {
+    const advertised = new Set(
+      (result.data.operations ?? [])
+        .map((operation) => operation.name)
+        .filter((name): name is string => typeof name === 'string'),
+    );
+    const missing = FEISHU_BITABLE_OPERATION_NAMES.filter((operation) => !advertised.has(operation));
+    if (missing.length > 0) {
+      return {
+        path,
+        pass: false,
+        httpStatus: response.status,
+        detail: `missing required Feishu Bitable operations: ${missing.join(', ')}`,
+      };
+    }
+  }
+
   return { path, pass: true, httpStatus: response.status };
 }
 
@@ -246,6 +268,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const strict = process.env.GATEWAY_STRICT_RESPONSES === 'true';
+  const requireFeishuBitable = process.env.GATEWAY_REQUIRE_FEISHU_BITABLE === 'true';
   const paths = Object.keys(RESPONSE_SCHEMAS) as GatewayPath[];
 
   console.error(`Gateway conformance check against ${baseUrl} (contractVersion=${CONTRACT_VERSION}, strict=${strict})`);
@@ -253,7 +276,7 @@ async function main(): Promise<void> {
 
   const results: EndpointResult[] = [];
   for (const path of paths) {
-    results.push(await probe(baseUrl, path, strict));
+    results.push(await probe(baseUrl, path, strict, requireFeishuBitable));
   }
 
   let failures = 0;

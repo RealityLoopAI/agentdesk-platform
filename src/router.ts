@@ -25,6 +25,8 @@ import { storeSessionSpanContext, storeSessionRootSpan, failSessionRootSpan } fr
 import { gateCommand } from './command-gate.js';
 import { getTracer } from './observability/tracer.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { ConversationLaneConflictError, findActiveConversationBinding } from './db/conversation-lanes.js';
+import { ensureFeishuConversationLaneForInbound } from './conversation-reconciliation.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import { recordEnterpriseAudit } from './db/enterprise-audit.js';
 import { insertIngress, deleteIngress, markIngressFailed } from './db/inbound-ingress.js';
@@ -34,6 +36,7 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionByAgentGroup, findSessionForAgent, findSessionForAgentOwner, getSession } from './db/sessions.js';
+import { getUserIdentity } from './db/user-identities.js';
 import { maybeAutowireEnterpriseFrontdesk } from './enterprise-autowire.js';
 import { readEnvFile } from './env.js';
 import {
@@ -50,6 +53,7 @@ import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getDeliveryAdapter } from './delivery.js';
+import { readHostFeatureFlags } from './feature-flags.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
@@ -389,7 +393,7 @@ async function routeInboundInner(event: InboundEvent): Promise<void> {
   // 2. Sender resolution (permissions module upserts the users row as a
   //    side effect so later role/access lookups find a real record).
   //    Without the module, userId is null — downstream tolerates it.
-  const userId: string | null = senderResolver ? senderResolver(event) : null;
+  const userId: string | null = event.authenticatedUserId ?? (senderResolver ? senderResolver(event) : null);
 
   // 3. Fetch wired agents in full (we already know the count is > 0; now
   //    we need their actual rows for fan-out).
@@ -531,6 +535,73 @@ function resolveEffectiveSessionMode(
 }
 
 /**
+ * Resolve a Host-verified cross-channel Lane for one inbound turn.
+ *
+ * Web requests may carry a Lane already authorized by the Web server. Native
+ * channels instead match the exact adapter-verified external identity and
+ * channel address against an active binding. Message content is never an
+ * input, and a canonical-user mismatch fails closed.
+ */
+export function resolveConversationLaneIdForInbound(
+  event: InboundEvent,
+  userId: string | null,
+  agentGroupId: string,
+  messagingGroupId: string,
+  effectiveSessionMode: MessagingGroupAgent['session_mode'],
+  createIfMissing: boolean,
+): string | null {
+  // A Web request may only reach here after the Web server has authenticated
+  // the browser and authorized this exact Lane, so Web-only conversations keep
+  // working independently of the cross-channel rollout gate.
+  if (event.conversationLaneId) return event.conversationLaneId;
+
+  // Native-channel auto-association is the privacy-sensitive part: when the
+  // flag is off, existing Feishu-only routing stays on its legacy session key
+  // even if dormant Lane/Binding rows are already present.
+  if (!readHostFeatureFlags().crossChannelLanesEnabled) return null;
+  if (!userId || !event.senderIdentity) return null;
+
+  const identity = getUserIdentity({
+    provider: event.senderIdentity.provider,
+    providerScope: event.senderIdentity.providerScope,
+    identifierType: event.senderIdentity.identifierType,
+    externalSubject: event.senderIdentity.externalSubject,
+  });
+  if (!identity) return null;
+  if (identity.user_id !== userId) {
+    throw new ConversationLaneConflictError('sender_identity_mismatch');
+  }
+
+  const existing = findActiveConversationBinding({
+    channelType: event.channelType,
+    platformId: event.platformId,
+    threadId: event.threadId,
+    threadFallback: effectiveSessionMode !== 'per-user-per-thread',
+    externalIdentityId: identity.id,
+    ownerUserId: userId,
+    agentGroupId,
+  })?.lane.id;
+  if (existing) return existing;
+  if (
+    event.channelType !== 'feishu' ||
+    (effectiveSessionMode !== 'per-user' && effectiveSessionMode !== 'per-user-per-thread')
+  ) {
+    return null;
+  }
+  return ensureFeishuConversationLaneForInbound({
+    agentGroupId,
+    ownerUserId: userId,
+    messagingGroupId,
+    platformId: event.platformId,
+    threadId: event.threadId,
+    sourceSessionMode: effectiveSessionMode,
+    externalIdentityId: identity.id,
+    actor: userId,
+    createIfMissing,
+  });
+}
+
+/**
  * Decide whether a given wired agent should engage on this message.
  *
  *   'pattern'        — regex test on text; '.' = always
@@ -642,12 +713,23 @@ async function deliverToAgent(
             throw new Error(`userId is required for session_mode=${effectiveSessionMode}`);
           }
 
+          const conversationLaneId = resolveConversationLaneIdForInbound(
+            event,
+            userId,
+            agent.agent_group_id,
+            mg.id,
+            effectiveSessionMode,
+            wake,
+          );
           const { session, created } = resolveSession(
             agent.agent_group_id,
             mg.id,
             event.threadId,
             effectiveSessionMode,
             userId,
+            null,
+            null,
+            conversationLaneId,
           );
 
           rootSpan.setAttribute('session.id', session.id);
@@ -714,6 +796,11 @@ async function deliverToAgent(
             threadId: deliveryAddr.threadId,
             content: event.message.content,
             trigger: wake ? 1 : 0,
+            // Host-established canonical identity (ADR-0061). This takes
+            // precedence over message.content.senderId in A2A propagation,
+            // which is essential when an external id maps to a non-legacy
+            // canonical user.
+            originUserId: userId,
             // Stamp the conversation thread id onto the channel-inbound row so it
             // joins to the classification_log row + propagates to a2a hops
             // (ADR-0039). Minted on the root session; NULL until then.

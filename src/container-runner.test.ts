@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   appendImageAndCommand,
@@ -10,24 +13,45 @@ import {
   findInjectedEnvValue,
   isValidContainerNetwork,
   mergeNoProxyArgs,
+  mergeProviderContributions,
   redactContainerConfigForContainer,
   redactedConfigPathFor,
   resolveContainerNetwork,
   resolveProviderName,
+  resolveRoutingPromptMount,
   routeOpenAiThroughVault,
+  shouldApplyOneCliGateway,
 } from './container-runner.js';
 
 describe('routeOpenAiThroughVault (ADR-0035)', () => {
-  it('routes openai/codex through the vault only when the flag is on', () => {
+  it('routes OpenAI-compatible providers through the vault only when the flag is on', () => {
     expect(routeOpenAiThroughVault('openai', true)).toBe(true);
     expect(routeOpenAiThroughVault('codex', true)).toBe(true);
+    expect(routeOpenAiThroughVault('opencode-go', true)).toBe(true);
     expect(routeOpenAiThroughVault('openai', false)).toBe(false);
     expect(routeOpenAiThroughVault('codex', false)).toBe(false);
+    expect(routeOpenAiThroughVault('opencode-go', false)).toBe(false);
   });
 
   it('never routes mock or claude (offline / already-vaulted)', () => {
     expect(routeOpenAiThroughVault('mock', true)).toBe(false);
     expect(routeOpenAiThroughVault('claude', true)).toBe(false);
+  });
+});
+
+describe('shouldApplyOneCliGateway', () => {
+  it('skips OneCLI when every role uses direct OpenAI-compatible credentials', () => {
+    expect(shouldApplyOneCliGateway(['opencode-go'], false)).toBe(false);
+    expect(shouldApplyOneCliGateway(['opencode-go', 'openai'], false)).toBe(false);
+  });
+
+  it('applies OneCLI when either independent role uses Claude', () => {
+    expect(shouldApplyOneCliGateway(['opencode-go', 'claude'], false)).toBe(true);
+    expect(shouldApplyOneCliGateway(['claude', 'opencode-go'], false)).toBe(true);
+  });
+
+  it('applies OneCLI for an OpenAI-compatible role in vault mode', () => {
+    expect(shouldApplyOneCliGateway(['opencode-go'], true)).toBe(true);
   });
 });
 
@@ -154,6 +178,10 @@ describe('resolveProviderName', () => {
     expect(resolveProviderName(null, null, 'opencode')).toBe('opencode');
   });
 
+  it('prefers llm.execution provider over the legacy container provider', () => {
+    expect(resolveProviderName(null, null, 'claude', 'opencode-go')).toBe('opencode-go');
+  });
+
   it('defaults to claude when nothing is set', () => {
     expect(resolveProviderName(null, null, undefined)).toBe('claude');
   });
@@ -167,6 +195,57 @@ describe('resolveProviderName', () => {
   it('treats empty string as unset (falls through)', () => {
     expect(resolveProviderName('', 'codex', null)).toBe('codex');
     expect(resolveProviderName(null, '', 'opencode')).toBe('opencode');
+  });
+});
+
+describe('mergeProviderContributions', () => {
+  it('deduplicates identical env and mounts from routing and execution providers', () => {
+    expect(
+      mergeProviderContributions([
+        { env: { OPENAI_API_KEY: 'same' }, mounts: [{ hostPath: '/a', containerPath: '/b', readonly: true }] },
+        { env: { OPENAI_API_KEY: 'same' }, mounts: [{ hostPath: '/a', containerPath: '/b', readonly: true }] },
+      ]),
+    ).toEqual({
+      env: { OPENAI_API_KEY: 'same' },
+      mounts: [{ hostPath: '/a', containerPath: '/b', readonly: true }],
+    });
+  });
+
+  it('rejects conflicting provider env instead of last-write-wins', () => {
+    expect(() =>
+      mergeProviderContributions([{ env: { SHARED: 'routing' } }, { env: { SHARED: 'execution' } }]),
+    ).toThrow(/conflicting provider env/i);
+  });
+});
+
+describe('resolveRoutingPromptMount', () => {
+  it('returns a nested read-only mount for a host-managed prompt', () => {
+    const groupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-prompt-mount-'));
+    try {
+      fs.mkdirSync(path.join(groupDir, 'prompts'));
+      fs.writeFileSync(path.join(groupDir, 'prompts/frontdesk-routing.md'), 'route');
+      expect(resolveRoutingPromptMount(groupDir, 'prompts/frontdesk-routing.md')).toEqual({
+        hostPath: fs.realpathSync(path.join(groupDir, 'prompts/frontdesk-routing.md')),
+        containerPath: '/workspace/agent/prompts/frontdesk-routing.md',
+        readonly: true,
+      });
+    } finally {
+      fs.rmSync(groupDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects traversal and symlink escape', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-prompt-escape-'));
+    try {
+      const groupDir = path.join(root, 'group');
+      fs.mkdirSync(path.join(groupDir, 'prompts'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'outside.md'), 'outside');
+      fs.symlinkSync(path.join(root, 'outside.md'), path.join(groupDir, 'prompts/link.md'));
+      expect(() => resolveRoutingPromptMount(groupDir, '../outside.md')).toThrow(/prompts/i);
+      expect(() => resolveRoutingPromptMount(groupDir, 'prompts/link.md')).toThrow(/escape/i);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -509,12 +588,12 @@ describe('buildContainerArgs — real argv assembly (integration-bug class)', ()
     created_at: '2026-01-01T00:00:00Z',
   } as never;
 
-  const containerConfig = {
+  const containerConfig: ContainerConfig = {
     mcpServers: {},
     packages: { apt: [], npm: [] },
     additionalMounts: [],
     skills: 'all',
-  } as never;
+  };
 
   const mounts = [
     { hostPath: '/h/ro', containerPath: '/workspace/agent/container.json', readonly: true },
@@ -538,6 +617,7 @@ describe('buildContainerArgs — real argv assembly (integration-bug class)', ()
     // Baseline env the runner depends on is present and before the image.
     expect(findInjectedEnvValue(args, 'TZ')).toBeDefined();
     expect(findInjectedEnvValue(args, 'BRAND_NAMESPACE')).toBe('agentdesk');
+    expect(findInjectedEnvValue(args, 'AGENTDESK_EXECUTION_PROVIDER')).toBe('mock');
     // Mounts are present and precede the image tag.
     expect(args.indexOf('-v')).toBeGreaterThanOrEqual(0);
     expect(args.lastIndexOf('-v')).toBeLessThan(img);
@@ -566,5 +646,54 @@ describe('buildContainerArgs — real argv assembly (integration-bug class)', ()
     const args = await buildContainerArgs(mounts, 'c-3', agentGroup, containerConfig, 'mock', {}, 'ag1');
     expect(findInjectedEnvValue(args, 'AGENTDESK_GATEWAY_PROXY_URL')).toBeUndefined();
     expect(findInjectedEnvValue(args, 'AGENTDESK_GATEWAY_PROXY_TOKEN')).toBeUndefined();
+  });
+
+  it('overrides only OPENAI_MODEL for an OpenAI-compatible group', async () => {
+    const providerEnv = {
+      OPENAI_MODEL: 'global-model',
+      OPENAI_BASE_URL: 'https://relay.example/v1',
+      OPENAI_API_KEY: 'unchanged-secret',
+      OPENAI_TIMEOUT_MS: '30000',
+    };
+    const args = await buildContainerArgs(
+      mounts,
+      'c-model',
+      agentGroup,
+      { ...containerConfig, providerModel: 'glm-5.2' },
+      'openai',
+      { env: providerEnv },
+      'ag1',
+    );
+
+    expect(findInjectedEnvValue(args, 'OPENAI_MODEL')).toBe('glm-5.2');
+    expect(findInjectedEnvValue(args, 'OPENAI_BASE_URL')).toBe(providerEnv.OPENAI_BASE_URL);
+    expect(findInjectedEnvValue(args, 'OPENAI_API_KEY')).toBe(providerEnv.OPENAI_API_KEY);
+    expect(findInjectedEnvValue(args, 'OPENAI_TIMEOUT_MS')).toBe(providerEnv.OPENAI_TIMEOUT_MS);
+  });
+
+  it('keeps the provider contribution unchanged when no override is configured', async () => {
+    const args = await buildContainerArgs(
+      mounts,
+      'c-global-model',
+      agentGroup,
+      containerConfig,
+      'openai',
+      { env: { OPENAI_MODEL: 'global-model' } },
+      'ag1',
+    );
+    expect(findInjectedEnvValue(args, 'OPENAI_MODEL')).toBe('global-model');
+  });
+
+  it('does not inject a model variable for a provider without a declared mapping', async () => {
+    const args = await buildContainerArgs(
+      mounts,
+      'c-unsupported-model',
+      agentGroup,
+      { ...containerConfig, providerModel: 'glm-5.2' },
+      'mock',
+      {},
+      'ag1',
+    );
+    expect(findInjectedEnvValue(args, 'OPENAI_MODEL')).toBeUndefined();
   });
 });

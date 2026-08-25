@@ -41,7 +41,8 @@ CREATE TABLE agent_groups (
   folder           TEXT NOT NULL UNIQUE,
   agent_provider   TEXT,
   created_at       TEXT NOT NULL,
-  organization_id  TEXT REFERENCES organizations(id)
+  organization_id  TEXT REFERENCES organizations(id),
+  role             TEXT
 );
 CREATE INDEX idx_agent_groups_org ON agent_groups(organization_id);
 
@@ -91,15 +92,59 @@ CREATE TABLE messaging_group_agents (
   UNIQUE(messaging_group_id, agent_group_id)
 );
 
--- Users are messaging-platform identifiers, namespaced: "phone:+1555...",
--- "tg:123", "discord:456", "email:a@x.com". A single human can own multiple
--- user rows if they have identifiers on unrelated channels (no linking yet).
+-- Canonical authorization subjects. Legacy ids remain namespaced channel
+-- handles; new external identities link through user_identities (ADR-0061).
 CREATE TABLE users (
   id           TEXT PRIMARY KEY,
   kind         TEXT NOT NULL,
   display_name TEXT,
   created_at   TEXT NOT NULL
 );
+
+-- Provider-verified external identities. Scope is part of the key because
+-- Feishu open_id is app-scoped. Credentials/tokens are never stored here.
+CREATE TABLE user_identities (
+  id               TEXT PRIMARY KEY,
+  user_id          TEXT NOT NULL REFERENCES users(id),
+  provider         TEXT NOT NULL,
+  provider_scope   TEXT NOT NULL,
+  identifier_type  TEXT NOT NULL,
+  external_subject TEXT NOT NULL,
+  verified_at      TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  last_seen_at     TEXT NOT NULL,
+  UNIQUE(provider, provider_scope, identifier_type, external_subject)
+);
+CREATE INDEX idx_user_identities_user ON user_identities(user_id);
+
+-- Hash-only, expiring and revocable browser sessions (ADR-0061/0062).
+CREATE TABLE web_auth_sessions (
+  id_hash             TEXT PRIMARY KEY,
+  user_id             TEXT NOT NULL REFERENCES users(id),
+  csrf_hash           TEXT NOT NULL,
+  created_at          TEXT NOT NULL,
+  last_seen_at        TEXT NOT NULL,
+  idle_expires_at     TEXT NOT NULL,
+  absolute_expires_at TEXT NOT NULL,
+  revoked_at          TEXT,
+  auth_context_hash   TEXT
+);
+CREATE INDEX idx_web_auth_sessions_user
+  ON web_auth_sessions(user_id, revoked_at, absolute_expires_at);
+
+-- One-use OAuth state; codes and provider tokens are never persisted.
+CREATE TABLE web_auth_transactions (
+  state_hash               TEXT PRIMARY KEY,
+  browser_nonce_hash       TEXT NOT NULL,
+  pkce_verifier_ciphertext TEXT,
+  redirect_uri             TEXT NOT NULL,
+  created_at               TEXT NOT NULL,
+  expires_at               TEXT NOT NULL,
+  used_at                  TEXT,
+  authorization_code_hash  TEXT UNIQUE
+);
+CREATE INDEX idx_web_auth_transactions_expiry
+  ON web_auth_transactions(expires_at, used_at);
 
 -- Role grants on users. Privilege is user-level, not group-level.
 --   role ∈ {owner, admin}
@@ -157,6 +202,7 @@ CREATE TABLE sessions (
   thread_id          TEXT,
   owner_user_id      TEXT,
   root_session_id    TEXT,
+  conversation_lane_id TEXT REFERENCES conversation_lanes(id),
   agent_provider     TEXT,
   status             TEXT DEFAULT 'active',
   container_status   TEXT DEFAULT 'stopped',
@@ -176,6 +222,135 @@ CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup ON sessions(messaging_group_id, thread_id);
 CREATE INDEX idx_sessions_lookup_owner ON sessions(agent_group_id, messaging_group_id, owner_user_id, thread_id);
 CREATE INDEX idx_sessions_agent_root ON sessions(agent_group_id, root_session_id);
+CREATE INDEX idx_sessions_conversation_lane ON sessions(conversation_lane_id);
+CREATE UNIQUE INDEX idx_sessions_conversation_lane_root
+  ON sessions(conversation_lane_id)
+  WHERE conversation_lane_id IS NOT NULL AND id = root_session_id;
+
+-- User-owned cross-channel conversation structure (ADR-0062). Organization
+-- scope is deliberately derived through agent_group_id, never copied here.
+CREATE TABLE conversation_lanes (
+  id              TEXT PRIMARY KEY,
+  agent_group_id  TEXT NOT NULL REFERENCES agent_groups(id),
+  owner_user_id   TEXT NOT NULL REFERENCES users(id),
+  root_session_id TEXT REFERENCES sessions(id),
+  status          TEXT NOT NULL DEFAULT 'active'
+                  CHECK(status IN ('active', 'archived')),
+  created_at      TEXT NOT NULL,
+  archived_at     TEXT
+);
+CREATE INDEX idx_conversation_lanes_owner
+  ON conversation_lanes(owner_user_id, status, created_at);
+CREATE INDEX idx_conversation_lanes_agent_owner
+  ON conversation_lanes(agent_group_id, owner_user_id, status, created_at);
+CREATE UNIQUE INDEX idx_conversation_lanes_root
+  ON conversation_lanes(root_session_id) WHERE root_session_id IS NOT NULL;
+
+CREATE TABLE conversation_bindings (
+  id                   TEXT PRIMARY KEY,
+  lane_id              TEXT NOT NULL REFERENCES conversation_lanes(id),
+  channel_type         TEXT NOT NULL,
+  messaging_group_id   TEXT REFERENCES messaging_groups(id),
+  platform_id          TEXT NOT NULL,
+  thread_id            TEXT,
+  external_identity_id TEXT REFERENCES user_identities(id),
+  delivery_mode        TEXT NOT NULL
+                       CHECK(delivery_mode IN ('history-only', 'source-reply', 'mirror-dm')),
+  verified_at          TEXT NOT NULL,
+  revoked_at           TEXT
+);
+CREATE INDEX idx_conversation_bindings_lane ON conversation_bindings(lane_id, revoked_at);
+CREATE UNIQUE INDEX idx_conversation_binding_active_no_thread_no_identity
+  ON conversation_bindings(channel_type, platform_id)
+  WHERE thread_id IS NULL AND external_identity_id IS NULL AND revoked_at IS NULL;
+CREATE UNIQUE INDEX idx_conversation_binding_active_no_thread_identity
+  ON conversation_bindings(channel_type, platform_id, external_identity_id)
+  WHERE thread_id IS NULL AND external_identity_id IS NOT NULL AND revoked_at IS NULL;
+CREATE UNIQUE INDEX idx_conversation_binding_active_thread_no_identity
+  ON conversation_bindings(channel_type, platform_id, thread_id)
+  WHERE thread_id IS NOT NULL AND external_identity_id IS NULL AND revoked_at IS NULL;
+CREATE UNIQUE INDEX idx_conversation_binding_active_thread_identity
+  ON conversation_bindings(channel_type, platform_id, thread_id, external_identity_id)
+  WHERE thread_id IS NOT NULL AND external_identity_id IS NOT NULL AND revoked_at IS NULL;
+
+-- Stable browser retry keys. This is only an idempotency ledger; message
+-- content continues to live exclusively in the per-Session DB pair.
+CREATE TABLE web_message_receipts (
+  id                TEXT PRIMARY KEY,
+  user_id           TEXT NOT NULL REFERENCES users(id),
+  lane_id           TEXT NOT NULL REFERENCES conversation_lanes(id),
+  client_message_id TEXT NOT NULL,
+  server_message_id TEXT NOT NULL,
+  status            TEXT NOT NULL
+                    CHECK(status IN ('routing', 'accepted', 'failed')),
+  created_at        TEXT NOT NULL,
+  completed_at      TEXT,
+  failure_code      TEXT,
+  UNIQUE(user_id, lane_id, client_message_id),
+  UNIQUE(server_message_id)
+);
+CREATE INDEX idx_web_message_receipts_lane
+  ON web_message_receipts(user_id, lane_id, created_at);
+
+-- Durable notification references for Web SSE replay. Message bodies remain in
+-- the per-Session databases; this table is not a second transcript.
+CREATE TABLE web_events (
+  sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id    TEXT NOT NULL UNIQUE,
+  user_id     TEXT NOT NULL REFERENCES users(id),
+  lane_id     TEXT NOT NULL REFERENCES conversation_lanes(id),
+  event_type  TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  UNIQUE(user_id, lane_id, event_type, resource_id)
+);
+CREATE INDEX idx_web_events_user_sequence
+  ON web_events(user_id, sequence);
+
+-- Explicit, user-controlled Feishu DM reply mirroring. A subscription is
+-- separate from a conversation binding: revoking extra delivery consent must
+-- not break inbound routing or shared history continuity.
+CREATE TABLE delivery_subscriptions (
+  id                   TEXT PRIMARY KEY,
+  lane_id              TEXT NOT NULL REFERENCES conversation_lanes(id),
+  channel_type         TEXT NOT NULL CHECK(channel_type = 'feishu'),
+  delivery_kind        TEXT NOT NULL CHECK(delivery_kind = 'agent-reply-mirror'),
+  platform_id          TEXT NOT NULL CHECK(platform_id GLOB 'feishu:p2p:ou_*'),
+  external_identity_id TEXT NOT NULL REFERENCES user_identities(id),
+  provider_scope       TEXT NOT NULL,
+  enabled_at           TEXT NOT NULL,
+  revoked_at           TEXT
+);
+CREATE INDEX idx_delivery_subscriptions_lane
+  ON delivery_subscriptions(lane_id, revoked_at);
+CREATE UNIQUE INDEX idx_delivery_subscription_active_lane_kind
+  ON delivery_subscriptions(lane_id, channel_type, delivery_kind)
+  WHERE revoked_at IS NULL;
+
+-- Reference-only durable retry/idempotency ledger for additional channel
+-- delivery. Message content remains in the owning Session's outbound.db.
+CREATE TABLE cross_channel_deliveries (
+  id                  TEXT PRIMARY KEY,
+  origin_id           TEXT NOT NULL,
+  subscription_id     TEXT NOT NULL REFERENCES delivery_subscriptions(id),
+  lane_id             TEXT NOT NULL REFERENCES conversation_lanes(id),
+  session_id          TEXT NOT NULL REFERENCES sessions(id),
+  message_out_id      TEXT NOT NULL,
+  channel_type        TEXT NOT NULL CHECK(channel_type = 'feishu'),
+  platform_id         TEXT NOT NULL CHECK(platform_id GLOB 'feishu:p2p:ou_*'),
+  status              TEXT NOT NULL
+                      CHECK(status IN ('pending', 'delivered', 'failed', 'suppressed')),
+  attempts            INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  next_retry_at       TEXT,
+  platform_message_id TEXT,
+  failure_code        TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  delivered_at        TEXT,
+  UNIQUE(subscription_id, session_id, message_out_id)
+);
+CREATE INDEX idx_cross_channel_deliveries_due
+  ON cross_channel_deliveries(session_id, status, next_retry_at, created_at);
 
 -- Pending interactive questions
 CREATE TABLE pending_questions (
@@ -189,6 +364,37 @@ CREATE TABLE pending_questions (
   options_json   TEXT NOT NULL,
   created_at     TEXT NOT NULL
 );
+
+-- Host-mediated Gateway confirmation state (ADR-0073). The Host derives
+-- requester + route from the trusted inbound chain; containers cannot write
+-- this table. Execution tokens are delivered into inbound.db and never stored
+-- in the central DB.
+CREATE TABLE pending_gateway_confirmations (
+  confirmation_id      TEXT PRIMARY KEY,
+  session_id           TEXT NOT NULL REFERENCES sessions(id),
+  message_out_id       TEXT NOT NULL UNIQUE,
+  kind                 TEXT NOT NULL CHECK(kind IN ('update', 'create', 'delete')),
+  requester_user_id    TEXT NOT NULL REFERENCES users(id),
+  agent_group_id       TEXT NOT NULL REFERENCES agent_groups(id),
+  conversation_lane_id TEXT REFERENCES conversation_lanes(id),
+  channel_type         TEXT NOT NULL,
+  platform_id          TEXT NOT NULL,
+  thread_id            TEXT,
+  confirmation_request TEXT,
+  display_json         TEXT NOT NULL,
+  title                TEXT NOT NULL,
+  options_json         TEXT NOT NULL,
+  created_at           TEXT NOT NULL,
+  expires_at           TEXT NOT NULL,
+  status               TEXT NOT NULL DEFAULT 'pending'
+                       CHECK(status IN ('pending', 'issuing', 'approved', 'rejected', 'expired', 'failed')),
+  resolved_at          TEXT,
+  error_code           TEXT
+);
+CREATE INDEX idx_pending_gateway_confirmations_actor
+  ON pending_gateway_confirmations(requester_user_id, status, expires_at);
+CREATE INDEX idx_pending_gateway_confirmations_lane
+  ON pending_gateway_confirmations(conversation_lane_id, requester_user_id, status);
 
 -- Pending approvals for unknown senders (unknown_sender_policy='request_approval').
 -- In-flight dedup via UNIQUE(messaging_group_id, sender_identity): a second
@@ -390,7 +596,8 @@ CREATE TABLE gateway_audit (
   proxy_request_id          TEXT,
   identity_mismatch         INTEGER,
   requester_source_coerced  INTEGER,
-  audit_phase               TEXT
+  audit_phase               TEXT,
+  logical_resource          TEXT
 );
 
 CREATE INDEX idx_gateway_audit_at ON gateway_audit(occurred_at);
@@ -400,6 +607,9 @@ CREATE INDEX idx_gateway_audit_user ON gateway_audit(user_id, occurred_at);
 CREATE INDEX idx_gateway_audit_operation ON gateway_audit(operation, occurred_at);
 
 CREATE INDEX idx_gateway_audit_proxy_req ON gateway_audit(proxy_request_id);
+
+CREATE INDEX idx_gateway_audit_logical_resource
+  ON gateway_audit(logical_resource, occurred_at);
 
 -- Per-session unforgeable tokens for the host-side gateway signing proxy
 -- (ADR-0034), so "signingKey" never enters the container. Purged on a TTL.

@@ -26,11 +26,12 @@ import { readContainerConfig, writeContainerConfig } from './container-config.js
 import {
   CONTAINER_RUNTIME_BIN,
   hostGatewayArgs,
+  ociRuntimeArgs,
   readonlyMountArgs,
   stopContainer,
   stopContainerAsync,
 } from './container-runtime.js';
-import { composeGroupClaudeMd } from './claude-md-compose.js';
+import { composeGroupClaudeMd, resolveSkillSource } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { revokeAllProxyTokens, revokeProxyTokensForSession } from './db/gateway-proxy-token.js';
 import { gatewaySigningProxyEnabled, mintSessionProxyToken } from './gateway-signing-proxy.js';
@@ -38,6 +39,7 @@ import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { agentBaseImagePresent, containerExitsTotal, wakeRejectedTotal } from './metrics.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
+import { ensureStateScope, resolveStateScope } from './state-scope.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
 import { chainAttrs } from './observability/openinference.js';
@@ -56,11 +58,16 @@ import {
 import { openaiViaOneCliEnabled } from './providers/openai.js';
 import {
   heartbeatPath,
+  inboundDbPath,
   markContainerRunning,
   markContainerStopped,
+  openInboundDb,
   sessionDir,
   writeSessionRouting,
 } from './session-manager.js';
+import { admissionQueueSize, drainAdmissionSlot, enqueueAdmission, type AdmissionDeps } from './admission-queue.js';
+import { getSession } from './db/sessions.js';
+import { countDueMessages } from './db/session-db.js';
 import { writeRosterSlots } from './roster-dm.js';
 import type { AgentGroup, Session } from './types.js';
 
@@ -68,6 +75,44 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string; agentGroupId: string }>();
+
+// Warn-once registry for the role×routing coherence warn in buildMounts
+// (ADR-0056) — per group per host run, so a respawning group doesn't spam.
+const warnedWorkerRoutingGroups = new Set<string>();
+
+// Real dependencies for the admission drain (see admission-queue.ts). The
+// hasDueWork probe mirrors host-sweep's due check — including the existsSync
+// guard, so probing a torn/archived session dir never CREATES an empty
+// inbound.db as a side effect (better-sqlite3 defaults fileMustExist:false).
+const admissionDeps: AdmissionDeps = {
+  getSession,
+  isRunning: (session) => isContainerRunning(session.id),
+  hasDueWork(session) {
+    if (!fs.existsSync(inboundDbPath(session.agent_group_id, session.id))) return false;
+    const inDb = openInboundDb(session.agent_group_id, session.id);
+    try {
+      return countDueMessages(inDb) > 0;
+    } finally {
+      inDb.close();
+    }
+  },
+  wake: (session) => wakeContainer(session),
+};
+
+// Admission drain is disabled for the rest of the process lifetime once
+// graceful shutdown begins: the close handlers of the very containers we are
+// stopping would otherwise re-spawn queued sessions into fresh containers
+// that escape stopAllContainers' snapshot and outlive the host — worst case
+// two containers on one session dir after a fast restart (two writers on
+// outbound.db, a three-DB invariant violation).
+let admissionDrainDisabled = false;
+
+// A container that dies almost immediately after spawn signals an
+// environment problem (daemon flapping, broken image), not a freed healthy
+// slot: draining on it would chain-flush the whole queue through failing
+// spawns in seconds. Idle exits are always healthy; crashes only hand their
+// slot on after a real lifetime.
+const MIN_HEALTHY_LIFETIME_MS = 10_000;
 
 /**
  * Session ids whose container we just asked to stop via killContainer.
@@ -219,12 +264,17 @@ export function wakeContainer(session: Session): Promise<boolean> {
       });
       if (!admit) {
         wakeRejectedTotal.labels('capacity').inc();
-        log.warn('Wake rejected — concurrent container cap reached', {
+        // Event-driven slot handoff (concurrency stage 0): queue the session
+        // so the next freed slot admits it immediately instead of waiting up
+        // to a full sweep tick (60s). The sweep stays as the fallback path.
+        enqueueAdmission(session.id);
+        log.warn('Wake rejected — concurrent container cap reached; queued for the next freed slot', {
           sessionId: session.id,
           agentGroupId: session.agent_group_id,
           active: activeContainers.size,
           inFlight: activeContainers.size + wakePromises.size,
           cap: MAX_CONCURRENT_CONTAINERS,
+          queueDepth: admissionQueueSize(),
         });
         return false;
       }
@@ -316,6 +366,22 @@ async function spawnContainer(session: Session): Promise<void> {
       const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
       activeContainers.set(session.id, { process: container, containerName, agentGroupId: agentGroup.id });
+
+      // Slot-handoff gate (ADR-0059 red-team round): drain at most once per
+      // container ('error' AND 'close' can both fire for one failed spawn),
+      // never during shutdown, and only when the exit signals a HEALTHY freed
+      // slot (idle exit, or a crash after a real lifetime — an instant death
+      // means the environment is broken and admitting the next session would
+      // chain-flush the queue through failing spawns).
+      const spawnedAt = Date.now();
+      let slotHandedOff = false;
+      const handOffSlot = (outcome: string): void => {
+        if (slotHandedOff || admissionDrainDisabled) return;
+        slotHandedOff = true;
+        if (outcome === 'idle' || Date.now() - spawnedAt >= MIN_HEALTHY_LIFETIME_MS) {
+          drainAdmissionSlot(admissionDeps);
+        }
+      };
       markContainerRunning(session.id);
 
       // Log stderr
@@ -345,6 +411,7 @@ async function spawnContainer(session: Session): Promise<void> {
           failSessionRootSpan(session.id, `container ${outcome} (code=${code})`);
         }
         log.info('Container exited', { sessionId: session.id, code, containerName, outcome });
+        handOffSlot(outcome);
       });
 
       container.on('error', (err) => {
@@ -356,6 +423,7 @@ async function spawnContainer(session: Session): Promise<void> {
         containerExitsTotal.labels(agentGroup.id, 'crash').inc();
         failSessionRootSpan(session.id, `container spawn error: ${err.message}`);
         log.error('Container spawn error', { sessionId: session.id, err });
+        handOffSlot('crash');
       });
     },
   );
@@ -385,6 +453,10 @@ export async function killContainer(sessionId: string, reason: string): Promise<
  * marking it stopped). Best-effort + bounded by the caller's shutdown deadline.
  */
 export async function stopAllContainers(reason: string): Promise<void> {
+  // From this point the process is going down: the close handlers of the
+  // containers we are about to stop must NOT hand their slots to queued
+  // sessions (see admissionDrainDisabled above).
+  admissionDrainDisabled = true;
   const entries = [...activeContainers.entries()];
   if (entries.length === 0) return;
   log.info('Stopping active containers on shutdown', { count: entries.length, reason });
@@ -420,8 +492,41 @@ export function resolveProviderName(
   sessionProvider: string | null | undefined,
   agentGroupProvider: string | null | undefined,
   containerConfigProvider: string | null | undefined,
+  executionProvider?: string | null,
 ): string {
-  return (sessionProvider || agentGroupProvider || containerConfigProvider || 'claude').toLowerCase();
+  return (
+    sessionProvider ||
+    agentGroupProvider ||
+    executionProvider ||
+    containerConfigProvider ||
+    'claude'
+  ).toLowerCase();
+}
+
+export function mergeProviderContributions(
+  contributions: ProviderContainerContribution[],
+): ProviderContainerContribution {
+  const env: Record<string, string> = {};
+  const mounts = new Map<string, VolumeMount>();
+  for (const contribution of contributions) {
+    for (const [key, value] of Object.entries(contribution.env ?? {})) {
+      if (key in env && env[key] !== value) {
+        throw new Error(`Conflicting provider env for ${key}`);
+      }
+      env[key] = value;
+    }
+    for (const mount of contribution.mounts ?? []) {
+      const existing = mounts.get(mount.containerPath);
+      if (existing && (existing.hostPath !== mount.hostPath || existing.readonly !== mount.readonly)) {
+        throw new Error(`Conflicting provider mount for ${mount.containerPath}`);
+      }
+      mounts.set(mount.containerPath, mount);
+    }
+  }
+  return {
+    ...(Object.keys(env).length > 0 ? { env } : {}),
+    ...(mounts.size > 0 ? { mounts: [...mounts.values()] } : {}),
+  };
 }
 
 function resolveProviderContribution(
@@ -429,19 +534,28 @@ function resolveProviderContribution(
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
 ): { provider: string; contribution: ProviderContainerContribution } {
-  const provider = resolveProviderName(session.agent_provider, agentGroup.agent_provider, containerConfig.provider);
-  const fn = getProviderContainerConfig(provider);
-  const contribution = fn
-    ? fn({
-        sessionDir: sessionDir(agentGroup.id, session.id),
-        agentGroupId: agentGroup.id,
-        hostEnv: process.env,
-      })
-    : {};
+  const provider = resolveProviderName(
+    session.agent_provider,
+    agentGroup.agent_provider,
+    containerConfig.provider,
+    containerConfig.llm?.execution?.provider,
+  );
+  const providers = new Set([provider]);
+  if (containerConfig.llm?.routing?.enabled && containerConfig.llm.routing.provider) {
+    providers.add(containerConfig.llm.routing.provider.toLowerCase());
+  }
+  const context = {
+    sessionDir: sessionDir(agentGroup.id, session.id),
+    agentGroupId: agentGroup.id,
+    hostEnv: process.env,
+  };
+  const contribution = mergeProviderContributions(
+    [...providers].map((name) => getProviderContainerConfig(name)?.(context) ?? {}),
+  );
   return { provider, contribution };
 }
 
-function buildMounts(
+export function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
   containerConfig: import('./container-config.js').ContainerConfig,
@@ -450,14 +564,40 @@ function buildMounts(
 ): VolumeMount[] {
   const projectRoot = process.cwd();
 
+  // Role × config coherence WARN (ADR-0056, demoted from a throw by its
+  // red-team round). A worker with llm.routing.enabled is suspicious but NOT
+  // a contradiction: routing never engages on agent-channel turns
+  // (routingEnabledForTurn skips them), so a pure a2a worker's routing config
+  // is inert — and a mixed-role mid-tier agent (takes delegations AND fronts
+  // a channel with routing over its own sub-workers) is a legitimate
+  // topology. A throw here would also land in wakeContainer's transient-retry
+  // catch and become a silent 60s-forever wake loop — the exact ADR-0053×0054
+  // failure mode this repo just fixed. So: warn once per group, boot normally.
+  if (containerConfig.llm?.routing?.enabled && agentGroup.role === 'worker') {
+    if (!warnedWorkerRoutingGroups.has(agentGroup.id)) {
+      warnedWorkerRoutingGroups.add(agentGroup.id);
+      log.warn(
+        'agent group has role=worker with llm.routing.enabled — routing is inert on a2a turns; if this is not a deliberate mixed-role desk, disable llm.routing or correct the role (ADR-0056)',
+        { folder: agentGroup.folder, agentGroupId: agentGroup.id },
+      );
+    }
+  }
+
   // Per-group filesystem state lives forever after first creation. Init is
   // idempotent: it only writes paths that don't already exist, so this call
   // is a no-op for groups that have spawned before.
   initGroupFilesystem(agentGroup);
 
+  // Which host dirs back the WRITABLE state mounts (ADR-0055): sessions with
+  // an owner get a per-user scope; ownerless sessions keep the legacy
+  // group-level layout byte-for-byte. Materialized before docker run — a
+  // missing bind source would be created root-owned by the daemon.
+  const scope = resolveStateScope(agentGroup, session);
+  ensureStateScope(scope, { disableAutoMemory: containerConfig.memoryMode === 'gateway' });
+
   // Sync skill symlinks based on container.json selection before mounting.
-  const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig);
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+  syncSkillSymlinks(scope.claudeDir, groupDir, containerConfig);
 
   // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
   // fragments, and MCP server instructions. See `claude-md-compose.ts`.
@@ -465,13 +605,16 @@ function buildMounts(
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
-  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
-  // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
-  mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
+  // Writable agent state at /workspace/agent (working files, CLAUDE.local.md,
+  // conversations/) — the resolved scope's workspace (ADR-0055): per-user for
+  // owned sessions, the group dir for ownerless ones. Config and composer
+  // artifacts stay group-level via the RO nested mounts below, which shadow
+  // the scope at the same container paths.
+  mounts.push({ hostPath: scope.workspaceDir, containerPath: '/workspace/agent', readonly: false });
 
   // container.json — nested RO mount on top of RW group dir so the agent can
   // read its config but cannot modify it. In signing-proxy mode (ADR-0034) we
@@ -481,6 +624,28 @@ function buildMounts(
   const containerJsonPath = signingProxy?.redactedConfigPath ?? path.join(groupDir, 'container.json');
   if (fs.existsSync(containerJsonPath)) {
     mounts.push({ hostPath: containerJsonPath, containerPath: '/workspace/agent/container.json', readonly: true });
+  }
+
+  // Template prompt assets — whole-dir RO shadow (ADR-0056 hardening). The
+  // ownerless layout used to expose prompts/ read-WRITE through the group-dir
+  // mount (only the active routing prompt was pinned RO); agents must not be
+  // able to edit template prompts, and owned scopes gain read access to the
+  // full set. The per-file routing mount below stacks on top unchanged.
+  const promptsDir = path.join(groupDir, 'prompts');
+  if (fs.existsSync(promptsDir)) {
+    mounts.push({ hostPath: promptsDir, containerPath: '/workspace/agent/prompts', readonly: true });
+  }
+
+  // Group-private skills are template assets. Owned per-user scopes do not
+  // physically contain them, so project the operator-managed directory into
+  // the stable container path as a read-only nested mount.
+  const privateSkillsDir = path.join(groupDir, 'skills');
+  if (fs.existsSync(privateSkillsDir)) {
+    mounts.push({ hostPath: privateSkillsDir, containerPath: '/workspace/agent/skills', readonly: true });
+  }
+
+  if (containerConfig.llm?.routing?.enabled) {
+    mounts.push(resolveRoutingPromptMount(groupDir, containerConfig.llm.routing.promptFile));
   }
 
   // Composer-managed CLAUDE.md artifacts — nested RO mounts. These are
@@ -493,6 +658,14 @@ function buildMounts(
   const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
   if (fs.existsSync(composedClaudeMd)) {
     mounts.push({ hostPath: composedClaudeMd, containerPath: '/workspace/agent/CLAUDE.md', readonly: true });
+  }
+  // Operator-seeded role prompt — template layer (ADR-0055). RO for every
+  // session (an agent must not edit its own persona), and for per-user scopes
+  // this shadow is what delivers the instructions at all: the scope workspace
+  // starts empty and the composed CLAUDE.md imports @./instructions.md.
+  const instructionsFile = path.join(groupDir, 'instructions.md');
+  if (fs.existsSync(instructionsFile)) {
+    mounts.push({ hostPath: instructionsFile, containerPath: '/workspace/agent/instructions.md', readonly: true });
   }
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
   if (fs.existsSync(fragmentsDir)) {
@@ -512,9 +685,9 @@ function buildMounts(
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
   }
 
-  // Per-group .claude-shared at /home/node/.claude (Claude state, settings,
-  // skill symlinks)
-  mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
+  // Claude state (settings, skills symlinks, transcripts, auto-memory) at
+  // /home/node/.claude — same scope as the workspace (ADR-0055).
+  mounts.push({ hostPath: scope.claudeDir, containerPath: '/home/node/.claude', readonly: false });
 
   // Shared agent-runner source — read-only, same code for all groups.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
@@ -540,12 +713,38 @@ function buildMounts(
   return mounts;
 }
 
+export function resolveRoutingPromptMount(groupDir: string, promptFile: string): VolumeMount {
+  const normalized = path.posix.normalize(promptFile.replaceAll('\\', '/'));
+  if (
+    path.isAbsolute(promptFile) ||
+    normalized === '..' ||
+    normalized.startsWith('../') ||
+    !normalized.startsWith('prompts/')
+  ) {
+    throw new Error('Routing prompt must stay inside prompts/');
+  }
+  const promptsRoot = fs.realpathSync(path.join(groupDir, 'prompts'));
+  const hostPath = fs.realpathSync(path.join(groupDir, normalized));
+  if (hostPath !== promptsRoot && !hostPath.startsWith(`${promptsRoot}${path.sep}`)) {
+    throw new Error('Routing prompt symlink escape detected');
+  }
+  return {
+    hostPath,
+    containerPath: `/workspace/agent/${normalized}`,
+    readonly: true,
+  };
+}
+
 /**
  * Sync skill symlinks in .claude-shared/skills/ to match the container.json
  * selection. Each symlink points to a container path (/app/skills/<name>)
  * so it's dangling on the host but valid inside the container.
  */
-function syncSkillSymlinks(claudeDir: string, containerConfig: import('./container-config.js').ContainerConfig): void {
+function syncSkillSymlinks(
+  claudeDir: string,
+  groupDir: string,
+  containerConfig: import('./container-config.js').ContainerConfig,
+): void {
   const skillsDir = path.join(claudeDir, 'skills');
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
@@ -556,21 +755,31 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
   let desired: string[];
   if (containerConfig.skills === 'all') {
-    // Recompute from shared dir — newly-added upstream skills appear automatically
-    desired = fs.existsSync(sharedSkillsDir)
-      ? fs.readdirSync(sharedSkillsDir).filter((e) => {
-          try {
-            return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
-          } catch {
-            return false;
-          }
-        })
-      : [];
+    // Recompute from shared + group-private dirs. A private Skill with the same
+    // name intentionally overrides the shared source for this group only.
+    desired = [
+      ...new Set(
+        [sharedSkillsDir, path.join(groupDir, 'skills')].flatMap((directory) =>
+          fs.existsSync(directory)
+            ? fs
+                .readdirSync(directory, { withFileTypes: true })
+                .filter((entry) => entry.isDirectory())
+                .map((entry) => entry.name)
+            : [],
+        ),
+      ),
+    ];
   } else {
     desired = containerConfig.skills;
   }
 
-  const desiredSet = new Set(desired);
+  const resolved = new Map(
+    desired.flatMap((skill) => {
+      const source = resolveSkillSource(groupDir, sharedSkillsDir, skill);
+      return source ? [[skill, source.containerDir] as const] : [];
+    }),
+  );
+  const desiredSet = new Set(resolved.keys());
 
   // Remove symlinks not in the desired set
   for (const entry of fs.readdirSync(skillsDir)) {
@@ -587,18 +796,21 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 
   // Create symlinks for desired skills (container path targets)
-  for (const skill of desired) {
+  for (const [skill, target] of resolved) {
     const linkPath = path.join(skillsDir, skill);
-    let exists = false;
+    let currentTarget: string | null = null;
     try {
-      fs.lstatSync(linkPath);
-      exists = true;
+      currentTarget = fs.readlinkSync(linkPath);
     } catch {
       /* missing */
     }
-    if (!exists) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+    if (currentTarget === target) continue;
+    try {
+      fs.unlinkSync(linkPath);
+    } catch {
+      /* missing */
     }
+    fs.symlinkSync(target, linkPath);
   }
 }
 
@@ -815,6 +1027,10 @@ export async function buildContainerArgs(
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
+  // OCI runtime override (ADR-0058): per-group ociRuntime > host env
+  // CONTAINER_OCI_RUNTIME > engine default. gVisor/Kata by config alone.
+  args.push(...ociRuntimeArgs(containerConfig.ociRuntime));
+
   // Resource limits (multi-tenant safety net). Fields are opt-in in
   // container.json; when missing, Docker defaults to unlimited.
   const resources = containerConfig.resources;
@@ -838,6 +1054,11 @@ export async function buildContainerArgs(
   // signing-header prefix the host uses. Defaults to `agentdesk` in the
   // runner if unset.
   args.push('-e', `BRAND_NAMESPACE=${PLATFORM_PROTOCOL_NAMESPACE}`);
+  // Host DB overrides (session/group) are more specific than container.json.
+  // Pass the already-resolved Execution provider into the runner so runtime
+  // provider creation follows the same precedence as host credential/mount
+  // assembly. This is host-owned internal state, not operator configuration.
+  args.push('-e', `AGENTDESK_EXECUTION_PROVIDER=${provider}`);
 
   // Operator-declared per-group env from container.json (`env: {KEY: VALUE}`).
   // Documented as "passed verbatim via docker run -e" but previously never
@@ -870,11 +1091,23 @@ export async function buildContainerArgs(
   injectTraceContext(traceCarrier);
   args.push(...buildRunnerTracingEnvArgs(traceCarrier, process.env));
 
+  // A model is the only provider-owned setting that a group may override.
+  // Keep credentials, relay endpoints, proxy/vault flags, and every other
+  // provider contribution intact (ADR-0080).
+  const modelEnvKey = provider === 'openai' || provider === 'codex' ? 'OPENAI_MODEL' : undefined;
+  const providerEnv = { ...providerContribution.env };
+  if (containerConfig.providerModel && modelEnvKey) {
+    providerEnv[modelEnvKey] = containerConfig.providerModel;
+  } else if (containerConfig.providerModel && !modelEnvKey) {
+    log.warn('Ignoring providerModel for provider without a model override mapping', {
+      provider,
+      containerName,
+    });
+  }
+
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
-  if (providerContribution.env) {
-    for (const [key, value] of Object.entries(providerContribution.env)) {
-      args.push('-e', `${key}=${value}`);
-    }
+  for (const [key, value] of Object.entries(providerEnv)) {
+    args.push('-e', `${key}=${value}`);
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
@@ -884,11 +1117,16 @@ export async function buildContainerArgs(
   // is on, openai/codex ALSO route through the vault (their key is withheld
   // from the container), so they take the apply path too. mock is always
   // offline and always skips.
-  const openaiViaVault = routeOpenAiThroughVault(provider, openaiViaOneCliEnabled());
-  if ((provider === 'openai' || provider === 'codex' || provider === 'mock') && !openaiViaVault) {
+  const roleProviders = [
+    provider,
+    ...(containerConfig.llm?.routing?.enabled ? [containerConfig.llm.routing.provider] : []),
+  ];
+  const vaultEnabled = openaiViaOneCliEnabled();
+  const openaiViaVault = roleProviders.some((name) => routeOpenAiThroughVault(name, vaultEnabled));
+  if (!shouldApplyOneCliGateway(roleProviders, vaultEnabled)) {
     log.info('Skipping OneCLI gateway for direct-credential provider', {
       containerName,
-      provider,
+      provider: roleProviders.join(','),
     });
   } else {
     // Treated as a transient hard failure: if we can't wire the gateway, we
@@ -1097,12 +1335,30 @@ export function findInjectedEnvValue(args: string[], key: string): string | unde
 
 /**
  * Should this provider's traffic route through the OneCLI vault for credential
- * injection instead of getting the key directly (ADR-0035)? Only openai/codex,
- * and only when the operator opted in. Pure + exported for testing. `mock` is
- * always offline and never routes.
+ * injection instead of getting the key directly (ADR-0035)? Applies to the
+ * OpenAI-compatible aliases (`openai`, `codex`, `opencode-go`) only when the
+ * operator opted in. `mock` is always offline and never routes.
  */
 export function routeOpenAiThroughVault(provider: string, enabled: boolean): boolean {
-  return enabled && (provider === 'openai' || provider === 'codex');
+  return enabled && isOpenAiCompatibleProvider(provider);
+}
+
+function isOpenAiCompatibleProvider(provider: string): boolean {
+  const normalized = provider.toLowerCase();
+  return normalized === 'openai' || normalized === 'codex' || normalized === 'opencode-go';
+}
+
+/**
+ * OneCLI is a container-wide network/auth layer, so the decision must include
+ * every configured LLM role rather than only the Execution provider.
+ */
+export function shouldApplyOneCliGateway(providers: string[], openaiViaVault: boolean): boolean {
+  return providers.some((provider) => {
+    const normalized = provider.toLowerCase();
+    if (normalized === 'mock') return false;
+    if (isOpenAiCompatibleProvider(normalized)) return openaiViaVault;
+    return true;
+  });
 }
 
 export function buildSecurityArgs(env: NodeJS.ProcessEnv): string[] {

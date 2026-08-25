@@ -172,3 +172,34 @@ export function findQuestionResponse(questionId: string): MessageInRow | undefin
   }
 }
 
+/**
+ * Find a Host-owned Gateway confirmation response.
+ *
+ * This uses JSON extraction rather than a LIKE pattern so an arbitrary cell or
+ * chat value cannot impersonate the response wire by embedding a matching
+ * substring. The response itself is a host-written system row; the container
+ * only acknowledges it in outbound.db after consuming it.
+ */
+export function findGatewayConfirmationResponse(confirmationId: string): MessageInRow | undefined {
+  const inbound = openInboundDb();
+  const outbound = getOutboundDb();
+
+  try {
+    const response = inbound
+      .prepare(
+        `SELECT * FROM messages_in
+         WHERE status = 'pending'
+           AND kind = 'system'
+           AND json_extract(content, '$.type') = 'gateway_confirmation_response'
+           AND json_extract(content, '$.confirmationId') = ?
+         ORDER BY seq ASC, timestamp ASC, id ASC
+         LIMIT 1`,
+      )
+      .get(confirmationId) as MessageInRow | undefined;
+    if (!response) return undefined;
+    const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
+    return acked ? undefined : response;
+  } finally {
+    inbound.close();
+  }
+}

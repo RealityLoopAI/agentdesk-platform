@@ -33,6 +33,20 @@ export interface DeliveryAddress {
 }
 
 /**
+ * External identity verified by a channel adapter (ADR-0061).
+ *
+ * This metadata lives on the Host envelope, outside `message.content`, so it
+ * is not exposed to the Agent as prompt data. Only adapter/server code may
+ * construct it; browser or chat message text must never be copied into it.
+ */
+export interface TrustedChannelIdentity {
+  provider: string;
+  providerScope: string;
+  identifierType: string;
+  externalSubject: string;
+}
+
+/**
  * Full inbound event handed to the router.
  *
  * `channelType` + `platformId` + `threadId` identify which messaging group /
@@ -46,6 +60,21 @@ export interface InboundEvent {
   channelType: string;
   platformId: string;
   threadId: string | null;
+  /**
+   * Host-verified structural conversation key (ADR-0062).
+   *
+   * Only an authenticated server-side adapter may set this field. Browser
+   * payloads and chat message content must never be copied into it.
+   */
+  conversationLaneId?: string;
+  /**
+   * Canonical user established by an authenticated Host-side surface.
+   *
+   * Web SSO uses this instead of copying a user id from browser JSON into
+   * Agent-visible message content. Native chat adapters should use
+   * `senderIdentity` so the Host can resolve their provider subject.
+   */
+  authenticatedUserId?: string;
   message: {
     id: string;
     kind: 'chat' | 'chat-sdk';
@@ -59,6 +88,8 @@ export interface InboundEvent {
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
   };
+  /** Provider-confirmed sender identity; never derived from message text. */
+  senderIdentity?: TrustedChannelIdentity;
   replyTo?: DeliveryAddress;
 }
 
@@ -85,6 +116,8 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /** Provider-confirmed sender identity; never derived from message text. */
+  senderIdentity?: TrustedChannelIdentity;
 }
 
 /** A file attachment to deliver alongside a message. */
@@ -98,6 +131,17 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /**
+   * Host-attested reference to the already-persisted outbound row. Adapters
+   * may use this for durable notification/idempotency, but never as a source
+   * of user identity or authorization.
+   */
+  source?: {
+    messageId: string;
+    sessionId: string;
+    /** Stable original outbound identity for a cross-channel mirror. */
+    originId?: string;
+  };
 }
 
 /** Discovered conversation info (from syncConversations). */

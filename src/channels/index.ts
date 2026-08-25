@@ -18,3 +18,4 @@
 
 import './cli.js';
 import './feishu.js';
+import './web.js';

@@ -79,4 +79,36 @@ describe('card builders normalize markdown content', () => {
     expect(content).toBe('first?\nsecond?');
     expect(content).not.toContain('\\n');
   });
+
+  it('builds JSON 2.0 root buttons with callback behaviors, without a legacy action container', () => {
+    const card = buildFeishuAskQuestionCardWithPayloads({
+      title: 'Confirm',
+      questionId: 'q-confirm',
+      question: 'Apply this change?',
+      options: [{ label: 'Approve', value: 'approve', selectedLabel: 'Approved' }],
+      expectedUserId: 'ou-requester',
+    });
+    const body = card.body as {
+      elements: Array<{
+        tag: string;
+        value?: unknown;
+        behaviors?: Array<{ type: string; value: unknown }>;
+      }>;
+    };
+    expect(body.elements.some((element) => element.tag === 'action')).toBe(false);
+    const button = body.elements.find((element) => element.tag === 'button');
+    expect(button?.value).toBeUndefined();
+    expect(button?.behaviors).toEqual([
+      {
+        type: 'callback',
+        value: {
+          kind: 'card.ask_question',
+          questionId: 'q-confirm',
+          selectedOption: 'approve',
+          selectedLabel: 'Approved',
+          expectedUserId: 'ou-requester',
+        },
+      },
+    ]);
+  });
 });

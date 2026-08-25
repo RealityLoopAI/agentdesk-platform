@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+
 import { describe, expect, it } from 'bun:test';
 
 import { buildMcpChildEnv, buildMcpServersConfig, MCP_CHILD_ENV_KEYS } from './mcp-child-env.js';
@@ -60,5 +62,16 @@ describe('buildMcpServersConfig', () => {
     });
     expect(Object.keys(servers).sort()).toEqual(['agentdesk', 'custom']);
     expect(servers['custom']).toEqual({ command: 'node', args: ['x.js'], env: { FOO: 'bar' } });
+  });
+});
+
+describe('built-in MCP process bootstrap', () => {
+  it('loads the mounted runner config before starting the tool server', () => {
+    const source = fs.readFileSync(new URL('./mcp-tools/index.ts', import.meta.url), 'utf8');
+    const loadIndex = source.indexOf('loadConfig();');
+    const startIndex = source.indexOf('startMcpServer().catch');
+
+    expect(loadIndex).toBeGreaterThan(-1);
+    expect(startIndex).toBeGreaterThan(loadIndex);
   });
 });

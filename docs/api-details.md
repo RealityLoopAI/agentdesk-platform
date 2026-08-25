@@ -54,6 +54,11 @@ interface InboundMessage {
 interface OutboundMessage {
   kind: 'chat' | 'chat-sdk';
   content: unknown;       // JSON blob — matches the kind
+  files?: OutboundFile[];
+  source?: {
+    messageId: string;    // Host-attested persisted messages_out id
+    sessionId: string;    // Host-attested source Session; not user identity
+  };
 }
 ```
 
@@ -307,7 +312,7 @@ function createWhatsAppChannel(): ChannelAdapter {
 **Ask user question:**
 ```json
 {
-  "operation": "ask_question",
+  "type": "ask_question",
   "questionId": "q-123",
   "title": "Failing Test",
   "question": "How should we handle the failing test?",
@@ -318,6 +323,53 @@ function createWhatsAppChannel(): ChannelAdapter {
   ]
 }
 ```
+
+### Web history read-only question presentation
+
+`GET /api/conversations/:laneId/messages` keeps `text` as the backward-compatible
+message fallback. When an outbound row is a valid standard `ask_question`, the
+Host additionally returns an allowlisted, presentation-only projection:
+
+```json
+{
+  "id": "q-123",
+  "direction": "agent",
+  "kind": "chat-sdk",
+  "text": "How should we handle the failing test?",
+  "channel": {
+    "type": "feishu",
+    "platformId": "feishu:p2p:ou_example",
+    "threadId": null
+  },
+  "status": "delivered",
+  "presentation": {
+    "type": "ask-question",
+    "mode": "read-only",
+    "title": "Failing Test",
+    "question": "How should we handle the failing test?",
+    "options": [
+      { "label": "Skip it", "selected": false },
+      { "label": "Fix and retry", "selected": true },
+      { "label": "Abort deployment", "selected": false }
+    ],
+    "state": "answered",
+    "selectedLabel": "✅ Fixing",
+    "responseChannel": "feishu"
+  }
+}
+```
+
+The optional presentation never contains option values, callback payloads,
+response-user identifiers, or arbitrary Agent fields. Valid states are
+`awaiting-external-response`, `answered`, `cancelled`, and `closed`. Unknown or
+malformed structured messages do not become Web components and retain a safe
+human-readable `text` fallback.
+
+This projection is deliberately non-interactive. There is no generic Web
+question-answer endpoint: the originating channel remains responsible for
+answering the question. A Host-persisted external response appends the existing
+`conversation.message.available` event so an open Web conversation reloads the
+same message and updates its display state.
 
 **Edit message:**
 ```json

@@ -1,0 +1,9 @@
+{
+  "id": "xiaohuan-bitable-bridge",
+  "kind": "channel",
+  "name": "Xiaohuan Experiment to Bitable Bridge",
+  "channelType": "xiaohuan-bitable",
+  "capabilities": ["text"],
+  "minHostVersion": "^2.0.0",
+  "entry": "./index.js"
+}

@@ -1,5 +1,14 @@
 // ── Central DB entities ──
 
+/**
+ * Topology role of an agent group (ADR-0056). 'frontdesk' = channel-facing
+ * desk that classifies and delegates; 'worker' = delegated specialist behind
+ * the desk. Modeled as data because the concept used to live in four
+ * uncorrelated conventions (folder name, llm.routing.enabled,
+ * agent_destinations rows, a script-local type) that nothing could validate.
+ */
+export type AgentGroupRole = 'frontdesk' | 'worker';
+
 export interface AgentGroup {
   id: string;
   name: string;
@@ -11,6 +20,12 @@ export interface AgentGroup {
   // carrier of org on the workload side — sessions/messaging_groups/audit derive org
   // by JOIN through their (immutable) agent_group_id.
   organization_id: string | null;
+  // Topology role (ADR-0056). NULL = unclassified — pre-migration rows and
+  // standalone agents that are neither desk nor worker. Read points treat
+  // NULL as legacy-permitted. REQUIRED (not optional) so every construction
+  // site declares its intent explicitly — same treatment as organization_id;
+  // createAgentGroup keeps it optional-defaulting-NULL at the call site.
+  role: AgentGroupRole | null;
 }
 
 export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'public';
@@ -38,16 +53,82 @@ export interface MessagingGroup {
 // ── Identity & privilege ──
 
 /**
- * User = a messaging-platform identifier. Namespaced so distinct channels
- * with numeric IDs don't collide: "phone:+1555...", "tg:123", "discord:456",
- * "email:a@x.com". A single human with a phone AND a telegram handle has
- * two separate users — no cross-channel linking (yet).
+ * Canonical platform user (ADR-0061).
+ *
+ * Legacy installations commonly use a namespaced channel handle such as
+ * `feishu:ou_...` as the id. That remains supported so existing roles,
+ * memberships, sessions and audit references never need a risky rewrite.
+ * `UserIdentity` maps one or more provider-verified external subjects onto
+ * this canonical authorization subject.
  */
 export interface User {
   id: string;
   kind: string; // 'phone' | 'email' | 'discord' | 'telegram' | 'matrix' | ...
   display_name: string | null;
   created_at: string;
+}
+
+/** A provider-verified external login or channel identity (ADR-0061). */
+export interface UserIdentity {
+  id: string;
+  user_id: string;
+  provider: string;
+  provider_scope: string;
+  identifier_type: string;
+  external_subject: string;
+  verified_at: string;
+  created_at: string;
+  last_seen_at: string;
+}
+
+/** Server-side Web login session; browser tokens are stored only as hashes. */
+export interface WebAuthSession {
+  id_hash: string;
+  user_id: string;
+  csrf_hash: string;
+  created_at: string;
+  last_seen_at: string;
+  idle_expires_at: string;
+  absolute_expires_at: string;
+  revoked_at: string | null;
+  auth_context_hash: string | null;
+}
+
+/** One-time Feishu OAuth state transaction. */
+export interface WebAuthTransaction {
+  state_hash: string;
+  browser_nonce_hash: string;
+  pkce_verifier_ciphertext: string | null;
+  redirect_uri: string;
+  created_at: string;
+  expires_at: string;
+  used_at: string | null;
+  authorization_code_hash: string | null;
+}
+
+export interface ConversationLane {
+  id: string;
+  agent_group_id: string;
+  owner_user_id: string;
+  root_session_id: string | null;
+  status: 'active' | 'archived';
+  created_at: string;
+  archived_at: string | null;
+}
+
+export type ConversationDeliveryMode = 'history-only' | 'source-reply' | 'mirror-dm';
+
+export interface ConversationBinding {
+  id: string;
+  lane_id: string;
+  channel_type: string;
+  messaging_group_id: string | null;
+  platform_id: string;
+  thread_id: string | null;
+  external_identity_id: string | null;
+  delivery_mode: ConversationDeliveryMode;
+  verified_at: string;
+  revoked_at: string | null;
 }
 
 export type UserRoleKind = 'owner' | 'admin' | 'org-admin' | 'operator' | 'viewer';
@@ -178,6 +259,12 @@ export interface Session {
    * input. NULL on pre-migration sessions and before a thread is minted.
    */
   conversation_thread_id?: string | null;
+  /**
+   * Structural cross-channel owner lane (ADR-0062). Unlike
+   * conversation_thread_id, this field is allowed in routing lookups after
+   * lane ownership and Agent Group access are checked.
+   */
+  conversation_lane_id?: string | null;
   agent_provider: string | null;
   /**
    * Lifecycle state for the session:
@@ -279,6 +366,28 @@ export interface PendingApproval {
   status: 'pending' | 'approved' | 'rejected' | 'expired';
   title: string;
   options_json: string;
+}
+
+export interface PendingGatewayConfirmation {
+  confirmation_id: string;
+  session_id: string;
+  message_out_id: string;
+  kind: 'update' | 'create' | 'delete';
+  requester_user_id: string;
+  agent_group_id: string;
+  conversation_lane_id: string | null;
+  channel_type: string;
+  platform_id: string;
+  thread_id: string | null;
+  confirmation_request: string | null;
+  display_json: string;
+  title: string;
+  options_json: string;
+  created_at: string;
+  expires_at: string;
+  status: 'pending' | 'issuing' | 'approved' | 'rejected' | 'expired' | 'failed';
+  resolved_at: string | null;
+  error_code: string | null;
 }
 
 // ── Agent destinations (central DB) ──

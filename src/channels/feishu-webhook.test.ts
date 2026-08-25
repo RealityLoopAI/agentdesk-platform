@@ -47,7 +47,8 @@ vi.mock('../webhook-server.js', () => ({
 }));
 
 // In-memory central DB so markInboundSeen (real dedup) has a table to write.
-import { initTestDb, closeDb, runMigrations } from '../db/index.js';
+import { initTestDb, closeDb, getDb, runMigrations } from '../db/index.js';
+import { crossChannelLoopSuppressedTotal } from '../metrics.js';
 
 const ENCRYPT_KEY = 'unit_test_encrypt_key';
 const VERIFICATION_TOKEN = 'verif_token_xyz';
@@ -178,12 +179,23 @@ function makeSetup(): ChannelSetup & {
   };
 }
 
-function messageEvent(overrides: { messageId?: string; text?: string; chatId?: string; openId?: string } = {}) {
+function messageEvent(
+  overrides: {
+    messageId?: string;
+    text?: string;
+    chatId?: string;
+    openId?: string;
+    senderType?: string;
+  } = {},
+) {
   return {
     schema: '2.0',
     header: { event_type: 'im.message.receive_v1', token: VERIFICATION_TOKEN },
     event: {
-      sender: { sender_id: { open_id: overrides.openId ?? 'ou_sender_1' } },
+      sender: {
+        sender_type: overrides.senderType,
+        sender_id: { open_id: overrides.openId ?? 'ou_sender_1' },
+      },
       message: {
         message_id: overrides.messageId ?? 'om_msg_1',
         chat_id: overrides.chatId ?? 'oc_chat_1',
@@ -318,6 +330,12 @@ describe('③ webhook handler dispatch (real handleWebhook end-to-end)', () => {
     const content = got.message.content as Record<string, unknown>;
     expect(content.text).toBe('hi there');
     expect(content.senderId).toBe('ou_alice');
+    expect(got.message.senderIdentity).toEqual({
+      provider: 'feishu',
+      providerScope: 'cli_app',
+      identifierType: 'open_id',
+      externalSubject: 'ou_alice',
+    });
     expect(got.message.isGroup).toBe(true);
     expect(got.message.id).toBe('om_a');
   });
@@ -347,6 +365,48 @@ describe('③ webhook handler dispatch (real handleWebhook end-to-end)', () => {
     expect(r1.statusCode).toBe(200);
     expect(r2.statusCode).toBe(200); // dedup is silent — still a 200 to Feishu
     expect(setup.inbound).toHaveLength(1);
+  });
+
+  it('suppresses app-authored messages before ingress and records a loop-prevention audit', async () => {
+    const metricBefore =
+      (await crossChannelLoopSuppressedTotal.get()).values.find((value) => value.labels.reason === 'sender_type_app')
+        ?.value ?? 0;
+    const { setup, handler } = await setupAdapter();
+    const inner = messageEvent({
+      messageId: 'om_bot_echo',
+      openId: 'ou_bot',
+      senderType: 'app',
+    });
+    const body = JSON.stringify({ encrypt: encryptEnvelope(ENCRYPT_KEY, inner) });
+
+    const res = fakeRes();
+    await handler(fakeReq({ body }) as never, res as never);
+    const duplicateRes = fakeRes();
+    await handler(fakeReq({ body }) as never, duplicateRes as never);
+
+    expect(res.statusCode).toBe(200);
+    expect(duplicateRes.statusCode).toBe(200);
+    expect(setup.inbound).toHaveLength(0);
+    const audits = getDb()
+      .prepare(
+        `SELECT event_type, actor, details
+           FROM enterprise_audit
+          WHERE event_type = 'cross_channel_loop_suppressed'`,
+      )
+      .all() as Array<{ event_type: string; actor: string; details: string }>;
+    expect(audits).toHaveLength(1);
+    const audit = audits[0]!;
+    expect(audit.event_type).toBe('cross_channel_loop_suppressed');
+    expect(audit.actor).toBe('ou_bot');
+    expect(JSON.parse(audit.details)).toMatchObject({
+      channelType: 'feishu',
+      providerScope: 'cli_app',
+      reason: 'sender_type_app',
+    });
+    expect(
+      (await crossChannelLoopSuppressedTotal.get()).values.find((value) => value.labels.reason === 'sender_type_app')
+        ?.value,
+    ).toBe(metricBefore + 1);
   });
 
   it('rejects an event whose verification token does not match with 403', async () => {
@@ -497,6 +557,114 @@ describe('⑤ deliver branches route to the right Feishu API path + body shape',
     expect(body.msg_type).toBe('text');
     expect(body.receive_id).toBe('ou_x');
     expect(JSON.parse(body.content as string)).toEqual({ text: 'plain hi' });
+  });
+
+  it('Markdown text → POST /im/v1/messages as an interactive Markdown card', async () => {
+    const { calls } = installCapturingFetch();
+    const adapter = await setupAdapter();
+    const markdown = '# Experiment report\n\n- **Status:** ready';
+    await adapter.deliver('feishu:p2p:ou_x', null, {
+      kind: 'chat',
+      content: { text: markdown },
+    });
+
+    const send = calls.find((c) => c.url.includes('/im/v1/messages'));
+    expect(send).toBeDefined();
+    const body = send!.body as Record<string, unknown>;
+    expect(body.msg_type).toBe('interactive');
+    const card = JSON.parse(body.content as string) as {
+      schema: string;
+      body: { elements: unknown[] };
+    };
+    expect(card.schema).toBe('2.0');
+    expect(card.body.elements).toContainEqual({ tag: 'markdown', content: markdown });
+  });
+
+  it('an explicit markdown field uses an interactive card without syntax markers', async () => {
+    const { calls } = installCapturingFetch();
+    const adapter = await setupAdapter();
+    await adapter.deliver('feishu:p2p:ou_x', null, {
+      kind: 'chat',
+      content: { markdown: 'render this' },
+    });
+
+    const send = calls.find((c) => c.url.includes('/im/v1/messages'));
+    expect(send).toBeDefined();
+    const body = send!.body as Record<string, unknown>;
+    expect(body.msg_type).toBe('interactive');
+    const card = JSON.parse(body.content as string) as {
+      body: { elements: unknown[] };
+    };
+    expect(card.body.elements).toContainEqual({ tag: 'markdown', content: 'render this' });
+  });
+
+  it('falls back to msg_type=text when Feishu rejects a Markdown card', async () => {
+    const sends: Array<Record<string, unknown>> = [];
+    const sendUrls: string[] = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/auth/v3/tenant_access_token/internal')) {
+        return new Response(JSON.stringify({ code: 0, tenant_access_token: 'tok', expire: 7200 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      sends.push(body);
+      sendUrls.push(u);
+      const response =
+        sends.length === 1 ? { code: 230099, msg: 'invalid card' } : { code: 0, data: { message_id: 'om_fallback' } };
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const adapter = await setupAdapter();
+    const markdown = '**Report:** ready';
+    await expect(
+      adapter.deliver('feishu:p2p:ou_x', null, {
+        kind: 'chat',
+        content: { text: markdown },
+        source: {
+          messageId: 'xcd-markdown-fallback',
+          sessionId: 'session-1',
+          originId: 'xco-origin',
+        },
+      }),
+    ).resolves.toBe('om_fallback');
+
+    expect(sends.map((body) => body.msg_type)).toEqual(['interactive', 'text']);
+    expect(JSON.parse(sends[1]!.content as string)).toEqual({ text: markdown });
+    const requestUuids = sendUrls.map((url) => new URL(url).searchParams.get('uuid'));
+    expect(requestUuids[0]).toBeTruthy();
+    expect(requestUuids[1]).toBeTruthy();
+    expect(requestUuids[0]).not.toBe(requestUuids[1]);
+  });
+
+  it('cross-channel mirror retries reuse a stable Feishu uuid no longer than 50 characters', async () => {
+    const { calls } = installCapturingFetch();
+    const adapter = await setupAdapter();
+    const mirroredMessage = {
+      kind: 'chat',
+      content: { text: 'mirrored reply' },
+      source: {
+        messageId: 'xcd-stable-delivery',
+        sessionId: 'session-1',
+        originId: 'xco-stable-origin',
+      },
+    };
+
+    await adapter.deliver('feishu:p2p:ou_x', null, mirroredMessage);
+    await adapter.deliver('feishu:p2p:ou_x', null, mirroredMessage);
+
+    const sends = calls.filter((call) => call.url.includes('/im/v1/messages'));
+    expect(sends).toHaveLength(2);
+    const uuids = sends.map((send) => new URL(send.url).searchParams.get('uuid'));
+    expect(uuids[0]).toBeTruthy();
+    expect(uuids[0]).toBe(uuids[1]);
+    expect(uuids[0]!.length).toBeLessThanOrEqual(50);
   });
 
   it('card (type=card) → POST /im/v1/messages with msg_type=interactive', async () => {

@@ -13,7 +13,12 @@ import type Database from 'better-sqlite3';
 
 import { registerDeliveryAction } from '../../delivery.js';
 import { recordGatewayAudit, type GatewayAuditEntry } from '../../db/gateway-audit.js';
+import {
+  normalizeFeishuBitableAuditOperation,
+  validateGatewayLogicalResourceForOperation,
+} from '../../gateway-audit-resource.js';
 import { log } from '../../log.js';
+import { feishuBitableOperationsTotal } from '../../metrics.js';
 import { resolveTrustedActor } from '../../trusted-actor.js';
 import type { Session } from '../../types.js';
 
@@ -47,6 +52,7 @@ async function handleGatewayAudit(
     return;
   }
 
+  const operation = readString(content, 'operation') ?? null;
   const entry: GatewayAuditEntry = {
     sessionId: session.id,
     agentGroupId: session.agent_group_id,
@@ -56,7 +62,8 @@ async function handleGatewayAudit(
     // resolveTrustedActor + ADR-0046.
     userId: resolveTrustedActor('gateway_audit', session, readString(content, 'userId') ?? null, inDb),
     path,
-    operation: readString(content, 'operation') ?? null,
+    operation,
+    logicalResource: validateGatewayLogicalResourceForOperation(operation, content.logicalResource),
     requesterSource,
     status: toStatus(content.status),
     httpStatus: readNumber(content, 'httpStatus') ?? null,
@@ -70,6 +77,17 @@ async function handleGatewayAudit(
     recordGatewayAudit(entry);
   } catch (err) {
     log.error('gateway_audit row write failed', { sessionId: session.id, err });
+  } finally {
+    const bitableOperation = normalizeFeishuBitableAuditOperation(operation);
+    if (bitableOperation) {
+      const outcome =
+        entry.httpStatus === 429 || entry.errorMsg?.startsWith('[RATE_LIMITED]') ? 'rate_limited' : entry.status;
+      try {
+        feishuBitableOperationsTotal.labels(bitableOperation, outcome).inc();
+      } catch {
+        // Metrics are read-only observability and must never affect delivery.
+      }
+    }
   }
 }
 

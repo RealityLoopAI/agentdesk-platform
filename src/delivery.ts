@@ -18,9 +18,11 @@ import {
   getDueOutboundMessages,
   getUndeliverableIds,
   getDeliveryAttempts,
+  getInboundReplyRoute,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
+  type OutboundMessage,
 } from './db/session-db.js';
 import {
   DELIVERY_BACKOFF_SCHEDULE_SEC,
@@ -67,6 +69,18 @@ import { withSpan } from './observability/with-span.js';
 import { getActiveSpan } from './observability/tracer.js';
 import { clearSessionSpanContext, getSessionSpanContext, endSessionRootSpan } from './observability/context-bridge.js';
 import { setSpanContextWithActive, context } from './observability/trace-context.js';
+import { getConversationLane } from './db/conversation-lanes.js';
+import { appendWebEvent } from './db/web-events.js';
+import {
+  listActiveDeliverySubscriptions,
+  listDueCrossChannelDeliveries,
+  markCrossChannelDeliveryDelivered,
+  markCrossChannelDeliveryRetry,
+  reserveCrossChannelDelivery,
+  suppressCrossChannelDelivery,
+  validateCrossChannelDeliveryTarget,
+  type CrossChannelDelivery,
+} from './db/delivery-subscriptions.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -115,6 +129,209 @@ function withDeliveryTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * second caller skips will be picked up on the next poll tick (~1s).
  */
 const inflightDeliveries = new Set<string>();
+
+/**
+ * A Lane can receive alternating Web and Feishu turns while retaining one
+ * root Session. For user-facing replies, the Host-written inbound row named
+ * by in_reply_to is the authority for this Turn's destination. This prevents
+ * a stale sessions.messaging_group_id (or container-supplied address) from
+ * sending a private Web turn into a Feishu group.
+ */
+function routeLaneReplyFromInbound(
+  session: Session,
+  inDb: Database.Database,
+  message: OutboundMessage,
+): OutboundMessage {
+  if (
+    !session.conversation_lane_id ||
+    message.kind === 'system' ||
+    message.kind === 'roster' ||
+    message.channel_type === 'agent'
+  ) {
+    return message;
+  }
+  const source = getInboundReplyRoute(inDb, message.in_reply_to);
+  if (!source) {
+    throw new Error('conversation Lane reply is missing a trusted inbound source');
+  }
+  if (!session.owner_user_id || source.origin_user_id !== session.owner_user_id) {
+    throw new Error('conversation Lane reply source owner mismatch');
+  }
+  return {
+    ...message,
+    channel_type: source.channel_type,
+    platform_id: source.platform_id,
+    thread_id: source.thread_id,
+  };
+}
+
+/**
+ * Make every successfully delivered Lane reply visible to the browser. The
+ * event stores only a durable outbound-row reference; message text remains in
+ * the per-Session DB pair. Web Adapter delivery may have already appended the
+ * same event, and the unique resource key makes that path idempotent.
+ */
+function publishLaneReplyAvailable(session: Session, message: OutboundMessage): void {
+  if (
+    !session.conversation_lane_id ||
+    message.kind === 'system' ||
+    message.kind === 'roster' ||
+    message.channel_type === 'agent'
+  ) {
+    return;
+  }
+  const lane = getConversationLane(session.conversation_lane_id);
+  if (
+    !lane ||
+    lane.status !== 'active' ||
+    lane.root_session_id !== session.id ||
+    lane.owner_user_id !== session.owner_user_id
+  ) {
+    throw new Error('conversation Lane is unavailable for Web history notification');
+  }
+  appendWebEvent({
+    userId: lane.owner_user_id,
+    laneId: lane.id,
+    eventType: 'conversation.message.available',
+    resourceId: message.id,
+  });
+}
+
+function eligibleWebReplyMirror(message: OutboundMessage): boolean {
+  if (message.channel_type !== 'web' || message.kind !== 'chat' || !message.content) return false;
+  try {
+    const content = JSON.parse(message.content) as Record<string, unknown>;
+    return (
+      typeof content.text === 'string' &&
+      content.text.trim().length > 0 &&
+      !content.operation &&
+      !content.type &&
+      (!Array.isArray(content.files) || content.files.length === 0)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reserve additional Feishu DM sends only after the primary Web reply has
+ * succeeded. A unique central row makes repeated Host drains converge on the
+ * same stable origin/delivery identifiers without copying message content.
+ */
+function reserveWebReplyMirrors(session: Session, message: OutboundMessage): void {
+  if (!session.conversation_lane_id || !eligibleWebReplyMirror(message)) return;
+  for (const subscription of listActiveDeliverySubscriptions(session.conversation_lane_id)) {
+    reserveCrossChannelDelivery({
+      subscription,
+      laneId: session.conversation_lane_id,
+      sessionId: session.id,
+      messageOutId: message.id,
+    });
+  }
+}
+
+function mirrorRetryAt(attempt: number): string {
+  const backoffSec =
+    DELIVERY_BACKOFF_SCHEDULE_SEC[Math.min(Math.max(0, attempt - 1), DELIVERY_BACKOFF_SCHEDULE_SEC.length - 1)]!;
+  return new Date(Date.now() + backoffSec * 1_000).toISOString();
+}
+
+async function deliverCrossChannelMirror(
+  session: Session,
+  inDb: Database.Database,
+  outboundById: Map<string, OutboundMessage>,
+  delivery: CrossChannelDelivery,
+): Promise<void> {
+  const sourceMessage = outboundById.get(delivery.message_out_id);
+  if (!sourceMessage) {
+    suppressCrossChannelDelivery({ id: delivery.id, reason: 'source_message_unavailable' });
+    return;
+  }
+
+  let trustedSource: OutboundMessage;
+  try {
+    trustedSource = routeLaneReplyFromInbound(session, inDb, sourceMessage);
+  } catch {
+    suppressCrossChannelDelivery({ id: delivery.id, reason: 'source_route_untrusted' });
+    return;
+  }
+  if (!eligibleWebReplyMirror(trustedSource)) {
+    suppressCrossChannelDelivery({ id: delivery.id, reason: 'source_not_eligible' });
+    return;
+  }
+  if (!validateCrossChannelDeliveryTarget(delivery)) {
+    suppressCrossChannelDelivery({ id: delivery.id, reason: 'subscription_unavailable' });
+    return;
+  }
+  if (!deliveryAdapter) {
+    const attempt = delivery.attempts + 1;
+    const permanent = attempt >= DELIVERY_MAX_ATTEMPTS;
+    markCrossChannelDeliveryRetry({
+      id: delivery.id,
+      nextRetryAt: permanent ? null : mirrorRetryAt(attempt),
+      permanent,
+      failureCode: 'adapter_unavailable',
+    });
+    return;
+  }
+
+  let outboundContent = trustedSource.content;
+  const parsed = JSON.parse(outboundContent) as Record<string, unknown>;
+  if (typeof parsed.text === 'string') {
+    outboundContent = JSON.stringify({ ...parsed, text: stripThinkTags(parsed.text) });
+  }
+  try {
+    const platformMessageId = await withDeliveryTimeout(
+      deliveryAdapter.deliver(
+        delivery.channel_type,
+        delivery.platform_id,
+        null,
+        trustedSource.kind,
+        outboundContent,
+        undefined,
+        {
+          messageId: delivery.id,
+          sessionId: session.id,
+          originId: delivery.origin_id,
+        },
+      ),
+      DELIVERY_TIMEOUT_MS,
+    );
+    markCrossChannelDeliveryDelivered(delivery.id, platformMessageId ?? null);
+    log.info('Cross-channel Agent reply mirrored', {
+      deliveryId: delivery.id,
+      originId: delivery.origin_id,
+      laneId: delivery.lane_id,
+      channelType: delivery.channel_type,
+    });
+  } catch (error) {
+    const attempt = delivery.attempts + 1;
+    const permanent = attempt >= DELIVERY_MAX_ATTEMPTS;
+    markCrossChannelDeliveryRetry({
+      id: delivery.id,
+      nextRetryAt: permanent ? null : mirrorRetryAt(attempt),
+      permanent,
+      failureCode: error instanceof DeliveryTimeoutError ? 'timeout' : 'delivery_error',
+    });
+    log.warn(permanent ? 'Cross-channel mirror failed permanently' : 'Cross-channel mirror retry scheduled', {
+      deliveryId: delivery.id,
+      laneId: delivery.lane_id,
+      attempt,
+      maxAttempts: DELIVERY_MAX_ATTEMPTS,
+      errorName: error instanceof Error ? error.name : 'unknown',
+    });
+  }
+}
+
+async function drainCrossChannelMirrors(
+  session: Session,
+  inDb: Database.Database,
+  outboundById: Map<string, OutboundMessage>,
+): Promise<void> {
+  for (const delivery of listDueCrossChannelDeliveries(session.id)) {
+    await deliverCrossChannelMirror(session, inDb, outboundById, delivery);
+  }
+}
 
 /**
  * Short-lived membership cache (ADR-0023 item 12). When ROSTER_VERIFY_MEMBERSHIP
@@ -166,6 +383,7 @@ export interface ChannelDeliveryAdapter {
     kind: string,
     content: string,
     files?: OutboundFile[],
+    source?: { messageId: string; sessionId: string; originId?: string },
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
   /**
@@ -312,21 +530,22 @@ async function drainSession(session: Session): Promise<void> {
     return; // DBs might not exist yet
   }
 
-  const allDue = getDueOutboundMessages(outDb);
-  if (allDue.length === 0) {
-    outDb.close();
-    inDb.close();
-    return;
-  }
-
   // Bring the delivered table up to schema BEFORE querying it — the
   // undeliverable filter reads the attempts / next_retry_at columns, which
   // pre-existing session DBs don't have yet.
   migrateDeliveredTable(inDb);
 
+  const allDue = getDueOutboundMessages(outDb);
+  const dueMirrors = listDueCrossChannelDeliveries(session.id);
+  if (allDue.length === 0 && dueMirrors.length === 0) {
+    outDb.close();
+    inDb.close();
+    return;
+  }
+
   const undeliverable = getUndeliverableIds(inDb, DELIVERY_MAX_ATTEMPTS);
   const undelivered = allDue.filter((m) => !undeliverable.has(m.id));
-  if (undelivered.length === 0) {
+  if (undelivered.length === 0 && dueMirrors.length === 0) {
     outDb.close();
     inDb.close();
     return;
@@ -335,9 +554,12 @@ async function drainSession(session: Session): Promise<void> {
   const drainFn = async () => {
     let handledOutbound = false;
     let lastDeliveredText: string | undefined;
+    const outboundById = new Map(allDue.map((message) => [message.id, message]));
 
     try {
       for (const msg of undelivered) {
+        let deliveryMessage = msg;
+        let failureNoticeRouteTrusted = !session.conversation_lane_id;
         try {
           if (msg.kind === 'llm-usage') {
             const drainSpan = getActiveSpan();
@@ -346,8 +568,32 @@ async function drainSession(session: Session): Promise<void> {
             handledOutbound = true;
             continue;
           }
-          const platformMsgId = await deliverMessage(msg, session, inDb);
+          deliveryMessage = routeLaneReplyFromInbound(session, inDb, msg);
+          failureNoticeRouteTrusted = true;
+          const platformMsgId = await deliverMessage(deliveryMessage, session, inDb);
           markDelivered(inDb, msg.id, platformMsgId ?? null);
+          try {
+            publishLaneReplyAvailable(session, deliveryMessage);
+          } catch (err) {
+            // The primary external delivery is already durable. Notification
+            // bookkeeping must never turn it back into an at-least-once retry.
+            log.error('Lane reply delivered but Web notification failed', {
+              messageId: msg.id,
+              sessionId: session.id,
+              err,
+            });
+          }
+          try {
+            reserveWebReplyMirrors(session, deliveryMessage);
+          } catch (err) {
+            // The primary reply is already durable. Subscription bookkeeping
+            // is an additional best-effort path and must not resend it.
+            log.error('Web reply delivered but mirror reservation failed', {
+              messageId: msg.id,
+              sessionId: session.id,
+              err,
+            });
+          }
           // Delete outbox attachment files only AFTER the delivered row is
           // durably recorded. The old order (clear inside deliverMessage,
           // before this markDelivered) meant a crash in between re-delivered
@@ -400,12 +646,17 @@ async function drainSession(session: Session): Promise<void> {
               // adapter that just failed. If the channel is fully down this also
               // fails — but for message-specific failures (too long / bad format)
               // a short text note still gets through. Never throws. (roadmap 6.1)
-              if (deliveryAdapter && msg.channel_type && msg.platform_id) {
+              if (
+                failureNoticeRouteTrusted &&
+                deliveryAdapter &&
+                deliveryMessage.channel_type &&
+                deliveryMessage.platform_id
+              ) {
                 try {
                   await deliveryAdapter.deliver(
-                    msg.channel_type,
-                    msg.platform_id,
-                    msg.thread_id,
+                    deliveryMessage.channel_type,
+                    deliveryMessage.platform_id,
+                    deliveryMessage.thread_id,
                     'chat',
                     JSON.stringify({
                       text: "⚠️ I couldn't deliver my last reply — it kept failing, so I stopped retrying. Please ask again.",
@@ -442,6 +693,7 @@ async function drainSession(session: Session): Promise<void> {
           break;
         }
       }
+      await drainCrossChannelMirrors(session, inDb, outboundById);
     } finally {
       outDb.close();
       inDb.close();
@@ -522,7 +774,10 @@ async function deliverMessage(
 
     // System actions — handle internally (schedule_task, cancel_task, etc.)
     if (msg.kind === 'system') {
-      await handleSystemAction(content, session, inDb);
+      await handleSystemAction(content, session, inDb, {
+        messageOutId: msg.id,
+        inReplyTo: msg.in_reply_to,
+      });
       return;
     }
 
@@ -746,6 +1001,7 @@ async function deliverMessage(
             msg.kind,
             outboundContent,
             files,
+            { messageId: msg.id, sessionId: session.id },
           ),
           DELIVERY_TIMEOUT_MS,
         );
@@ -1068,6 +1324,7 @@ async function deliverRosterMessage(
             msg.kind,
             outboundContent,
             undefined,
+            { messageId: msg.id, sessionId: session.id },
           ),
           DELIVERY_TIMEOUT_MS,
         );
@@ -1137,6 +1394,7 @@ export type DeliveryActionHandler = (
   content: Record<string, unknown>,
   session: Session,
   inDb: Database.Database,
+  context?: { messageOutId: string; inReplyTo: string | null },
 ) => Promise<void>;
 
 const actionHandlers = new Map<string, DeliveryActionHandler>();
@@ -1240,13 +1498,14 @@ async function handleSystemAction(
   content: Record<string, unknown>,
   session: Session,
   inDb: Database.Database,
+  deliveryContext: { messageOutId: string; inReplyTo: string | null },
 ): Promise<void> {
   const action = content.action as string;
   log.info('System action from agent', { sessionId: session.id, action });
 
   const registered = actionHandlers.get(action);
   if (registered) {
-    await registered(content, session, inDb);
+    await registered(content, session, inDb, deliveryContext);
     return;
   }
 

@@ -3,12 +3,8 @@ import crypto from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import type { BackendGatewayConfig, RunnerConfig } from '../config.js';
-import { closeSessionDb, getOutboundDb, initTestSessionDb } from '../db/connection.js';
-import {
-  clearRequestIdentity,
-  setRequestIdentity,
-  type RequestIdentity,
-} from '../request-context.js';
+import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../db/connection.js';
+import { clearRequestIdentity, setRequestIdentity, type RequestIdentity } from '../request-context.js';
 import {
   computeGatewaySignature,
   erpAuthorize,
@@ -34,6 +30,10 @@ import {
   describeResponseSchema,
   memorySearchResponseSchema,
 } from './gateway-contract.js';
+import {
+  clearGatewayConfirmationPreviewCache,
+  resolveGatewayConfirmationPreview,
+} from './gateway-confirmation-preview-cache.js';
 
 const runtime = {
   assistantName: 'Frontdesk',
@@ -56,17 +56,51 @@ function sessionIdentity(overrides: Partial<RequestIdentity> = {}): RequestIdent
 
 beforeEach(() => {
   globalThis.fetch = originalFetch;
+  clearGatewayConfirmationPreviewCache();
   initTestSessionDb();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  clearGatewayConfirmationPreviewCache();
   clearRequestIdentity();
   closeSessionDb();
 });
 
 function configuredRuntime(backendGateway?: BackendGatewayConfig) {
   return { ...runtime, backendGateway };
+}
+
+function seedProcessingInbound(params: {
+  id: string;
+  seq: number;
+  senderId?: string;
+  channelType?: string;
+  platformId?: string;
+  originUserId?: string | null;
+}): void {
+  const channelType = params.channelType ?? 'feishu';
+  const platformId = params.platformId ?? 'feishu:p2p:ou_host';
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in
+       (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, content, origin_user_id)
+       VALUES (?, ?, 'chat', ?, 'pending', 1, ?, ?, ?, ?)`,
+    )
+    .run(
+      params.id,
+      params.seq,
+      `2026-07-29T00:00:0${params.seq}Z`,
+      platformId,
+      channelType,
+      JSON.stringify(params.senderId ? { senderId: params.senderId } : {}),
+      params.originUserId ?? null,
+    );
+  getOutboundDb()
+    .prepare(
+      "INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, 'processing', '2026-07-29T00:00:00Z')",
+    )
+    .run(params.id);
 }
 
 describe('erp gateway mcp tools', () => {
@@ -113,6 +147,35 @@ describe('erp gateway mcp tools', () => {
     });
   });
 
+  it('makes exact discovered operation names prominent and forbids guessed variants', async () => {
+    setRequestIdentity(sessionIdentity());
+
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          operations: [
+            { name: 'feishu.bitable.field.list', description: 'List fields' },
+            { name: 'feishu.bitable.record.list', description: 'List records' },
+            { name: 'feishu.bitable.record.get', description: 'Get one record' },
+            { name: 'feishu.bitable.record.create', description: 'Create one record' },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch;
+
+    const result = await handleGatewayDescribe(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {});
+    const text = result.content[0]?.text ?? '';
+
+    expect(result.isError).toBeUndefined();
+    expect(text).toContain('EXACT_OPERATION_NAMES (4; copy one of these names verbatim');
+    expect(text).toContain('- feishu.bitable.field.list');
+    expect(text).toContain('- feishu.bitable.record.list');
+    expect(text).toContain('Do not invent singular/plural, schema/describe, query/filter');
+    expect(text.indexOf('EXACT_OPERATION_NAMES')).toBeLessThan(text.indexOf('"operations"'));
+    expect(text.lastIndexOf('EXACT_OPERATION_NAMES')).toBeGreaterThan(text.lastIndexOf('"operations"'));
+    expect(text).toContain('"description": "List fields"');
+  });
+
   it('propagates origin_user_id from an a2a-delegated worker session', async () => {
     // Worker session identity was resolved by poll-loop from the a2a
     // inbound row's origin_user_id (host-written, container can't forge).
@@ -141,6 +204,79 @@ describe('erp gateway mcp tools', () => {
     expect((body?.requester as Record<string, unknown>)?.platformId).toBe('ag-frontdesk');
   });
 
+  it('re-derives the trusted a2a origin from host-written inbound rows in the separate MCP process path', async () => {
+    // No setRequestIdentity(): this is the real built-in MCP child shape.
+    seedProcessingInbound({
+      id: 'msg-a2a-1',
+      seq: 1,
+      channelType: 'agent',
+      platformId: 'ag-frontdesk',
+      originUserId: 'feishu:ou_employee',
+    });
+
+    let body: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ allowed: true }), { status: 200 });
+    }) as typeof fetch;
+
+    const result = await handleGatewayAuthorize(
+      { ...runtime, agentGroupId: 'ag-worker', backendGateway: { baseUrl: 'https://erp-gateway.example' } },
+      {
+        operation: 'feishu.bitable.record.create',
+        userId: 'feishu:ou_attacker',
+        channelType: 'slack',
+      },
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(body?.requesterSource).toBe('session');
+    expect(body?.requester).toEqual({
+      userId: 'feishu:ou_employee',
+      channelType: 'agent',
+      platformId: 'ag-frontdesk',
+      threadId: null,
+    });
+  });
+
+  it('fails closed to agent-asserted when the processing marker has no host-written inbound row', async () => {
+    getOutboundDb()
+      .prepare(
+        "INSERT INTO processing_ack (message_id, status, status_changed) VALUES ('missing', 'processing', '2026-07-29T00:00:00Z')",
+      )
+      .run();
+
+    let body: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    await handleGatewayDescribe(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      userId: 'feishu:ou_agent_claim',
+    });
+
+    expect(body?.requesterSource).toBe('agent-asserted');
+    expect((body?.requester as Record<string, unknown>)?.userId).toBe('feishu:ou_agent_claim');
+  });
+
+  it('fails closed to agent-asserted when processing rows contain mixed trusted users', async () => {
+    seedProcessingInbound({ id: 'alice', seq: 1, senderId: 'feishu:ou_alice' });
+    seedProcessingInbound({ id: 'bob', seq: 2, senderId: 'feishu:ou_bob' });
+
+    let body: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+
+    await handleGatewayDescribe(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      userId: 'feishu:ou_agent_claim',
+    });
+
+    expect(body?.requesterSource).toBe('agent-asserted');
+  });
+
   it('falls back to agent-asserted identity when no poll-loop identity is published', async () => {
     // clearRequestIdentity is already the default at test start.
     let body: Record<string, unknown> | undefined;
@@ -149,10 +285,10 @@ describe('erp gateway mcp tools', () => {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }) as typeof fetch;
 
-    const result = await handleGatewayDescribe(
-      configuredRuntime({ baseUrl: 'https://erp-gateway.example' }),
-      { userId: 'feishu:ou_123', channelType: 'feishu' },
-    );
+    const result = await handleGatewayDescribe(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      userId: 'feishu:ou_123',
+      channelType: 'feishu',
+    });
 
     expect(result.isError).toBeUndefined();
     expect(body?.requesterSource).toBe('agent-asserted');
@@ -177,10 +313,9 @@ describe('erp gateway mcp tools', () => {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }) as typeof fetch;
 
-    await handleGatewayDescribe(
-      configuredRuntime({ baseUrl: 'https://erp-gateway.example' }),
-      { userId: 'feishu:ou_agent_claim' },
-    );
+    await handleGatewayDescribe(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      userId: 'feishu:ou_agent_claim',
+    });
     expect(body?.requesterSource).toBe('agent-asserted');
   });
 
@@ -605,8 +740,7 @@ describe('erp gateway mcp tools', () => {
 
   it('emits an gateway_audit system message with a path-scoped input_hash', async () => {
     setRequestIdentity(sessionIdentity());
-    globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true }), { status: 200 })) as typeof fetch;
 
     // Run two memory calls with DIFFERENT payloads on the same namespace.
     // Under the old single-field hasher they'd collapse to the same hash.
@@ -621,8 +755,8 @@ describe('erp gateway mcp tools', () => {
     // And an /execute call to make sure cross-path collisions don't happen
     // either.
     await handleGatewayExecute(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
-      operation: 'sales.order.create',
-      input: { customerId: 'C-1' },
+      operation: 'feishu.bitable.record.create',
+      input: { resource: 'sales-orders', fields: { customerId: 'C-1' } },
     });
 
     const rows = getOutboundDb()
@@ -646,6 +780,7 @@ describe('erp gateway mcp tools', () => {
     expect(new Set(hashes).size).toBe(3);
     expect(auditPayloads[0]!.path).toBe('/memory/get');
     expect(auditPayloads[2]!.path).toBe('/execute');
+    expect(auditPayloads[2]!.logicalResource).toBe('sales-orders');
   });
 
   it('honors signingHeaders overrides', async () => {
@@ -751,6 +886,54 @@ describe('gateway contract hardening', () => {
     });
 
     expect(body?.idempotencyKey).toBeNull();
+  });
+
+  it('keeps a Bitable update confirmation request private and returns only the display preview to the model', async () => {
+    setRequestIdentity(sessionIdentity());
+    const bindingHash = `sha256:${'b'.repeat(64)}`;
+    const fullPreview = {
+      recordId: 'rec-preview-1',
+      diff: [{ field: '状态', before: '待办', after: '完成' }],
+      expectedRecordFingerprint: `sha256:${'a'.repeat(64)}`,
+      bindingHash,
+      confirmationRequest: 'gateway-signed-opaque-request',
+      expiresAt: Date.now() + 30_000,
+      auditId: 'preview-audit-1',
+    };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true, preview: fullPreview }), { status: 200 })) as typeof fetch;
+
+    const result = await handleGatewayExecute(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      operation: 'feishu.bitable.record.update',
+      input: { resource: 'pilot.records', recordId: 'rec-preview-1', fields: { 状态: '完成' } },
+      dryRun: true,
+    });
+
+    expect(result.isError).toBeUndefined();
+    const text = result.content[0]?.type === 'text' ? result.content[0].text : '{}';
+    const response = JSON.parse(text) as { preview: Record<string, unknown> };
+    expect(response.preview).not.toHaveProperty('confirmationRequest');
+    expect(text).not.toContain('gateway-signed-opaque-request');
+    expect(resolveGatewayConfirmationPreview('update', response.preview)).toEqual(fullPreview);
+  });
+
+  it('fails closed on a malformed Gateway-owned Bitable preview instead of exposing it to the model', async () => {
+    setRequestIdentity(sessionIdentity());
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: true, preview: { recordId: 'rec-preview-1' } }), {
+        status: 200,
+      })) as typeof fetch;
+
+    const result = await handleGatewayExecute(configuredRuntime({ baseUrl: 'https://erp-gateway.example' }), {
+      operation: 'feishu.bitable.record.delete',
+      input: { resource: 'pilot.records', recordId: 'rec-preview-1' },
+      dryRun: true,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.type === 'text' ? result.content[0].text : '').toContain(
+      'invalid or expired Bitable confirmation preview',
+    );
   });
 
   it('parses a structured error response into code/retryable for the agent', async () => {
@@ -1025,7 +1208,7 @@ describe('flushCompactionSummary (roadmap 4.1, ADR-0041)', () => {
     } as unknown as RunnerConfig;
   }
 
-  it('upserts conversation.summary under value.autoSummary for the captured user', async () => {
+  it('upserts under the PER-AGENT namespace for the captured user (ADR-0057)', async () => {
     let path: string | undefined;
     let body: Record<string, unknown> | undefined;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1038,7 +1221,10 @@ describe('flushCompactionSummary (roadmap 4.1, ADR-0041)', () => {
 
     expect(path).toContain('/memory/upsert');
     expect(body).toMatchObject({
-      namespace: 'conversation.summary',
+      // Regression (ADR-0057): a bare user-global 'conversation.summary'
+      // collapsed every agent the user talks to into one record — the
+      // Finance agent could recall the HR agent's compacted conversation.
+      namespace: 'conversation.summary.ag-frontdesk',
       subject: { type: 'user', id: 'feishu:ou_123' },
       value: { autoSummary: 'user asked about Q3 budget; decided to defer' },
       merge: true,

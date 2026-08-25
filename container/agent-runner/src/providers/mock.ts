@@ -1,17 +1,45 @@
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
+const MOCK_RESPONSE_START = '[mock-response]';
+const MOCK_RESPONSE_END = '[/mock-response]';
+
+/**
+ * Deterministic response selector used only by the offline `mock` provider.
+ * A marked response lets real-container E2E tests drive tool-style/A2A output
+ * without adding a live model or a test-only production environment variable.
+ */
+export function defaultMockResponse(prompt: string): string {
+  const start = prompt.indexOf(MOCK_RESPONSE_START);
+  const end = start === -1 ? -1 : prompt.indexOf(MOCK_RESPONSE_END, start + MOCK_RESPONSE_START.length);
+  if (start !== -1 && end !== -1) {
+    // formatter.ts HTML-escapes message text before it reaches a provider.
+    // Decode only the explicitly marked offline-test response so a test can
+    // ask the output parser to exercise its real <message to="…"> path.
+    return prompt
+      .slice(start + MOCK_RESPONSE_START.length, end)
+      .trim()
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&amp;', '&');
+  }
+  return `Mock response to: ${prompt.slice(0, 100)}`;
+}
+
 /**
  * Mock provider for testing. Returns canned responses.
  * Supports push() — queued messages produce additional results.
  */
 export class MockProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
+  readonly loadsWorkspaceInstructionsNatively = false;
 
   private responseFactory: (prompt: string) => string;
 
   constructor(_options: ProviderOptions = {}, responseFactory?: (prompt: string) => string) {
-    this.responseFactory = responseFactory ?? ((prompt) => `Mock response to: ${prompt.slice(0, 100)}`);
+    this.responseFactory = responseFactory ?? defaultMockResponse;
   }
 
   isSessionInvalid(_err: unknown): boolean {
