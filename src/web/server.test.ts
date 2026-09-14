@@ -69,6 +69,27 @@ async function rawGet(base: string, pathname: string, headers: IncomingHttpHeade
   });
 }
 
+// SSE frames are not guaranteed to land in one chunk — accumulate until the
+// caller has seen what it is waiting for, or the stream ends.
+async function readEventStreamUntil(
+  body: ReadableStream<Uint8Array>,
+  seen: (text: string) => boolean,
+): Promise<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  try {
+    while (!seen(text)) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    await reader.cancel();
+  }
+  return text;
+}
+
 function cookieValue(setCookie: string, name: string): string {
   const match = new RegExp(`(?:^|, )${name}=([A-Za-z0-9_-]+)`).exec(setCookie);
   if (!match?.[1]) throw new Error(`missing cookie ${name}: ${setCookie}`);
@@ -668,14 +689,11 @@ describe('Web HTTP authentication boundary', () => {
     });
     expect(stream.status).toBe(200);
     expect(stream.headers.get('content-type')).toContain('text/event-stream');
-    const reader = stream.body!.getReader();
-    const chunk = await reader.read();
-    const text = new TextDecoder().decode(chunk.value);
+    const text = await readEventStreamUntil(stream.body!, (buffered) => buffered.includes(second.event_id));
     expect(text).toContain(': connected');
     expect(text).toContain(second.event_id);
     expect(text).toContain('message-2');
     expect(text).not.toContain('message-1');
-    await reader.cancel();
 
     const browserStyleStream = await rawGet(base, '/api/events', {
       cookie,
