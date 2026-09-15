@@ -115,9 +115,7 @@ describe('processSigningProxyRequest (ADR-0034 security core)', () => {
 
     expect(result.httpStatus).toBe(200);
     expect(cap.fetches[0]?.url).toBe('http://127.0.0.1:8088/execute');
-    expect(signingProxyUpstreamBaseUrl('https://gateway.internal/api/')).toBe(
-      'https://gateway.internal/api',
-    );
+    expect(signingProxyUpstreamBaseUrl('https://gateway.internal/api/')).toBe('https://gateway.internal/api');
   });
 
   it('canonicalizes the signed+forwarded body, defeating a duplicate-key parser differential', async () => {

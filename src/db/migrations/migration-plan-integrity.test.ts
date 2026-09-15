@@ -26,9 +26,9 @@ describe('merged migration plan integrity', () => {
 
     runMigrations(db);
 
-    const names = (
-      db.prepare('SELECT name FROM schema_version ORDER BY version').all() as Array<{ name: string }>
-    ).map((row) => row.name);
+    const names = (db.prepare('SELECT name FROM schema_version ORDER BY version').all() as Array<{ name: string }>).map(
+      (row) => row.name,
+    );
     expect(names.slice(-EXPECTED_MERGED_TAIL.length)).toEqual(EXPECTED_MERGED_TAIL);
     expect(new Set(names).size).toBe(names.length);
     db.close();

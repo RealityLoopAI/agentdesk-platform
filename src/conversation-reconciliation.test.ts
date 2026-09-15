@@ -251,9 +251,7 @@ describe('Feishu conversation reconciliation', () => {
           WHERE id = 'session-before-reset'`,
       )
       .run('2026-01-01T00:01:00.000Z');
-    getDb()
-      .prepare('UPDATE conversation_lanes SET root_session_id = NULL WHERE id = ?')
-      .run(existingLane.id);
+    getDb().prepare('UPDATE conversation_lanes SET root_session_id = NULL WHERE id = ?').run(existingLane.id);
     createConversationBinding({
       laneId: existingLane.id,
       channelType: 'feishu',
@@ -279,10 +277,7 @@ describe('Feishu conversation reconciliation', () => {
       getDb().prepare('SELECT root_session_id FROM conversation_lanes WHERE id = ?').pluck().get(existingLane.id),
     ).toBe('session-after-reset');
     expect(
-      getDb()
-        .prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?')
-        .pluck()
-        .get('session-before-reset'),
+      getDb().prepare('SELECT conversation_lane_id FROM sessions WHERE id = ?').pluck().get('session-before-reset'),
     ).toBeNull();
     expect(getDb().prepare('SELECT COUNT(*) FROM conversation_lanes').pluck().get()).toBe(1);
     expect(getDb().prepare('SELECT COUNT(*) FROM conversation_bindings').pluck().get()).toBe(1);

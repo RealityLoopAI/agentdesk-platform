@@ -677,8 +677,7 @@ export async function submitWebConversationMessage(args: {
   if (!reserved.created) return receiptResponse(reserved.receipt, true);
 
   const user = getDb().prepare('SELECT display_name FROM users WHERE id = ?').get(args.userId) as
-    | { display_name: string | null }
-    | undefined;
+    { display_name: string | null } | undefined;
   if (!user) {
     completeWebMessageReceipt(reserved.receipt.id, 'failed', 'authentication_required');
     throw new WebConversationError(401, 'authentication_required');

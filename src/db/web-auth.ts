@@ -16,12 +16,7 @@ export interface AuthenticatedWebSession {
 }
 
 export type WebAuthStateErrorReason =
-  | 'state_missing'
-  | 'state_expired'
-  | 'state_used'
-  | 'browser_mismatch'
-  | 'code_replay'
-  | 'redirect_mismatch';
+  'state_missing' | 'state_expired' | 'state_used' | 'browser_mismatch' | 'code_replay' | 'redirect_mismatch';
 
 export class WebAuthStateError extends Error {
   constructor(readonly reason: WebAuthStateErrorReason) {
@@ -325,8 +320,7 @@ export function consumeWebAuthTransaction(args: {
 
   return db.transaction(() => {
     const transaction = db.prepare('SELECT * FROM web_auth_transactions WHERE state_hash = ?').get(stateHash) as
-      | WebAuthTransaction
-      | undefined;
+      WebAuthTransaction | undefined;
     if (!transaction) throw new WebAuthStateError('state_missing');
     if (transaction.used_at) throw new WebAuthStateError('state_used');
     if (now >= new Date(transaction.expires_at)) throw new WebAuthStateError('state_expired');

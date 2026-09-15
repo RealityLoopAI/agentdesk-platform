@@ -19,10 +19,7 @@ describe('Vision Archive pilot contract', () => {
   });
 
   it('contains no example archive result fields and requires turn-local evidence', () => {
-    const instructions = fs.readFileSync(
-      path.join(pilotDir, 'skills/vision-archive-query/instructions.md'),
-      'utf8',
-    );
+    const instructions = fs.readFileSync(path.join(pilotDir, 'skills/vision-archive-query/instructions.md'), 'utf8');
     for (const seededField of [
       'experiment_id',
       'experiment_name',

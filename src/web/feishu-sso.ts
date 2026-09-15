@@ -19,11 +19,7 @@ import type { WebConfig } from './config.js';
 const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
 
 export type FeishuSsoErrorReason =
-  | 'provider_rejected'
-  | 'provider_unavailable'
-  | 'provider_response_invalid'
-  | 'identity_missing'
-  | 'identity_conflict';
+  'provider_rejected' | 'provider_unavailable' | 'provider_response_invalid' | 'identity_missing' | 'identity_conflict';
 
 export class FeishuSsoError extends Error {
   constructor(readonly reason: FeishuSsoErrorReason) {

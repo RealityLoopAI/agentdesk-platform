@@ -41,14 +41,12 @@ export function createPendingGatewayConfirmation(args: CreatePendingGatewayConfi
 
 export function getPendingGatewayConfirmation(id: string): PendingGatewayConfirmation | undefined {
   return getDb().prepare('SELECT * FROM pending_gateway_confirmations WHERE confirmation_id = ?').get(id) as
-    | PendingGatewayConfirmation
-    | undefined;
+    PendingGatewayConfirmation | undefined;
 }
 
 export function getGatewayConfirmationByMessageOutId(messageOutId: string): PendingGatewayConfirmation | undefined {
   return getDb().prepare('SELECT * FROM pending_gateway_confirmations WHERE message_out_id = ?').get(messageOutId) as
-    | PendingGatewayConfirmation
-    | undefined;
+    PendingGatewayConfirmation | undefined;
 }
 
 export type ClaimGatewayConfirmationResult =

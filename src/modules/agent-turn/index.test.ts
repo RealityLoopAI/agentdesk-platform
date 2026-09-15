@@ -46,18 +46,14 @@ describe('agent_turn_resolved delivery action', () => {
     const unsubscribe = onAgentTurnResolved(observed);
     const handler = actions.get('agent_turn_resolved')!;
 
-    await handler(
-      { action: 'agent_turn_resolved', status: 'completed' },
-      { id: 'session-1' } as never,
-      {} as never,
-      { messageOutId: 'out-1', inReplyTo: null },
-    );
-    await handler(
-      { action: 'agent_turn_resolved', status: 'invented' },
-      { id: 'session-1' } as never,
-      {} as never,
-      { messageOutId: 'out-2', inReplyTo: 'in-2' },
-    );
+    await handler({ action: 'agent_turn_resolved', status: 'completed' }, { id: 'session-1' } as never, {} as never, {
+      messageOutId: 'out-1',
+      inReplyTo: null,
+    });
+    await handler({ action: 'agent_turn_resolved', status: 'invented' }, { id: 'session-1' } as never, {} as never, {
+      messageOutId: 'out-2',
+      inReplyTo: 'in-2',
+    });
 
     expect(observed).not.toHaveBeenCalled();
     unsubscribe();

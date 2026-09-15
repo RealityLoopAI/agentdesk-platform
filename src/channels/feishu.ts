@@ -1102,9 +1102,7 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
             filename: img.filename,
             data: img.data,
             threadId: firstId ? null : threadId,
-            idempotencyKey: message.source?.originId
-              ? `${message.source.messageId}-image-${imageIndex}`
-              : undefined,
+            idempotencyKey: message.source?.originId ? `${message.source.messageId}-image-${imageIndex}` : undefined,
           });
           const imgMsgId = imageDelivery.messageId;
           if (!firstId) firstId = imgMsgId;
@@ -1130,9 +1128,7 @@ function createAdapter(config: FeishuConfig): ChannelAdapter {
       const mirrorDeliveryId = message.source?.originId ? message.source.messageId : undefined;
       for (let index = 0; index < chunks.length; index += 1) {
         const replyThreadId = firstId ? null : index === 0 ? threadId : null;
-        const idempotencyKey = mirrorDeliveryId
-          ? feishuMirrorRequestUuid(mirrorDeliveryId, index)
-          : undefined;
+        const idempotencyKey = mirrorDeliveryId ? feishuMirrorRequestUuid(mirrorDeliveryId, index) : undefined;
         let messageId: string | undefined;
         if (renderAsMarkdownCard) {
           try {

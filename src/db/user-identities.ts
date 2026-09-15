@@ -60,8 +60,7 @@ export function getUserIdentity(key: UserIdentityKey): UserIdentity | undefined 
          AND identifier_type = ? AND external_subject = ?`,
     )
     .get(normalized.provider, normalized.providerScope, normalized.identifierType, normalized.externalSubject) as
-    | UserIdentity
-    | undefined;
+    UserIdentity | undefined;
 }
 
 export function getUserIdentityById(id: string): UserIdentity | undefined {

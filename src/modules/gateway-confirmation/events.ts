@@ -23,13 +23,9 @@ export interface GatewayConfirmationResolvedEvent {
   threadId: string | null;
 }
 
-export type GatewayConfirmationDeliveredListener = (
-  event: GatewayConfirmationDeliveredEvent,
-) => void | Promise<void>;
+export type GatewayConfirmationDeliveredListener = (event: GatewayConfirmationDeliveredEvent) => void | Promise<void>;
 
-export type GatewayConfirmationResolvedListener = (
-  event: GatewayConfirmationResolvedEvent,
-) => void | Promise<void>;
+export type GatewayConfirmationResolvedListener = (event: GatewayConfirmationResolvedEvent) => void | Promise<void>;
 
 const deliveredListeners = new Set<GatewayConfirmationDeliveredListener>();
 const resolvedListeners = new Set<GatewayConfirmationResolvedListener>();
@@ -41,9 +37,7 @@ const resolvedListeners = new Set<GatewayConfirmationResolvedListener>();
  * This event carries no approval or authorization capability. Callers must
  * treat correlationId as untrusted correlation-only metadata.
  */
-export function onGatewayConfirmationDelivered(
-  listener: GatewayConfirmationDeliveredListener,
-): () => void {
+export function onGatewayConfirmationDelivered(listener: GatewayConfirmationDeliveredListener): () => void {
   deliveredListeners.add(listener);
   return () => deliveredListeners.delete(listener);
 }
@@ -52,9 +46,7 @@ export function onGatewayConfirmationDelivered(
  * Notify listeners without allowing an auxiliary observer failure to turn a
  * successfully delivered confirmation into a delivery retry.
  */
-export async function emitGatewayConfirmationDelivered(
-  event: GatewayConfirmationDeliveredEvent,
-): Promise<void> {
+export async function emitGatewayConfirmationDelivered(event: GatewayConfirmationDeliveredEvent): Promise<void> {
   await Promise.allSettled([...deliveredListeners].map((listener) => listener(event)));
 }
 
@@ -66,9 +58,7 @@ export async function emitGatewayConfirmationDelivered(
  * release auxiliary local work, but authorization continues to rely on the
  * persisted Host confirmation and Worker response.
  */
-export function onGatewayConfirmationResolved(
-  listener: GatewayConfirmationResolvedListener,
-): () => void {
+export function onGatewayConfirmationResolved(listener: GatewayConfirmationResolvedListener): () => void {
   resolvedListeners.add(listener);
   return () => resolvedListeners.delete(listener);
 }
@@ -76,8 +66,6 @@ export function onGatewayConfirmationResolved(
 /**
  * Isolate terminal-state observers from the authoritative confirmation path.
  */
-export async function emitGatewayConfirmationResolved(
-  event: GatewayConfirmationResolvedEvent,
-): Promise<void> {
+export async function emitGatewayConfirmationResolved(event: GatewayConfirmationResolvedEvent): Promise<void> {
   await Promise.allSettled([...resolvedListeners].map((listener) => listener(event)));
 }

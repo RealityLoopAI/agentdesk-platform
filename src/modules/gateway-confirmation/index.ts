@@ -434,10 +434,7 @@ function notifyWeb(row: PendingGatewayConfirmation, eventType: 'available' | 're
   });
 }
 
-async function notifyResolved(
-  row: PendingGatewayConfirmation,
-  status: GatewayConfirmationResolution,
-): Promise<void> {
+async function notifyResolved(row: PendingGatewayConfirmation, status: GatewayConfirmationResolution): Promise<void> {
   await emitGatewayConfirmationResolved({
     confirmationId: row.confirmation_id,
     kind: row.kind,
@@ -726,9 +723,7 @@ async function handleGatewayConfirmationIntent(
       ...(intent.kind === 'create'
         ? {
             resource: intent.preview.resource,
-            ...(intent.preview.correlationId === undefined
-              ? {}
-              : { correlationId: intent.preview.correlationId }),
+            ...(intent.preview.correlationId === undefined ? {} : { correlationId: intent.preview.correlationId }),
           }
         : {}),
     });

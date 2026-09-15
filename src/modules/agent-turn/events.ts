@@ -8,9 +8,7 @@ export interface AgentTurnResolvedEvent {
   retryable: boolean;
 }
 
-export type AgentTurnResolvedListener = (
-  event: AgentTurnResolvedEvent,
-) => void | Promise<void>;
+export type AgentTurnResolvedListener = (event: AgentTurnResolvedEvent) => void | Promise<void>;
 
 const listeners = new Set<AgentTurnResolvedListener>();
 

@@ -263,8 +263,7 @@ export function reserveCrossChannelDelivery(args: {
 
 export function getCrossChannelDelivery(id: string): CrossChannelDelivery | undefined {
   return getDb().prepare('SELECT * FROM cross_channel_deliveries WHERE id = ?').get(id) as
-    | CrossChannelDelivery
-    | undefined;
+    CrossChannelDelivery | undefined;
 }
 
 export function listDueCrossChannelDeliveries(

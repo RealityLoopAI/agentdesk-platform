@@ -366,8 +366,7 @@ export function createWebRequestHandler(
           const user = getDb()
             .prepare('SELECT id, kind, display_name FROM users WHERE id = ?')
             .get(authenticated.session.user_id) as
-            | { id: string; kind: string; display_name: string | null }
-            | undefined;
+            { id: string; kind: string; display_name: string | null } | undefined;
           if (!user) throw new WebRequestError(401, 'authentication_required');
           json(res, 200, {
             user: { id: user.id, kind: user.kind, displayName: user.display_name },

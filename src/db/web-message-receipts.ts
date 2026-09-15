@@ -92,8 +92,7 @@ export function completeWebMessageReceipt(
     )
     .run(status, completedAt, failureCode, receiptId);
   const row = getDb().prepare('SELECT * FROM web_message_receipts WHERE id = ?').get(receiptId) as
-    | WebMessageReceipt
-    | undefined;
+    WebMessageReceipt | undefined;
   if (!row) throw new Error('web message receipt disappeared');
   return row;
 }

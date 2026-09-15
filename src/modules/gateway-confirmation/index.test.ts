@@ -60,10 +60,7 @@ const { runMigrations } = await import('../../db/migrations/index.js');
 const { createAgentGroup } = await import('../../db/agent-groups.js');
 const { createSession } = await import('../../db/sessions.js');
 const { getPendingGatewayConfirmation } = await import('../../db/gateway-confirmations.js');
-const {
-  onGatewayConfirmationDelivered,
-  onGatewayConfirmationResolved,
-} = await import('./events.js');
+const { onGatewayConfirmationDelivered, onGatewayConfirmationResolved } = await import('./events.js');
 
 const HASH_A = `sha256:${'a'.repeat(64)}`;
 const HASH_B = `sha256:${'b'.repeat(64)}`;
@@ -479,11 +476,7 @@ describe('Host-mediated Gateway confirmation broker', () => {
         { messageOutId: 'confirm-resolved', inReplyTo: 'input-1' },
       );
       db.close();
-      await broker.resolveGatewayConfirmationDecision(
-        'confirm-resolved',
-        'ou_requester',
-        'approve',
-      );
+      await broker.resolveGatewayConfirmationDecision('confirm-resolved', 'ou_requester', 'approve');
       expect(resolved).toHaveBeenCalledWith({
         confirmationId: 'confirm-resolved',
         kind: 'create',

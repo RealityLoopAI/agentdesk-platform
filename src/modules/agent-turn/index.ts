@@ -17,11 +17,7 @@ async function handleAgentTurnResolved(
 ): Promise<void> {
   const status = content.status;
   const sourceMessageId = context?.inReplyTo;
-  if (
-    typeof status !== 'string' ||
-    !TERMINAL_STATUSES.has(status as AgentTurnResolutionStatus) ||
-    !sourceMessageId
-  ) {
+  if (typeof status !== 'string' || !TERMINAL_STATUSES.has(status as AgentTurnResolutionStatus) || !sourceMessageId) {
     return;
   }
 
